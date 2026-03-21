@@ -1,0 +1,19 @@
+{
+  "name": "@autoresearch/orchestrator",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": "./src/index.ts",
+  "scripts": {
+    "typecheck": "tsc --project tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@autoresearch/context-manager": "workspace:*",
+    "@autoresearch/domain": "workspace:*",
+    "@autoresearch/event-log": "workspace:*",
+    "@autoresearch/judge": "workspace:*",
+    "@autoresearch/report-builder": "workspace:*",
+    "@autoresearch/state-store": "workspace:*",
+    "@autoresearch/worker-adapters": "workspace:*"
+  }
+}

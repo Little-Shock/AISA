@@ -1,0 +1,22 @@
+{
+  "branch_id": "branch_demo",
+  "findings": [
+    {
+      "type": "fact",
+      "content": "NDJSON events are sufficient for early replay and audit needs.",
+      "evidence": ["fixture"]
+    }
+  ],
+  "questions": [
+    "When should a branch be respawned instead of rerun?"
+  ],
+  "artifacts": [
+    {
+      "type": "report",
+      "path": "artifacts/goals/goal_demo/branches/branch_demo/output/report.md"
+    }
+  ],
+  "recommended_next_steps": [
+    "Connect the orchestrator loop after the API and planner are stable."
+  ]
+}

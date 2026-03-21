@@ -1,0 +1,19 @@
+{
+  "title": "Bootstrap the AutoResearch Swarm Dashboard repository",
+  "description": "Create the Milestone 0 skeleton for the orchestration control plane.",
+  "success_criteria": [
+    "Workspace exists",
+    "Core domain types are defined",
+    "A sample plan can be generated"
+  ],
+  "constraints": [
+    "Follow the PRD module boundaries",
+    "Prefer file-based runtime artifacts"
+  ],
+  "owner_id": "owner_demo",
+  "budget": {
+    "tokens": 2000000,
+    "time_minutes": 120,
+    "max_concurrency": 2
+  }
+}

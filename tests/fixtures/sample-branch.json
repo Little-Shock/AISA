@@ -1,0 +1,10 @@
+{
+  "id": "branch_demo",
+  "goal_id": "goal_demo",
+  "parent_branch_id": null,
+  "hypothesis": "A file-first runtime is enough for Milestone 0.",
+  "assigned_worker": "mock",
+  "status": "queued",
+  "score": null,
+  "context_snapshot_id": "ctx_demo_001"
+}
