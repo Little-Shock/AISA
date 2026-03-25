@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readdir, readFile } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, writeFile } from "node:fs/promises";
+import { spawn } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -31,6 +32,7 @@ type ScenarioDriver =
   | "happy_path"
   | "research_stall"
   | "research_command_failure"
+  | "execution_checkpoint_blocked_dirty_workspace"
   | "execution_parse_failure"
   | "orphaned_running_attempt";
 
@@ -99,8 +101,21 @@ class ScenarioAdapter {
       );
     }
 
+    if (
+      this.driver === "execution_checkpoint_blocked_dirty_workspace" &&
+      input.attempt.attempt_type === "execution"
+    ) {
+      await writeFile(
+        join(input.run.workspace_root, "execution-change.md"),
+        `execution change from ${input.attempt.id}\n`,
+        "utf8"
+      );
+    }
+
     const writeback =
-      this.driver === "happy_path" || this.driver === "execution_parse_failure"
+      this.driver === "happy_path" ||
+      this.driver === "execution_parse_failure" ||
+      this.driver === "execution_checkpoint_blocked_dirty_workspace"
         ? this.buildHappyPathWriteback(input.attempt)
         : this.buildStuckWriteback(nextCount);
 
@@ -287,6 +302,10 @@ async function runCase(scenario: ScenarioCase): Promise<ScenarioObservation> {
   const rootDir = await mkdtemp(join(tmpdir(), `aisa-${scenario.id}-`));
   const { run, workspacePaths } = await bootstrapRun(rootDir, scenario.id);
 
+  if (scenario.driver === "execution_checkpoint_blocked_dirty_workspace") {
+    await initializeGitRepo(rootDir, true);
+  }
+
   if (scenario.driver === "orphaned_running_attempt") {
     await seedOrphanedRunningAttempt({ run, workspacePaths });
   }
@@ -303,6 +322,49 @@ async function runCase(scenario: ScenarioCase): Promise<ScenarioObservation> {
   assert.equal(persistedRun.id, run.id, `${scenario.id}: persisted run missing`);
 
   return collectObservation(workspacePaths, run.id);
+}
+
+async function initializeGitRepo(rootDir: string, leaveDirty: boolean): Promise<void> {
+  await writeFile(
+    join(rootDir, ".gitignore"),
+    ["runs/", "state/", "events/", "artifacts/", "reports/", "plans/"].join("\n") + "\n",
+    "utf8"
+  );
+  await writeFile(join(rootDir, "README.md"), "# temp runtime repo\n", "utf8");
+  await runCommand(rootDir, ["git", "-C", rootDir, "init"]);
+  await runCommand(rootDir, ["git", "-C", rootDir, "config", "user.name", "AISA Smoke"]);
+  await runCommand(rootDir, ["git", "-C", rootDir, "config", "user.email", "aisa-smoke@example.com"]);
+  await runCommand(rootDir, ["git", "-C", rootDir, "add", "."]);
+  await runCommand(rootDir, ["git", "-C", rootDir, "commit", "-m", "test: seed runtime repo"]);
+
+  if (leaveDirty) {
+    await writeFile(join(rootDir, "README.md"), "# temp runtime repo\n\nleft dirty\n", "utf8");
+  }
+}
+
+async function runCommand(rootDir: string, args: string[]): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    const [command, ...commandArgs] = args;
+    const child = spawn(command!, commandArgs, {
+      cwd: rootDir,
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+    let stderr = "";
+    child.stderr.on("data", (chunk) => {
+      stderr += String(chunk);
+    });
+    child.on("error", (error) => {
+      reject(error);
+    });
+    child.on("close", (code) => {
+      if ((code ?? 1) !== 0) {
+        reject(new Error(stderr || `Command failed: ${args.join(" ")}`));
+        return;
+      }
+
+      resolve();
+    });
+  });
 }
 
 async function collectObservation(

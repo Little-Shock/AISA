@@ -41,6 +41,7 @@ import {
   listRuns,
   listRunSteers,
   listSteers,
+  resolveAttemptPaths,
   resolveBranchArtifactPaths,
   saveAttempt,
   saveAttemptContext,
@@ -59,6 +60,11 @@ import {
 } from "@autoresearch/state-store";
 import { ContextManager } from "@autoresearch/context-manager";
 import { CodexCliWorkerAdapter } from "@autoresearch/worker-adapters";
+import {
+  captureAttemptCheckpointPreflight,
+  maybeCreateVerifiedExecutionCheckpoint,
+  type AttemptCheckpointOutcome
+} from "./git-checkpoint.js";
 
 export class Orchestrator {
   private timer: NodeJS.Timeout | null = null;
@@ -547,6 +553,7 @@ export class Orchestrator {
   private async executeAttempt(runId: string, attemptId: string): Promise<void> {
     const run = await getRun(this.workspacePaths, runId);
     let attempt = await getAttempt(this.workspacePaths, runId, attemptId);
+    const attemptPaths = resolveAttemptPaths(this.workspacePaths, runId, attemptId);
     const steers = await listRunSteers(this.workspacePaths, runId);
     const attempts = await listAttempts(this.workspacePaths, runId);
     const current = await getCurrentDecision(this.workspacePaths, runId);
@@ -604,6 +611,10 @@ export class Orchestrator {
       })
     );
     await saveAttemptContext(this.workspacePaths, runId, attempt.id, context);
+    const checkpointPreflight = await captureAttemptCheckpointPreflight({
+      attempt,
+      attemptPaths
+    });
     await appendRunJournal(
       this.workspacePaths,
       createRunJournalEntry({
@@ -641,7 +652,7 @@ export class Orchestrator {
       await saveAttempt(this.workspacePaths, attempt);
 
       const completedAttempts = [...attempts.filter((item) => item.id !== attempt.id), attempt];
-      const nextCurrent = this.buildNextCurrentDecision({
+      let nextCurrent = this.buildNextCurrentDecision({
         run,
         current,
         attempt,
@@ -649,6 +660,18 @@ export class Orchestrator {
         evaluation,
         result: execution.writeback
       });
+      const checkpointOutcome = await maybeCreateVerifiedExecutionCheckpoint({
+        run,
+        attempt,
+        evaluation,
+        attemptPaths,
+        preflight: checkpointPreflight
+      });
+      nextCurrent = this.applyCheckpointOutcomeToCurrentDecision(
+        nextCurrent,
+        attempt,
+        checkpointOutcome
+      );
       await saveCurrentDecision(this.workspacePaths, nextCurrent);
       await saveRunReport(
         this.workspacePaths,
@@ -678,6 +701,7 @@ export class Orchestrator {
           }
         })
       );
+      await this.appendCheckpointJournal(runId, attempt.id, checkpointOutcome);
     } catch (error) {
       attempt = updateAttempt(attempt, {
         status: "failed",
@@ -708,6 +732,70 @@ export class Orchestrator {
         })
       );
     }
+  }
+
+  private applyCheckpointOutcomeToCurrentDecision(
+    current: CurrentDecision,
+    attempt: Attempt,
+    checkpointOutcome: AttemptCheckpointOutcome
+  ): CurrentDecision {
+    if (checkpointOutcome.status !== "blocked") {
+      return current;
+    }
+
+    return updateCurrentDecision(current, {
+      run_status: "waiting_steer",
+      latest_attempt_id: attempt.id,
+      recommended_next_action: "wait_for_human",
+      recommended_attempt_type: attempt.attempt_type,
+      summary: checkpointOutcome.message,
+      blocking_reason: checkpointOutcome.message,
+      waiting_for_human: true
+    });
+  }
+
+  private async appendCheckpointJournal(
+    runId: string,
+    attemptId: string,
+    checkpointOutcome: AttemptCheckpointOutcome
+  ): Promise<void> {
+    if (checkpointOutcome.status === "not_applicable") {
+      return;
+    }
+
+    if (checkpointOutcome.status === "created") {
+      await appendRunJournal(
+        this.workspacePaths,
+        createRunJournalEntry({
+          run_id: runId,
+          attempt_id: attemptId,
+          type: "attempt.checkpoint.created",
+          payload: {
+            commit_sha: checkpointOutcome.commit.sha,
+            commit_message: checkpointOutcome.commit.message,
+            artifact_path: checkpointOutcome.artifact_path
+          }
+        })
+      );
+      return;
+    }
+
+    await appendRunJournal(
+      this.workspacePaths,
+      createRunJournalEntry({
+        run_id: runId,
+        attempt_id: attemptId,
+        type:
+          checkpointOutcome.status === "blocked"
+            ? "attempt.checkpoint.blocked"
+            : "attempt.checkpoint.skipped",
+        payload: {
+          reason: checkpointOutcome.reason,
+          message: checkpointOutcome.message,
+          artifact_path: checkpointOutcome.artifact_path
+        }
+      })
+    );
   }
 
   private buildPlannedAttemptObjective(

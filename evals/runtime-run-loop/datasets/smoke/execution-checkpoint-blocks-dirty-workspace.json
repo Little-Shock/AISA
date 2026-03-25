@@ -1,0 +1,21 @@
+{
+  "id": "execution-checkpoint-blocks-dirty-workspace",
+  "description": "A verified execution attempt must pause for human review instead of auto-committing when the workspace was already dirty before execution started.",
+  "driver": "execution_checkpoint_blocked_dirty_workspace",
+  "max_ticks": 5,
+  "expected": {
+    "run_status": "waiting_steer",
+    "waiting_for_human": true,
+    "recommended_next_action": "wait_for_human",
+    "attempt_types": ["research", "execution"],
+    "attempt_statuses": ["completed", "completed"],
+    "verification_statuses": ["not_applicable", "passed"],
+    "required_journal_types": ["attempt.completed", "attempt.checkpoint.blocked"],
+    "required_journal_counts": {
+      "attempt.started": 2,
+      "attempt.completed": 2,
+      "attempt.checkpoint.blocked": 1
+    },
+    "blocking_reason_includes": "clean git workspace"
+  }
+}
