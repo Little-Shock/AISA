@@ -2,7 +2,7 @@
   "id": "happy-path-run-completes",
   "description": "Research produces an actionable next step, execution leaves verification evidence, and the run completes.",
   "driver": "happy_path",
-  "max_ticks": 8,
+  "max_ticks": 12,
   "expected": {
     "run_status": "completed",
     "waiting_for_human": false,

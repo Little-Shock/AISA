@@ -11,6 +11,7 @@
     "smoke": "tsx scripts/smoke-plan.ts",
     "verify:runtime": "tsx scripts/verify-run-loop.ts",
     "verify:drive-run": "tsx scripts/verify-drive-run.ts",
+    "verify:run-api": "tsx scripts/verify-run-detail-api.ts",
     "verify:worker-adapter": "tsx scripts/verify-worker-adapter.ts",
     "verify:self-bootstrap": "tsx scripts/verify-self-bootstrap.ts",
     "bootstrap:self": "tsx scripts/bootstrap-self-run.ts",

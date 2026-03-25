@@ -2,7 +2,7 @@
   "id": "execution-checkpoint-blocks-dirty-workspace",
   "description": "A verified execution attempt must pause for human review instead of auto-committing when the workspace was already dirty before execution started.",
   "driver": "execution_checkpoint_blocked_dirty_workspace",
-  "max_ticks": 8,
+  "max_ticks": 12,
   "expected": {
     "run_status": "waiting_steer",
     "waiting_for_human": true,

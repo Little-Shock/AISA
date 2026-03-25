@@ -25,6 +25,9 @@ import { buildSelfBootstrapRunTemplate, generateInitialPlan } from "@autoresearc
 import {
   appendRunJournal,
   ensureWorkspace,
+  getAttemptEvaluation,
+  getAttemptResult,
+  getAttemptRuntimeVerification,
   getCurrentDecision,
   getBranch,
   getContextBoard,
@@ -56,18 +59,26 @@ import { CodexCliWorkerAdapter, loadCodexCliConfig } from "@autoresearch/worker-
 const currentDir = dirname(fileURLToPath(import.meta.url));
 const repositoryRoot = join(currentDir, "..", "..", "..");
 loadEnv({ path: join(repositoryRoot, ".env") });
-const workspacePaths = resolveWorkspacePaths(repositoryRoot);
-const contextManager = new ContextManager();
-const adapter = new CodexCliWorkerAdapter(loadCodexCliConfig(process.env));
-const orchestrator = new Orchestrator(workspacePaths, adapter);
 
-export async function buildServer() {
+export async function buildServer(
+  options: {
+    workspaceRoot?: string;
+    startOrchestrator?: boolean;
+  } = {}
+) {
+  const runtimeRoot = options.workspaceRoot ?? repositoryRoot;
+  const workspacePaths = resolveWorkspacePaths(runtimeRoot);
+  const contextManager = new ContextManager();
+  const adapter = new CodexCliWorkerAdapter(loadCodexCliConfig(process.env));
+  const orchestrator = new Orchestrator(workspacePaths, adapter);
   const app = Fastify({
     logger: true
   });
 
   await ensureWorkspace(workspacePaths);
-  orchestrator.start();
+  if (options.startOrchestrator !== false) {
+    orchestrator.start();
+  }
   await app.register(cors, {
     origin: true
   });
@@ -114,11 +125,25 @@ export async function buildServer() {
         listRunJournal(workspacePaths, runId),
         getRunReport(workspacePaths, runId)
       ]);
+      const attemptDetails = await Promise.all(
+        attempts.map(async (attempt) => ({
+          attempt,
+          result: await getAttemptResult(workspacePaths, runId, attempt.id),
+          evaluation: await getAttemptEvaluation(workspacePaths, runId, attempt.id),
+          runtime_verification: await getAttemptRuntimeVerification(
+            workspacePaths,
+            runId,
+            attempt.id
+          ),
+          journal: journal.filter((entry) => entry.attempt_id === attempt.id)
+        }))
+      );
 
       return {
         run,
         current,
         attempts,
+        attempt_details: attemptDetails,
         steers,
         journal,
         report
@@ -167,7 +192,7 @@ export async function buildServer() {
       seed_steer: true
     };
     const template = buildSelfBootstrapRunTemplate({
-      workspaceRoot: repositoryRoot,
+      workspaceRoot: runtimeRoot,
       ownerId: body.owner_id,
       focus: body.focus
     });
