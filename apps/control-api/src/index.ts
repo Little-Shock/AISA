@@ -4,11 +4,17 @@ import cors from "@fastify/cors";
 import { config as loadEnv } from "dotenv";
 import Fastify from "fastify";
 import {
+  CreateRunInputSchema,
   CreateGoalInputSchema,
   createBranch,
+  createCurrentDecision,
   createEvent,
   createGoal,
+  createRun,
+  createRunJournalEntry,
+  createRunSteer,
   createSteer,
+  updateCurrentDecision,
   updateBranch,
   updateGoal
 } from "@autoresearch/domain";
@@ -17,21 +23,32 @@ import { appendEvent, listEvents } from "@autoresearch/event-log";
 import { Orchestrator } from "@autoresearch/orchestrator";
 import { generateInitialPlan } from "@autoresearch/planner";
 import {
+  appendRunJournal,
   ensureWorkspace,
+  getCurrentDecision,
   getBranch,
   getContextBoard,
   getGoal,
   getPlanArtifacts,
   getReport,
+  getRun,
+  getRunReport,
   getWriteback,
+  listAttempts,
   listBranches,
   listGoals,
+  listRunJournal,
+  listRuns,
+  listRunSteers,
   listSteers,
   listWorkerRuns,
   resolveWorkspacePaths,
+  saveCurrentDecision,
   saveBranch,
   saveGoal,
   savePlanArtifacts,
+  saveRun,
+  saveRunSteer,
   saveSteer
 } from "@autoresearch/state-store";
 import { CodexCliWorkerAdapter, loadCodexCliConfig } from "@autoresearch/worker-adapters";
@@ -64,6 +81,169 @@ export async function buildServer() {
     codex_command: process.env.CODEX_CLI_COMMAND ?? "codex",
     codex_model: process.env.CODEX_MODEL ?? null
   }));
+
+  app.get("/runs", async () => {
+    const runs = await listRuns(workspacePaths);
+    const data = await Promise.all(
+      runs.map(async (run) => {
+        const [current, attempts] = await Promise.all([
+          getCurrentDecision(workspacePaths, run.id),
+          listAttempts(workspacePaths, run.id)
+        ]);
+
+        return {
+          run,
+          current,
+          attempt_count: attempts.length
+        };
+      })
+    );
+
+    return { runs: data };
+  });
+
+  app.get("/runs/:runId", async (request, reply) => {
+    const { runId } = request.params as { runId: string };
+
+    try {
+      const [run, current, attempts, steers, journal, report] = await Promise.all([
+        getRun(workspacePaths, runId),
+        getCurrentDecision(workspacePaths, runId),
+        listAttempts(workspacePaths, runId),
+        listRunSteers(workspacePaths, runId),
+        listRunJournal(workspacePaths, runId),
+        getRunReport(workspacePaths, runId)
+      ]);
+
+      return {
+        run,
+        current,
+        attempts,
+        steers,
+        journal,
+        report
+      };
+    } catch {
+      return reply.code(404).send({ message: `Run ${runId} not found` });
+    }
+  });
+
+  app.post("/runs", async (request, reply) => {
+    const input = CreateRunInputSchema.parse(request.body);
+    const run = createRun(input);
+    const current = createCurrentDecision({
+      run_id: run.id,
+      run_status: "draft",
+      summary: "Run created. Waiting for first attempt."
+    });
+
+    await saveRun(workspacePaths, run);
+    await saveCurrentDecision(workspacePaths, current);
+    await appendRunJournal(
+      workspacePaths,
+      createRunJournalEntry({
+        run_id: run.id,
+        type: "run.created",
+        payload: {
+          title: run.title,
+          owner_id: run.owner_id
+        }
+      })
+    );
+
+    return reply.code(201).send({ run, current });
+  });
+
+  app.post("/runs/:runId/launch", async (request, reply) => {
+    const { runId } = request.params as { runId: string };
+
+    try {
+      await getRun(workspacePaths, runId);
+      const current =
+        (await getCurrentDecision(workspacePaths, runId)) ??
+        createCurrentDecision({
+          run_id: runId,
+          run_status: "draft"
+        });
+
+      const nextCurrent = updateCurrentDecision(current, {
+        run_status: "running",
+        waiting_for_human: false,
+        blocking_reason: null,
+        recommended_next_action:
+          current.recommended_next_action ?? "start_first_attempt",
+        recommended_attempt_type:
+          current.recommended_attempt_type ?? "research",
+        summary:
+          current.latest_attempt_id === null
+            ? "Run launched. Loop will create the first attempt."
+            : "Run resumed. Loop will continue from the latest decision."
+      });
+
+      await saveCurrentDecision(workspacePaths, nextCurrent);
+      await appendRunJournal(
+        workspacePaths,
+        createRunJournalEntry({
+          run_id: runId,
+          type: "run.launched",
+          payload: {}
+        })
+      );
+
+      return { current: nextCurrent };
+    } catch {
+      return reply.code(404).send({ message: `Run ${runId} not found` });
+    }
+  });
+
+  app.post("/runs/:runId/steers", async (request, reply) => {
+    const { runId } = request.params as { runId: string };
+    const body = request.body as {
+      content: string;
+      attempt_id?: string | null;
+    };
+
+    try {
+      await getRun(workspacePaths, runId);
+      const runSteer = createRunSteer({
+        run_id: runId,
+        attempt_id: body.attempt_id ?? null,
+        content: body.content
+      });
+      await saveRunSteer(workspacePaths, runSteer);
+
+      const current =
+        (await getCurrentDecision(workspacePaths, runId)) ??
+        createCurrentDecision({
+          run_id: runId,
+          run_status: "draft"
+        });
+      const nextCurrent = updateCurrentDecision(current, {
+        run_status: "running",
+        waiting_for_human: false,
+        blocking_reason: null,
+        recommended_next_action: "apply_steer",
+        summary: "Steer queued. Loop will use it in the next attempt."
+      });
+      await saveCurrentDecision(workspacePaths, nextCurrent);
+
+      await appendRunJournal(
+        workspacePaths,
+        createRunJournalEntry({
+          run_id: runId,
+          attempt_id: runSteer.attempt_id,
+          type: "run.steer.queued",
+          payload: {
+            content: runSteer.content
+          }
+        })
+      );
+
+      return reply.code(201).send({ steer: runSteer, current: nextCurrent });
+    } catch {
+      return reply.code(404).send({ message: `Run ${runId} not found` });
+    }
+  });
 
   app.get("/goals", async () => {
     const goals = await listGoals(workspacePaths);

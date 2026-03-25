@@ -12,6 +12,15 @@ export const GoalStatusSchema = z.enum([
   "cancelled"
 ]);
 
+export const RunStatusSchema = z.enum([
+  "draft",
+  "running",
+  "waiting_steer",
+  "completed",
+  "failed",
+  "cancelled"
+]);
+
 export const BranchStatusSchema = z.enum([
   "created",
   "queued",
@@ -21,6 +30,17 @@ export const BranchStatusSchema = z.enum([
   "kept",
   "discarded",
   "respawned",
+  "failed",
+  "stopped"
+]);
+
+export const AttemptTypeSchema = z.enum(["research", "execution"]);
+
+export const AttemptStatusSchema = z.enum([
+  "created",
+  "queued",
+  "running",
+  "completed",
   "failed",
   "stopped"
 ]);
@@ -61,9 +81,31 @@ export const GoalSchema = z.object({
   updated_at: z.string().datetime()
 });
 
+export const RunSchema = z.object({
+  id: z.string(),
+  title: z.string().min(1),
+  description: z.string().min(1),
+  success_criteria: z.array(z.string().min(1)).min(1),
+  constraints: z.array(z.string().min(1)).default([]),
+  owner_id: z.string(),
+  workspace_root: z.string().min(1),
+  budget: BudgetSchema,
+  created_at: z.string().datetime(),
+  updated_at: z.string().datetime()
+});
+
 export const CreateGoalInputSchema = GoalSchema.omit({
   id: true,
   status: true,
+  created_at: true,
+  updated_at: true
+}).extend({
+  workspace_root: z.string().min(1).optional(),
+  budget: BudgetSchema.optional()
+});
+
+export const CreateRunInputSchema = RunSchema.omit({
+  id: true,
   created_at: true,
   updated_at: true
 }).extend({
@@ -104,6 +146,69 @@ export const WorkerRunSchema = z.object({
   }),
   artifact_dir: z.string(),
   writeback_file: z.string().nullable()
+});
+
+export const AttemptSchema = z.object({
+  id: z.string(),
+  run_id: z.string(),
+  attempt_type: AttemptTypeSchema,
+  status: AttemptStatusSchema,
+  worker: z.string().min(1),
+  objective: z.string().min(1),
+  success_criteria: z.array(z.string().min(1)).min(1),
+  workspace_root: z.string().min(1),
+  input_context_ref: z.string().nullable(),
+  result_ref: z.string().nullable(),
+  evaluation_ref: z.string().nullable(),
+  created_at: z.string().datetime(),
+  started_at: z.string().datetime().nullable(),
+  ended_at: z.string().datetime().nullable(),
+  updated_at: z.string().datetime()
+});
+
+export const CurrentDecisionSchema = z.object({
+  run_id: z.string(),
+  run_status: RunStatusSchema,
+  best_attempt_id: z.string().nullable(),
+  latest_attempt_id: z.string().nullable(),
+  recommended_next_action: z.string().nullable(),
+  recommended_attempt_type: AttemptTypeSchema.nullable(),
+  summary: z.string(),
+  blocking_reason: z.string().nullable(),
+  waiting_for_human: z.boolean(),
+  updated_at: z.string().datetime()
+});
+
+export const AttemptEvaluationSchema = z.object({
+  attempt_id: z.string(),
+  run_id: z.string(),
+  goal_progress: z.number().min(0).max(1),
+  evidence_quality: z.number().min(0).max(1),
+  verification_status: z.enum(["passed", "failed", "not_applicable"]),
+  recommendation: z.enum(["continue", "wait_human", "complete", "retry"]),
+  suggested_attempt_type: AttemptTypeSchema.nullable(),
+  rationale: z.string().min(1),
+  missing_evidence: z.array(z.string().min(1)).default([]),
+  created_at: z.string().datetime()
+});
+
+export const RunSteerSchema = z.object({
+  id: z.string(),
+  run_id: z.string(),
+  attempt_id: z.string().nullable(),
+  content: z.string().min(1),
+  status: SteerStatusSchema,
+  created_at: z.string().datetime(),
+  updated_at: z.string().datetime()
+});
+
+export const RunJournalEntrySchema = z.object({
+  id: z.string(),
+  run_id: z.string(),
+  attempt_id: z.string().nullable(),
+  ts: z.string().datetime(),
+  type: z.string().min(1),
+  payload: z.record(z.unknown())
 });
 
 export const SteerSchema = z.object({
@@ -218,8 +323,18 @@ export type BranchStatus = z.infer<typeof BranchStatusSchema>;
 export type WorkerRunState = z.infer<typeof WorkerRunStateSchema>;
 export type Goal = z.infer<typeof GoalSchema>;
 export type CreateGoalInput = z.infer<typeof CreateGoalInputSchema>;
+export type RunStatus = z.infer<typeof RunStatusSchema>;
+export type AttemptType = z.infer<typeof AttemptTypeSchema>;
+export type AttemptStatus = z.infer<typeof AttemptStatusSchema>;
+export type Run = z.infer<typeof RunSchema>;
+export type CreateRunInput = z.infer<typeof CreateRunInputSchema>;
 export type Branch = z.infer<typeof BranchSchema>;
 export type WorkerRun = z.infer<typeof WorkerRunSchema>;
+export type Attempt = z.infer<typeof AttemptSchema>;
+export type CurrentDecision = z.infer<typeof CurrentDecisionSchema>;
+export type AttemptEvaluation = z.infer<typeof AttemptEvaluationSchema>;
+export type RunSteer = z.infer<typeof RunSteerSchema>;
+export type RunJournalEntry = z.infer<typeof RunJournalEntrySchema>;
 export type Steer = z.infer<typeof SteerSchema>;
 export type Event = z.infer<typeof EventSchema>;
 export type BranchSpec = z.infer<typeof BranchSpecSchema>;
@@ -255,6 +370,32 @@ export function createGoal(input: CreateGoalInput): Goal {
 export function updateGoal(goal: Goal, patch: Partial<Goal>): Goal {
   return GoalSchema.parse({
     ...goal,
+    ...patch,
+    updated_at: new Date().toISOString()
+  });
+}
+
+export function createRun(input: CreateRunInput): Run {
+  const budget = input.budget ?? {
+    tokens: 2_000_000,
+    time_minutes: 180,
+    max_concurrency: 3
+  };
+  const now = new Date().toISOString();
+
+  return RunSchema.parse({
+    ...input,
+    id: createEntityId("run"),
+    workspace_root: input.workspace_root ?? process.cwd(),
+    budget,
+    created_at: now,
+    updated_at: now
+  });
+}
+
+export function updateRun(run: Run, patch: Partial<Run>): Run {
+  return RunSchema.parse({
+    ...run,
     ...patch,
     updated_at: new Date().toISOString()
   });
@@ -316,6 +457,126 @@ export function createWorkerRun(
     },
     artifact_dir: artifactDir,
     writeback_file: null
+  });
+}
+
+export function createAttempt(input: {
+  run_id: string;
+  attempt_type: AttemptType;
+  worker: string;
+  objective: string;
+  success_criteria: string[];
+  workspace_root: string;
+  input_context_ref?: string | null;
+}): Attempt {
+  const now = new Date().toISOString();
+
+  return AttemptSchema.parse({
+    id: createEntityId("att"),
+    run_id: input.run_id,
+    attempt_type: input.attempt_type,
+    status: "created",
+    worker: input.worker,
+    objective: input.objective,
+    success_criteria: input.success_criteria,
+    workspace_root: input.workspace_root,
+    input_context_ref: input.input_context_ref ?? null,
+    result_ref: null,
+    evaluation_ref: null,
+    created_at: now,
+    started_at: null,
+    ended_at: null,
+    updated_at: now
+  });
+}
+
+export function updateAttempt(attempt: Attempt, patch: Partial<Attempt>): Attempt {
+  return AttemptSchema.parse({
+    ...attempt,
+    ...patch,
+    updated_at: new Date().toISOString()
+  });
+}
+
+export function createCurrentDecision(input: {
+  run_id: string;
+  run_status?: RunStatus;
+  best_attempt_id?: string | null;
+  latest_attempt_id?: string | null;
+  recommended_next_action?: string | null;
+  recommended_attempt_type?: AttemptType | null;
+  summary?: string;
+  blocking_reason?: string | null;
+  waiting_for_human?: boolean;
+}): CurrentDecision {
+  return CurrentDecisionSchema.parse({
+    run_id: input.run_id,
+    run_status: input.run_status ?? "draft",
+    best_attempt_id: input.best_attempt_id ?? null,
+    latest_attempt_id: input.latest_attempt_id ?? null,
+    recommended_next_action: input.recommended_next_action ?? null,
+    recommended_attempt_type: input.recommended_attempt_type ?? null,
+    summary: input.summary ?? "",
+    blocking_reason: input.blocking_reason ?? null,
+    waiting_for_human: input.waiting_for_human ?? false,
+    updated_at: new Date().toISOString()
+  });
+}
+
+export function updateCurrentDecision(
+  currentDecision: CurrentDecision,
+  patch: Partial<CurrentDecision>
+): CurrentDecision {
+  return CurrentDecisionSchema.parse({
+    ...currentDecision,
+    ...patch,
+    updated_at: new Date().toISOString()
+  });
+}
+
+export function createRunSteer(input: {
+  run_id: string;
+  attempt_id?: string | null;
+  content: string;
+}): RunSteer {
+  const now = new Date().toISOString();
+
+  return RunSteerSchema.parse({
+    id: createEntityId("rsteer"),
+    run_id: input.run_id,
+    attempt_id: input.attempt_id ?? null,
+    content: input.content,
+    status: "queued",
+    created_at: now,
+    updated_at: now
+  });
+}
+
+export function updateRunSteer(
+  runSteer: RunSteer,
+  patch: Partial<RunSteer>
+): RunSteer {
+  return RunSteerSchema.parse({
+    ...runSteer,
+    ...patch,
+    updated_at: new Date().toISOString()
+  });
+}
+
+export function createRunJournalEntry(input: {
+  run_id: string;
+  attempt_id?: string | null;
+  type: string;
+  payload?: Record<string, unknown>;
+  ts?: string;
+}): RunJournalEntry {
+  return RunJournalEntrySchema.parse({
+    id: createEntityId("rje"),
+    run_id: input.run_id,
+    attempt_id: input.attempt_id ?? null,
+    type: input.type,
+    payload: input.payload ?? {},
+    ts: input.ts ?? new Date().toISOString()
   });
 }
 

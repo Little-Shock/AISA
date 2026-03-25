@@ -1,23 +1,35 @@
-import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type {
+  Attempt,
+  AttemptEvaluation,
   Branch,
   BranchSpec,
   ContextBoard,
   ContextSnapshot,
+  CurrentDecision,
   EvalResult,
   EvalSpec,
   Goal,
+  Run,
+  RunJournalEntry,
+  RunSteer,
   Steer,
   WorkerRun,
   WorkerWriteback
 } from "@autoresearch/domain";
 import {
+  AttemptSchema,
+  AttemptEvaluationSchema,
   BranchSchema,
   ContextBoardSchema,
   ContextSnapshotSchema,
+  CurrentDecisionSchema,
   EvalResultSchema,
   GoalSchema,
+  RunJournalEntrySchema,
+  RunSchema,
+  RunSteerSchema,
   SteerSchema,
   WorkerRunSchema,
   WorkerWritebackSchema
@@ -25,6 +37,7 @@ import {
 
 export interface WorkspacePaths {
   rootDir: string;
+  runsDir: string;
   plansDir: string;
   stateDir: string;
   eventsDir: string;
@@ -51,14 +64,69 @@ export interface GoalPaths {
   currentReportFile: string;
 }
 
+export interface RunPaths {
+  runDir: string;
+  attemptsDir: string;
+  steersDir: string;
+  contractFile: string;
+  currentFile: string;
+  reportFile: string;
+  journalFile: string;
+}
+
+export interface AttemptPaths {
+  attemptDir: string;
+  metaFile: string;
+  contextFile: string;
+  resultFile: string;
+  evaluationFile: string;
+  stdoutFile: string;
+  stderrFile: string;
+  artifactsDir: string;
+}
+
 export function resolveWorkspacePaths(rootDir: string): WorkspacePaths {
   return {
     rootDir,
+    runsDir: join(rootDir, "runs"),
     plansDir: join(rootDir, "plans"),
     stateDir: join(rootDir, "state"),
     eventsDir: join(rootDir, "events"),
     artifactsDir: join(rootDir, "artifacts"),
     reportsDir: join(rootDir, "reports")
+  };
+}
+
+export function resolveRunPaths(paths: WorkspacePaths, runId: string): RunPaths {
+  const runDir = join(paths.runsDir, runId);
+
+  return {
+    runDir,
+    attemptsDir: join(runDir, "attempts"),
+    steersDir: join(runDir, "steers"),
+    contractFile: join(runDir, "contract.json"),
+    currentFile: join(runDir, "current.json"),
+    reportFile: join(runDir, "report.md"),
+    journalFile: join(runDir, "journal.ndjson")
+  };
+}
+
+export function resolveAttemptPaths(
+  paths: WorkspacePaths,
+  runId: string,
+  attemptId: string
+): AttemptPaths {
+  const attemptDir = join(resolveRunPaths(paths, runId).attemptsDir, attemptId);
+
+  return {
+    attemptDir,
+    metaFile: join(attemptDir, "meta.json"),
+    contextFile: join(attemptDir, "context.json"),
+    resultFile: join(attemptDir, "result.json"),
+    evaluationFile: join(attemptDir, "evaluation.json"),
+    stdoutFile: join(attemptDir, "stdout.log"),
+    stderrFile: join(attemptDir, "stderr.log"),
+    artifactsDir: join(attemptDir, "artifacts")
   };
 }
 
@@ -108,6 +176,7 @@ export function resolveBranchArtifactPaths(
 export async function ensureWorkspace(paths: WorkspacePaths): Promise<void> {
   await Promise.all(
     [
+      paths.runsDir,
       paths.plansDir,
       paths.stateDir,
       paths.eventsDir,
@@ -120,6 +189,37 @@ export async function ensureWorkspace(paths: WorkspacePaths): Promise<void> {
       join(paths.reportsDir, "goals")
     ].map((dir) => mkdir(dir, { recursive: true }))
   );
+}
+
+export async function ensureRunDirectories(
+  paths: WorkspacePaths,
+  runId: string
+): Promise<RunPaths> {
+  const runPaths = resolveRunPaths(paths, runId);
+
+  await Promise.all(
+    [runPaths.runDir, runPaths.attemptsDir, runPaths.steersDir].map((dir) =>
+      mkdir(dir, { recursive: true })
+    )
+  );
+
+  return runPaths;
+}
+
+export async function ensureAttemptDirectories(
+  paths: WorkspacePaths,
+  runId: string,
+  attemptId: string
+): Promise<AttemptPaths> {
+  const attemptPaths = resolveAttemptPaths(paths, runId, attemptId);
+
+  await Promise.all(
+    [attemptPaths.attemptDir, attemptPaths.artifactsDir].map((dir) =>
+      mkdir(dir, { recursive: true })
+    )
+  );
+
+  return attemptPaths;
 }
 
 export async function ensureGoalDirectories(
@@ -230,6 +330,242 @@ async function listJsonFiles<T>(
     return result;
   } catch {
     return [];
+  }
+}
+
+export async function saveRun(paths: WorkspacePaths, run: Run): Promise<void> {
+  await ensureWorkspace(paths);
+  const runPaths = await ensureRunDirectories(paths, run.id);
+  await writeJsonFile(runPaths.contractFile, run);
+}
+
+export async function getRun(paths: WorkspacePaths, runId: string): Promise<Run> {
+  const run = await readJsonFile<Run>(resolveRunPaths(paths, runId).contractFile);
+  return RunSchema.parse(run);
+}
+
+export async function listRuns(paths: WorkspacePaths): Promise<Run[]> {
+  await ensureWorkspace(paths);
+  const entries = await readdir(paths.runsDir, { withFileTypes: true });
+  const runs: Run[] = [];
+
+  for (const entry of entries) {
+    if (!entry.isDirectory()) {
+      continue;
+    }
+
+    try {
+      runs.push(await getRun(paths, entry.name));
+    } catch {
+      // Ignore incomplete run directories while the new storage is being introduced.
+    }
+  }
+
+  return runs.sort((a, b) => b.updated_at.localeCompare(a.updated_at));
+}
+
+export async function saveCurrentDecision(
+  paths: WorkspacePaths,
+  currentDecision: CurrentDecision
+): Promise<void> {
+  const runPaths = await ensureRunDirectories(paths, currentDecision.run_id);
+  await writeJsonFile(runPaths.currentFile, currentDecision);
+}
+
+export async function getCurrentDecision(
+  paths: WorkspacePaths,
+  runId: string
+): Promise<CurrentDecision | null> {
+  try {
+    const currentDecision = await readJsonFile<CurrentDecision>(
+      resolveRunPaths(paths, runId).currentFile
+    );
+    return CurrentDecisionSchema.parse(currentDecision);
+  } catch {
+    return null;
+  }
+}
+
+export async function saveAttempt(
+  paths: WorkspacePaths,
+  attempt: Attempt
+): Promise<void> {
+  const attemptPaths = await ensureAttemptDirectories(paths, attempt.run_id, attempt.id);
+  await writeJsonFile(attemptPaths.metaFile, attempt);
+}
+
+export async function getAttempt(
+  paths: WorkspacePaths,
+  runId: string,
+  attemptId: string
+): Promise<Attempt> {
+  const attempt = await readJsonFile<Attempt>(resolveAttemptPaths(paths, runId, attemptId).metaFile);
+  return AttemptSchema.parse(attempt);
+}
+
+export async function listAttempts(
+  paths: WorkspacePaths,
+  runId: string
+): Promise<Attempt[]> {
+  const attemptsDir = resolveRunPaths(paths, runId).attemptsDir;
+  const attempts: Attempt[] = [];
+
+  try {
+    const entries = await readdir(attemptsDir, { withFileTypes: true });
+
+    for (const entry of entries) {
+      if (!entry.isDirectory()) {
+        continue;
+      }
+
+      try {
+        attempts.push(await getAttempt(paths, runId, entry.name));
+      } catch {
+        // Ignore incomplete attempt directories during writes.
+      }
+    }
+  } catch {
+    return [];
+  }
+
+  return attempts.sort((a, b) => a.created_at.localeCompare(b.created_at));
+}
+
+export async function saveAttemptContext(
+  paths: WorkspacePaths,
+  runId: string,
+  attemptId: string,
+  context: unknown
+): Promise<void> {
+  const attemptPaths = await ensureAttemptDirectories(paths, runId, attemptId);
+  await writeJsonFile(attemptPaths.contextFile, context);
+}
+
+export async function getAttemptContext(
+  paths: WorkspacePaths,
+  runId: string,
+  attemptId: string
+): Promise<unknown | null> {
+  try {
+    return await readJsonFile<unknown>(resolveAttemptPaths(paths, runId, attemptId).contextFile);
+  } catch {
+    return null;
+  }
+}
+
+export async function saveAttemptResult(
+  paths: WorkspacePaths,
+  runId: string,
+  attemptId: string,
+  result: WorkerWriteback
+): Promise<void> {
+  const attemptPaths = await ensureAttemptDirectories(paths, runId, attemptId);
+  await writeJsonFile(attemptPaths.resultFile, result);
+}
+
+export async function getAttemptResult(
+  paths: WorkspacePaths,
+  runId: string,
+  attemptId: string
+): Promise<WorkerWriteback | null> {
+  try {
+    const result = await readJsonFile<WorkerWriteback>(
+      resolveAttemptPaths(paths, runId, attemptId).resultFile
+    );
+    return WorkerWritebackSchema.parse(result);
+  } catch {
+    return null;
+  }
+}
+
+export async function saveAttemptEvaluation(
+  paths: WorkspacePaths,
+  evaluation: AttemptEvaluation
+): Promise<void> {
+  const attemptPaths = await ensureAttemptDirectories(
+    paths,
+    evaluation.run_id,
+    evaluation.attempt_id
+  );
+  await writeJsonFile(attemptPaths.evaluationFile, evaluation);
+}
+
+export async function getAttemptEvaluation(
+  paths: WorkspacePaths,
+  runId: string,
+  attemptId: string
+): Promise<AttemptEvaluation | null> {
+  try {
+    const evaluation = await readJsonFile<AttemptEvaluation>(
+      resolveAttemptPaths(paths, runId, attemptId).evaluationFile
+    );
+    return AttemptEvaluationSchema.parse(evaluation);
+  } catch {
+    return null;
+  }
+}
+
+export async function saveRunSteer(
+  paths: WorkspacePaths,
+  runSteer: RunSteer
+): Promise<void> {
+  const runPaths = await ensureRunDirectories(paths, runSteer.run_id);
+  await writeJsonFile(join(runPaths.steersDir, `${runSteer.id}.json`), runSteer);
+}
+
+export async function listRunSteers(
+  paths: WorkspacePaths,
+  runId: string
+): Promise<RunSteer[]> {
+  const steers = await listJsonFiles(resolveRunPaths(paths, runId).steersDir, (value) =>
+    RunSteerSchema.parse(value)
+  );
+
+  return steers.sort((a, b) => a.created_at.localeCompare(b.created_at));
+}
+
+export async function appendRunJournal(
+  paths: WorkspacePaths,
+  entry: RunJournalEntry
+): Promise<void> {
+  const runPaths = await ensureRunDirectories(paths, entry.run_id);
+  await appendFile(runPaths.journalFile, `${JSON.stringify(entry)}\n`, "utf8");
+}
+
+export async function listRunJournal(
+  paths: WorkspacePaths,
+  runId: string
+): Promise<RunJournalEntry[]> {
+  try {
+    const raw = await readFile(resolveRunPaths(paths, runId).journalFile, "utf8");
+    return raw
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .map((line) => RunJournalEntrySchema.parse(JSON.parse(line)))
+      .sort((a, b) => a.ts.localeCompare(b.ts));
+  } catch {
+    return [];
+  }
+}
+
+export async function saveRunReport(
+  paths: WorkspacePaths,
+  runId: string,
+  markdown: string
+): Promise<void> {
+  const runPaths = await ensureRunDirectories(paths, runId);
+  await writeTextFile(runPaths.reportFile, markdown);
+}
+
+export async function getRunReport(
+  paths: WorkspacePaths,
+  runId: string
+): Promise<string> {
+  try {
+    return await readFile(resolveRunPaths(paths, runId).reportFile, "utf8");
+  } catch {
+    return "";
   }
 }
 

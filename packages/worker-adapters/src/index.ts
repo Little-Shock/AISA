@@ -2,10 +2,22 @@ import { createWriteStream } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { join } from "node:path";
-import type { Branch, ContextSnapshot, Goal, WorkerWriteback } from "@autoresearch/domain";
+import type {
+  Attempt,
+  Branch,
+  ContextSnapshot,
+  Goal,
+  Run,
+  WorkerWriteback
+} from "@autoresearch/domain";
 import { WorkerWritebackSchema } from "@autoresearch/domain";
 import type { WorkspacePaths } from "@autoresearch/state-store";
-import { resolveBranchArtifactPaths, writeJsonFile, writeTextFile } from "@autoresearch/state-store";
+import {
+  resolveAttemptPaths,
+  resolveBranchArtifactPaths,
+  writeJsonFile,
+  writeTextFile
+} from "@autoresearch/state-store";
 
 export interface CodexCliConfig {
   command: string;
@@ -141,6 +153,120 @@ export class CodexCliWorkerAdapter {
       exitCode
     };
   }
+
+  async runAttemptTask(input: {
+    run: Run;
+    attempt: Attempt;
+    context: unknown;
+    workspacePaths: WorkspacePaths;
+  }): Promise<BranchExecutionResult> {
+    const { run, attempt, context, workspacePaths } = input;
+    const attemptPaths = resolveAttemptPaths(workspacePaths, run.id, attempt.id);
+    const outputFile = join(attemptPaths.attemptDir, "codex-output.json");
+    const promptFile = join(attemptPaths.attemptDir, "worker-prompt.md");
+
+    await mkdir(attemptPaths.artifactsDir, { recursive: true });
+
+    const prompt = buildCodexAttemptPrompt(run, attempt, context);
+    await Promise.all([
+      writeJsonFile(attemptPaths.contextFile, context),
+      writeJsonFile(join(attemptPaths.attemptDir, "task-spec.json"), {
+        run_id: run.id,
+        attempt_id: attempt.id,
+        attempt_type: attempt.attempt_type,
+        workspace_root: attempt.workspace_root,
+        objective: attempt.objective,
+        success_criteria: attempt.success_criteria
+      }),
+      writeTextFile(promptFile, prompt)
+    ]);
+
+    const args = [
+      "exec",
+      "-C",
+      attempt.workspace_root,
+      "-s",
+      this.config.sandbox,
+      "--output-last-message",
+      outputFile
+    ];
+
+    if (this.config.skipGitRepoCheck) {
+      args.push("--skip-git-repo-check");
+    }
+
+    if (this.config.profile) {
+      args.push("-p", this.config.profile);
+    }
+
+    if (this.config.model) {
+      args.push("-m", this.config.model);
+    }
+
+    args.push("-");
+
+    const stdoutStream = createWriteStream(attemptPaths.stdoutFile, { flags: "a" });
+    const stderrStream = createWriteStream(attemptPaths.stderrFile, { flags: "a" });
+    const env = {
+      ...process.env
+    };
+
+    const exitCode = await new Promise<number>((resolve, reject) => {
+      const child = spawn(this.config.command, args, {
+        cwd: workspacePaths.rootDir,
+        env,
+        stdio: ["pipe", "pipe", "pipe"],
+        shell: false
+      });
+
+      const timer = setTimeout(() => {
+        child.kill("SIGTERM");
+      }, this.config.timeoutMs);
+
+      child.stdout.on("data", (chunk) => {
+        stdoutStream.write(chunk);
+      });
+
+      child.stderr.on("data", (chunk) => {
+        stderrStream.write(chunk);
+      });
+
+      child.on("error", (error) => {
+        clearTimeout(timer);
+        reject(error);
+      });
+
+      child.on("close", (code) => {
+        clearTimeout(timer);
+        resolve(code ?? 1);
+      });
+
+      child.stdin.write(prompt);
+      child.stdin.end();
+    });
+
+    stdoutStream.end();
+    stderrStream.end();
+
+    if (exitCode !== 0) {
+      throw new Error(`Codex CLI exited with code ${exitCode} for attempt ${attempt.id}`);
+    }
+
+    const rawOutput = await readFile(outputFile, "utf8");
+    const parsed = parseWritebackFromText(rawOutput);
+    const reportMarkdown = buildAttemptReportMarkdown(run, attempt, parsed);
+
+    await Promise.all([
+      writeJsonFile(attemptPaths.resultFile, parsed),
+      writeTextFile(join(attemptPaths.attemptDir, "report.md"), reportMarkdown)
+    ]);
+
+    return {
+      writeback: parsed,
+      reportMarkdown,
+      exitCode
+    };
+  }
 }
 
 export function loadCodexCliConfig(env: NodeJS.ProcessEnv): CodexCliConfig {
@@ -210,6 +336,63 @@ function buildCodexWorkerPrompt(
   ].join("\n");
 }
 
+function buildCodexAttemptPrompt(
+  run: Run,
+  attempt: Attempt,
+  context: unknown
+): string {
+  const modeLine =
+    attempt.attempt_type === "execution"
+      ? "- You may modify files only within the provided workspace to complete the task."
+      : "- Work in read-only analysis mode. Do not modify files in the workspace.";
+
+  return [
+    "You are a Codex CLI worker inside AISA.",
+    "",
+    "Rules:",
+    modeLine,
+    "- Use local repository evidence whenever possible.",
+    "- If evidence is weak or missing, say so explicitly.",
+    "- Return only valid JSON with no markdown fences and no extra commentary.",
+    "",
+    "Run:",
+    `- Title: ${run.title}`,
+    `- Description: ${run.description}`,
+    `- Workspace Root: ${run.workspace_root}`,
+    "",
+    "Attempt:",
+    `- Attempt ID: ${attempt.id}`,
+    `- Type: ${attempt.attempt_type}`,
+    `- Objective: ${attempt.objective}`,
+    "",
+    "Success Criteria:",
+    ...attempt.success_criteria.map((criterion) => `- ${criterion}`),
+    "",
+    "Current Context:",
+    JSON.stringify(context, null, 2),
+    "",
+    "Return JSON in this shape:",
+    JSON.stringify(
+      {
+        summary: "short summary",
+        findings: [
+          {
+            type: "fact",
+            content: "what you found",
+            evidence: ["relative/path/or/command"]
+          }
+        ],
+        questions: ["remaining open question"],
+        recommended_next_steps: ["best next step"],
+        confidence: 0.72,
+        artifacts: []
+      },
+      null,
+      2
+    )
+  ].join("\n");
+}
+
 function parseWritebackFromText(text: string): WorkerWriteback {
   const trimmed = text.trim();
   const candidate = trimmed.startsWith("```")
@@ -230,6 +413,46 @@ function buildBranchReportMarkdown(
     `- Goal: ${goal.title}`,
     `- Hypothesis: ${branch.hypothesis}`,
     `- Objective: ${branch.objective}`,
+    `- Confidence: ${writeback.confidence}`,
+    "",
+    "## Summary",
+    "",
+    writeback.summary,
+    "",
+    "## Findings",
+    "",
+    ...(writeback.findings.length > 0
+      ? writeback.findings.flatMap((finding) => [
+          `- [${finding.type}] ${finding.content}`,
+          ...finding.evidence.map((evidence) => `  - evidence: ${evidence}`)
+        ])
+      : ["- No findings recorded."]),
+    "",
+    "## Open Questions",
+    "",
+    ...(writeback.questions.length > 0
+      ? writeback.questions.map((question) => `- ${question}`)
+      : ["- None."]),
+    "",
+    "## Recommended Next Steps",
+    "",
+    ...(writeback.recommended_next_steps.length > 0
+      ? writeback.recommended_next_steps.map((step) => `- ${step}`)
+      : ["- None."])
+  ].join("\n");
+}
+
+function buildAttemptReportMarkdown(
+  run: Run,
+  attempt: Attempt,
+  writeback: WorkerWriteback
+): string {
+  return [
+    `# Attempt Report: ${attempt.id}`,
+    "",
+    `- Run: ${run.title}`,
+    `- Type: ${attempt.attempt_type}`,
+    `- Objective: ${attempt.objective}`,
     `- Confidence: ${writeback.confidence}`,
     "",
     "## Summary",
