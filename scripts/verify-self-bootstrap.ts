@@ -66,6 +66,7 @@ async function main(): Promise<void> {
   assert.equal(template.runInput.workspace_root, rootDir);
   assert.equal(template.runInput.owner_id, "test-owner");
   assert.ok(template.initialSteer.includes("runtime"));
+  assert.ok(template.initialSteer.includes("replay"));
 
   const run = createRun(template.runInput);
   let current = createCurrentDecision({

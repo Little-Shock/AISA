@@ -100,7 +100,9 @@ export function buildAttemptModeRules(
   if (attemptType === "execution") {
     return [
       "- You may modify files only within the provided workspace to complete the task.",
-      "- Keep the change as small as possible and leave clear verification evidence."
+      "- Keep the change as small as possible and leave clear verification evidence.",
+      "- Include a verification_plan with concrete non-interactive commands the runtime can replay itself.",
+      "- Do not claim tests or verification passed unless the verification_plan lists the exact commands to replay."
     ];
   }
 
@@ -534,6 +536,13 @@ function buildCodexAttemptPrompt(
     "Current Context:",
     JSON.stringify(context, null, 2),
     "",
+    attempt.attempt_type === "execution"
+      ? "The runtime will replay verification_plan.commands itself and only trust those observed results."
+      : null,
+    attempt.attempt_type === "execution"
+      ? "If you changed code, include at least one verification command that checks the changed behavior."
+      : null,
+    "",
     "Return JSON in this shape:",
     JSON.stringify(
       {
@@ -548,6 +557,17 @@ function buildCodexAttemptPrompt(
         questions: ["remaining open question"],
         recommended_next_steps: ["best next step"],
         confidence: 0.72,
+        verification_plan:
+          attempt.attempt_type === "execution"
+            ? {
+                commands: [
+                  {
+                    purpose: "verify the changed behavior",
+                    command: "pnpm verify:runtime"
+                  }
+                ]
+              }
+            : undefined,
         artifacts: []
       },
       null,
@@ -691,6 +711,14 @@ function buildBranchReportMarkdown(
     "",
     ...(writeback.recommended_next_steps.length > 0
       ? writeback.recommended_next_steps.map((step) => `- ${step}`)
+      : ["- None."]),
+    "",
+    "## Verification Plan",
+    "",
+    ...(writeback.verification_plan?.commands.length
+      ? writeback.verification_plan.commands.map(
+          (command) => `- ${command.purpose}: ${command.command}`
+        )
       : ["- None."])
   ].join("\n");
 }

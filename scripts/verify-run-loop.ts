@@ -33,6 +33,7 @@ type ScenarioDriver =
   | "research_stall"
   | "research_command_failure"
   | "execution_checkpoint_blocked_dirty_workspace"
+  | "execution_missing_verification_plan"
   | "execution_parse_failure"
   | "orphaned_running_attempt";
 
@@ -102,7 +103,11 @@ class ScenarioAdapter {
     }
 
     if (
-      this.driver === "execution_checkpoint_blocked_dirty_workspace" &&
+      [
+        "happy_path",
+        "execution_checkpoint_blocked_dirty_workspace",
+        "execution_missing_verification_plan"
+      ].includes(this.driver) &&
       input.attempt.attempt_type === "execution"
     ) {
       await writeFile(
@@ -115,7 +120,8 @@ class ScenarioAdapter {
     const writeback =
       this.driver === "happy_path" ||
       this.driver === "execution_parse_failure" ||
-      this.driver === "execution_checkpoint_blocked_dirty_workspace"
+      this.driver === "execution_checkpoint_blocked_dirty_workspace" ||
+      this.driver === "execution_missing_verification_plan"
         ? this.buildHappyPathWriteback(input.attempt)
         : this.buildStuckWriteback(nextCount);
 
@@ -144,6 +150,18 @@ class ScenarioAdapter {
       };
     }
 
+    const verificationPlan =
+      this.driver === "execution_missing_verification_plan"
+        ? undefined
+        : {
+            commands: [
+              {
+                purpose: "confirm the execution change was written",
+                command: `test -f execution-change.md && rg -n "^execution change from ${attempt.id}$" execution-change.md`
+              }
+            ]
+          };
+
     return {
       summary: "Executed the change and left verification artifacts.",
       findings: [
@@ -156,6 +174,7 @@ class ScenarioAdapter {
       questions: [],
       recommended_next_steps: [],
       confidence: 0.88,
+      verification_plan: verificationPlan,
       artifacts: [{ type: "patch", path: "artifacts/diff.patch" }]
     };
   }
@@ -304,6 +323,13 @@ async function runCase(scenario: ScenarioCase): Promise<ScenarioObservation> {
 
   if (scenario.driver === "execution_checkpoint_blocked_dirty_workspace") {
     await initializeGitRepo(rootDir, true);
+  }
+
+  if (
+    scenario.driver === "happy_path" ||
+    scenario.driver === "execution_missing_verification_plan"
+  ) {
+    await initializeGitRepo(rootDir, false);
   }
 
   if (scenario.driver === "orphaned_running_attempt") {

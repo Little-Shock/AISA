@@ -32,6 +32,7 @@ export function buildSelfBootstrapRunTemplate(
     "Focus on the run-centered backend/runtime path, not GUI polish.",
     "Use local repository evidence, handoff notes, and eval assets before making claims.",
     "Do not mask failures or adapt implementation only to the current smoke cases.",
+    "Any execution attempt must leave a verification plan the runtime can replay itself.",
     "Prefer the smallest change that improves AISA's ability to use itself for the next step."
   ];
 
@@ -47,6 +48,7 @@ export function buildSelfBootstrapRunTemplate(
     "Read Codex/2026-03-25-development-handoff.md first.",
     "Read evals/runtime-run-loop/ and start from backend/runtime gaps, not GUI work.",
     "Use the current regression suite to choose the next smallest self-bootstrap improvement.",
+    "Treat execution as passed only when the runtime can replay the verification commands itself.",
     focus,
     "If you change runtime behavior, update or add a regression case in the same pass."
   ].join("\n");

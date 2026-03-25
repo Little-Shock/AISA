@@ -2,7 +2,7 @@
   "id": "happy-path-run-completes",
   "description": "Research produces an actionable next step, execution leaves verification evidence, and the run completes.",
   "driver": "happy_path",
-  "max_ticks": 4,
+  "max_ticks": 8,
   "expected": {
     "run_status": "completed",
     "waiting_for_human": false,
@@ -10,10 +10,18 @@
     "attempt_types": ["research", "execution"],
     "attempt_statuses": ["completed", "completed"],
     "verification_statuses": ["not_applicable", "passed"],
-    "required_journal_types": ["attempt.created", "attempt.started", "attempt.completed"],
+    "required_journal_types": [
+      "attempt.created",
+      "attempt.started",
+      "attempt.completed",
+      "attempt.verification.passed",
+      "attempt.checkpoint.created"
+    ],
     "required_journal_counts": {
       "attempt.started": 2,
-      "attempt.completed": 2
+      "attempt.completed": 2,
+      "attempt.verification.passed": 1,
+      "attempt.checkpoint.created": 1
     }
   }
 }

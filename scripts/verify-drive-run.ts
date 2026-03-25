@@ -16,6 +16,7 @@ import {
   appendRunJournal,
   ensureWorkspace,
   getCurrentDecision,
+  getAttemptRuntimeVerification,
   listAttempts,
   listRunJournal,
   resolveWorkspacePaths,
@@ -84,6 +85,14 @@ class ProgressingAdapter {
         questions: [],
         recommended_next_steps: [],
         confidence: 0.86,
+        verification_plan: {
+          commands: [
+            {
+              purpose: "confirm the execution note was written",
+              command: `test -f execution-note.md && rg -n "^checkpointed by ${input.attempt.id}$" execution-note.md`
+            }
+          ]
+        },
         artifacts: [
           {
             type: "patch",
@@ -173,6 +182,12 @@ async function main(): Promise<void> {
   const executionAttempt = attempts.find((attempt) => attempt.id === checkpointEntry.attempt_id);
   assert.ok(executionAttempt, "checkpoint entry should point to a persisted attempt");
   assert.equal(executionAttempt.attempt_type, "execution");
+  const runtimeVerification = await getAttemptRuntimeVerification(
+    workspacePaths,
+    run.id,
+    executionAttempt.id
+  );
+  assert.ok(runtimeVerification, "execution attempt should persist runtime verification evidence");
   const checkpointArtifact = String(checkpointEntry.payload.artifact_path);
   await waitForFile(checkpointArtifact);
   const checkpoint = JSON.parse(await readFile(checkpointArtifact, "utf8")) as {
@@ -208,6 +223,9 @@ async function main(): Promise<void> {
     attempts.every((attempt) => attempt.status === "completed"),
     "all recorded attempts should be completed by the settled stop"
   );
+  assert.equal(runtimeVerification.status, "passed");
+  assert.equal(runtimeVerification.command_results.length, 1);
+  assert.deepEqual(runtimeVerification.changed_files, ["execution-note.md"]);
   assert.equal(checkpointEntry.attempt_id, executionAttempt.id);
   assert.equal(checkpoint.status, "created");
   assert.equal(latestCommitSubject, checkpoint.commit.message);

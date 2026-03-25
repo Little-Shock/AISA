@@ -3,6 +3,7 @@ import {
   EvalResultSchema,
   type Attempt,
   type AttemptEvaluation,
+  type AttemptRuntimeVerification,
   type Branch,
   type EvalResult,
   type EvalSpec,
@@ -69,6 +70,7 @@ export function evaluateAttempt(input: {
   run: Run;
   attempt: Attempt;
   result: WorkerWriteback;
+  runtimeVerification?: AttemptRuntimeVerification | null;
 }): AttemptEvaluation {
   const findingsScore = Math.min(input.result.findings.length / 3, 1);
   const nextStepScore = input.result.recommended_next_steps.length > 0 ? 1 : 0;
@@ -81,6 +83,7 @@ export function evaluateAttempt(input: {
   const artifactScore = Math.min(input.result.artifacts.length, 1);
   const openQuestionPenalty =
     input.result.questions.length >= 3 ? 0.15 : input.result.questions.length > 0 ? 0.05 : 0;
+  const runtimeVerification = input.runtimeVerification ?? null;
 
   if (input.attempt.attempt_type === "research") {
     const goalProgress = Math.max(
@@ -125,27 +128,51 @@ export function evaluateAttempt(input: {
     });
   }
 
-  const verificationStatus =
-    artifactScore > 0 || (evidenceQuality >= 0.5 && confidenceScore >= 0.55) ? "passed" : "failed";
-  const goalProgress = Math.max(
+  const verificationStatus = runtimeVerification?.status === "passed" ? "passed" : "failed";
+  const verifiedCommandScore =
+    runtimeVerification?.status === "passed" && runtimeVerification.command_results.length > 0
+      ? 1
+      : 0;
+  const workspaceChangeScore =
+    runtimeVerification && runtimeVerification.changed_files.length > 0 ? 1 : 0;
+  const rawGoalProgress = Math.max(
     0,
     Math.min(
       1,
-      confidenceScore * 0.35 +
-        evidenceQuality * 0.3 +
-        artifactScore * 0.2 +
-        nextStepScore * 0.15 -
+      confidenceScore * 0.25 +
+        evidenceQuality * 0.25 +
+        verifiedCommandScore * 0.35 +
+        workspaceChangeScore * 0.15 -
         openQuestionPenalty
     )
   );
+  const goalProgress =
+    verificationStatus === "passed" ? rawGoalProgress : Math.min(rawGoalProgress, 0.34);
   const recommendation =
-    verificationStatus === "failed"
-      ? "retry"
-      : goalProgress >= 0.75 && input.result.questions.length === 0
+    verificationStatus === "passed"
+      ? goalProgress >= 0.75 && input.result.questions.length === 0
         ? "complete"
         : goalProgress >= 0.45
           ? "wait_human"
-          : "retry";
+          : "retry"
+      : runtimeVerification?.failure_code === "verification_command_failed"
+        ? "continue"
+        : "wait_human";
+  const suggestedAttemptType =
+    verificationStatus === "passed"
+      ? recommendation === "complete"
+        ? null
+        : "execution"
+      : runtimeVerification?.failure_code === "verification_command_failed"
+        ? "research"
+        : "execution";
+  const missingEvidence = buildMissingEvidence({
+    attemptType: "execution",
+    evidenceQuality,
+    nextStepScore,
+    artifactScore,
+    runtimeVerification
+  });
 
   return AttemptEvaluationSchema.parse({
     attempt_id: input.attempt.id,
@@ -154,21 +181,18 @@ export function evaluateAttempt(input: {
     evidence_quality: evidenceQuality,
     verification_status: verificationStatus,
     recommendation,
-    suggested_attempt_type:
-      recommendation === "retry"
-        ? "execution"
-        : recommendation === "complete"
-          ? null
-          : "execution",
-    rationale: `goal_progress=${goalProgress.toFixed(2)}, evidence_quality=${evidenceQuality.toFixed(
-      2
-    )}, confidence=${confidenceScore.toFixed(2)}, artifacts=${input.result.artifacts.length}, verification=${verificationStatus}`,
-    missing_evidence: buildMissingEvidence({
-      attemptType: "execution",
-      evidenceQuality,
-      nextStepScore,
-      artifactScore
-    }),
+    suggested_attempt_type: suggestedAttemptType,
+    rationale: [
+      `goal_progress=${goalProgress.toFixed(2)}`,
+      `evidence_quality=${evidenceQuality.toFixed(2)}`,
+      `confidence=${confidenceScore.toFixed(2)}`,
+      `artifacts=${input.result.artifacts.length}`,
+      `runtime_verification=${runtimeVerification?.status ?? "missing"}`,
+      runtimeVerification?.failure_code ? `failure_code=${runtimeVerification.failure_code}` : null
+    ]
+      .filter(Boolean)
+      .join(", "),
+    missing_evidence: missingEvidence,
     created_at: new Date().toISOString()
   });
 }
@@ -178,6 +202,7 @@ function buildMissingEvidence(input: {
   evidenceQuality: number;
   nextStepScore: number;
   artifactScore: number;
+  runtimeVerification?: AttemptRuntimeVerification | null;
 }): string[] {
   const missing: string[] = [];
 
@@ -189,8 +214,20 @@ function buildMissingEvidence(input: {
     missing.push("Need a clearer next step that the loop can act on.");
   }
 
-  if (input.attemptType === "execution" && input.artifactScore === 0) {
-    missing.push("Need execution artifacts or verification evidence from the workspace.");
+  if (
+    input.attemptType === "execution" &&
+    input.artifactScore === 0 &&
+    input.runtimeVerification?.status !== "passed"
+  ) {
+    missing.push("Need execution artifacts from the workspace, not just a textual claim.");
+  }
+
+  if (input.attemptType === "execution" && input.runtimeVerification?.status !== "passed") {
+    if (input.runtimeVerification?.failure_reason) {
+      missing.push(input.runtimeVerification.failure_reason);
+    } else {
+      missing.push("Need runtime-replayed verification before execution can pass.");
+    }
   }
 
   return missing;

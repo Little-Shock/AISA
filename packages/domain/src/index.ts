@@ -253,12 +253,58 @@ export const WorkerFindingSchema = z.object({
   evidence: z.array(z.string().min(1)).default([])
 });
 
+export const VerificationCommandSchema = z.object({
+  purpose: z.string().min(1),
+  command: z.string().min(1),
+  cwd: z.string().min(1).optional(),
+  expected_exit_code: z.number().int().nonnegative().optional()
+});
+
+export const ExecutionVerificationPlanSchema = z.object({
+  commands: z.array(VerificationCommandSchema).min(1)
+});
+
+export const RuntimeVerificationFailureCodeSchema = z.enum([
+  "missing_verification_plan",
+  "invalid_verification_plan",
+  "workspace_not_git_repo",
+  "no_git_changes",
+  "verification_command_failed"
+]);
+
+export const VerificationCommandResultSchema = z.object({
+  purpose: z.string().min(1),
+  command: z.string().min(1),
+  cwd: z.string().min(1),
+  expected_exit_code: z.number().int(),
+  exit_code: z.number().int(),
+  passed: z.boolean(),
+  stdout_file: z.string().min(1),
+  stderr_file: z.string().min(1)
+});
+
+export const AttemptRuntimeVerificationSchema = z.object({
+  attempt_id: z.string(),
+  run_id: z.string(),
+  attempt_type: AttemptTypeSchema,
+  status: z.enum(["passed", "failed", "not_applicable"]),
+  repo_root: z.string().nullable(),
+  git_head: z.string().nullable(),
+  git_status: z.array(z.string().min(1)).default([]),
+  changed_files: z.array(z.string().min(1)).default([]),
+  failure_code: RuntimeVerificationFailureCodeSchema.nullable(),
+  failure_reason: z.string().nullable(),
+  command_results: z.array(VerificationCommandResultSchema).default([]),
+  created_at: z.string().datetime()
+});
+
 export const WorkerWritebackSchema = z.object({
   summary: z.string().min(1),
   findings: z.array(WorkerFindingSchema).default([]),
   questions: z.array(z.string().min(1)).default([]),
   recommended_next_steps: z.array(z.string().min(1)).default([]),
   confidence: z.number().min(0).max(1),
+  verification_plan: ExecutionVerificationPlanSchema.optional(),
   artifacts: z
     .array(
       z.object({
@@ -339,6 +385,13 @@ export type Steer = z.infer<typeof SteerSchema>;
 export type Event = z.infer<typeof EventSchema>;
 export type BranchSpec = z.infer<typeof BranchSpecSchema>;
 export type EvalSpec = z.infer<typeof EvalSpecSchema>;
+export type VerificationCommand = z.infer<typeof VerificationCommandSchema>;
+export type ExecutionVerificationPlan = z.infer<typeof ExecutionVerificationPlanSchema>;
+export type RuntimeVerificationFailureCode = z.infer<
+  typeof RuntimeVerificationFailureCodeSchema
+>;
+export type VerificationCommandResult = z.infer<typeof VerificationCommandResultSchema>;
+export type AttemptRuntimeVerification = z.infer<typeof AttemptRuntimeVerificationSchema>;
 export type WorkerWriteback = z.infer<typeof WorkerWritebackSchema>;
 export type ContextSnapshot = z.infer<typeof ContextSnapshotSchema>;
 export type EvalResult = z.infer<typeof EvalResultSchema>;

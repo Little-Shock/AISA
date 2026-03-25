@@ -3,6 +3,7 @@ import { dirname, join } from "node:path";
 import type {
   Attempt,
   AttemptEvaluation,
+  AttemptRuntimeVerification,
   Branch,
   BranchSpec,
   ContextBoard,
@@ -21,6 +22,7 @@ import type {
 import {
   AttemptSchema,
   AttemptEvaluationSchema,
+  AttemptRuntimeVerificationSchema,
   BranchSchema,
   ContextBoardSchema,
   ContextSnapshotSchema,
@@ -80,6 +82,7 @@ export interface AttemptPaths {
   contextFile: string;
   resultFile: string;
   evaluationFile: string;
+  runtimeVerificationFile: string;
   stdoutFile: string;
   stderrFile: string;
   artifactsDir: string;
@@ -124,6 +127,7 @@ export function resolveAttemptPaths(
     contextFile: join(attemptDir, "context.json"),
     resultFile: join(attemptDir, "result.json"),
     evaluationFile: join(attemptDir, "evaluation.json"),
+    runtimeVerificationFile: join(attemptDir, "artifacts", "runtime-verification.json"),
     stdoutFile: join(attemptDir, "stdout.log"),
     stderrFile: join(attemptDir, "stderr.log"),
     artifactsDir: join(attemptDir, "artifacts")
@@ -490,6 +494,18 @@ export async function saveAttemptEvaluation(
   await writeJsonFile(attemptPaths.evaluationFile, evaluation);
 }
 
+export async function saveAttemptRuntimeVerification(
+  paths: WorkspacePaths,
+  verification: AttemptRuntimeVerification
+): Promise<void> {
+  const attemptPaths = await ensureAttemptDirectories(
+    paths,
+    verification.run_id,
+    verification.attempt_id
+  );
+  await writeJsonFile(attemptPaths.runtimeVerificationFile, verification);
+}
+
 export async function getAttemptEvaluation(
   paths: WorkspacePaths,
   runId: string,
@@ -500,6 +516,21 @@ export async function getAttemptEvaluation(
       resolveAttemptPaths(paths, runId, attemptId).evaluationFile
     );
     return AttemptEvaluationSchema.parse(evaluation);
+  } catch {
+    return null;
+  }
+}
+
+export async function getAttemptRuntimeVerification(
+  paths: WorkspacePaths,
+  runId: string,
+  attemptId: string
+): Promise<AttemptRuntimeVerification | null> {
+  try {
+    const verification = await readJsonFile<AttemptRuntimeVerification>(
+      resolveAttemptPaths(paths, runId, attemptId).runtimeVerificationFile
+    );
+    return AttemptRuntimeVerificationSchema.parse(verification);
   } catch {
     return null;
   }

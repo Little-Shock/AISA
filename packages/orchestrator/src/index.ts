@@ -65,6 +65,10 @@ import {
   maybeCreateVerifiedExecutionCheckpoint,
   type AttemptCheckpointOutcome
 } from "./git-checkpoint.js";
+import {
+  runAttemptRuntimeVerification,
+  type AttemptRuntimeVerificationOutcome
+} from "./runtime-verification.js";
 
 export class Orchestrator {
   private timer: NodeJS.Timeout | null = null;
@@ -636,10 +640,17 @@ export class Orchestrator {
       });
 
       await saveAttemptResult(this.workspacePaths, runId, attempt.id, execution.writeback);
+      const runtimeVerification = await runAttemptRuntimeVerification({
+        run,
+        attempt,
+        result: execution.writeback,
+        attemptPaths
+      });
       const evaluation = evaluateAttempt({
         run,
         attempt,
-        result: execution.writeback
+        result: execution.writeback,
+        runtimeVerification: runtimeVerification.verification
       });
       await saveAttemptEvaluation(this.workspacePaths, evaluation);
 
@@ -676,7 +687,14 @@ export class Orchestrator {
       await saveRunReport(
         this.workspacePaths,
         runId,
-        this.buildRunReport(run, attempt, execution.writeback, evaluation, nextCurrent)
+        this.buildRunReport(
+          run,
+          attempt,
+          execution.writeback,
+          evaluation,
+          runtimeVerification,
+          nextCurrent
+        )
       );
 
       for (const runSteer of steers.filter((item) => item.status === "queued")) {
@@ -701,6 +719,7 @@ export class Orchestrator {
           }
         })
       );
+      await this.appendRuntimeVerificationJournal(runId, attempt.id, runtimeVerification);
       await this.appendCheckpointJournal(runId, attempt.id, checkpointOutcome);
     } catch (error) {
       attempt = updateAttempt(attempt, {
@@ -732,6 +751,36 @@ export class Orchestrator {
         })
       );
     }
+  }
+
+  private async appendRuntimeVerificationJournal(
+    runId: string,
+    attemptId: string,
+    verificationOutcome: AttemptRuntimeVerificationOutcome
+  ): Promise<void> {
+    if (verificationOutcome.verification.status === "not_applicable") {
+      return;
+    }
+
+    await appendRunJournal(
+      this.workspacePaths,
+      createRunJournalEntry({
+        run_id: runId,
+        attempt_id: attemptId,
+        type:
+          verificationOutcome.verification.status === "passed"
+            ? "attempt.verification.passed"
+            : "attempt.verification.failed",
+        payload: {
+          status: verificationOutcome.verification.status,
+          failure_code: verificationOutcome.verification.failure_code,
+          failure_reason: verificationOutcome.verification.failure_reason,
+          changed_files: verificationOutcome.verification.changed_files,
+          command_count: verificationOutcome.verification.command_results.length,
+          artifact_path: verificationOutcome.artifact_path
+        }
+      })
+    );
   }
 
   private applyCheckpointOutcomeToCurrentDecision(
@@ -947,6 +996,7 @@ export class Orchestrator {
     attempt: Attempt,
     result: WorkerWriteback,
     evaluation: AttemptEvaluation,
+    runtimeVerification: AttemptRuntimeVerificationOutcome,
     current: CurrentDecision
   ): string {
     return [
@@ -958,6 +1008,7 @@ export class Orchestrator {
       `- Evaluator recommendation: ${evaluation.recommendation}`,
       `- Suggested next attempt type: ${evaluation.suggested_attempt_type ?? "none"}`,
       `- Verification status: ${evaluation.verification_status}`,
+      `- Runtime verification: ${runtimeVerification.verification.status}`,
       "",
       "## Summary",
       "",
@@ -966,6 +1017,11 @@ export class Orchestrator {
       "## Evaluator",
       "",
       evaluation.rationale,
+      "",
+      "## Runtime Verification",
+      "",
+      runtimeVerification.verification.failure_reason ??
+        `Changed files: ${runtimeVerification.verification.changed_files.join(", ") || "none"}`,
       "",
       "## Next Action",
       "",

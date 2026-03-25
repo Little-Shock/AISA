@@ -230,8 +230,7 @@ async function readGitStatus(repoRoot: string): Promise<string[]> {
 
   return result.stdout
     .split(/\r?\n/u)
-    .map((line) => line.trim())
-    .filter(Boolean);
+    .filter((line) => line.length > 0);
 }
 
 async function readGitCommitFiles(repoRoot: string, revision: string): Promise<string[]> {
