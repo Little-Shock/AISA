@@ -8,7 +8,13 @@
     "dev": "pnpm --parallel --filter @autoresearch/control-api --filter @autoresearch/dashboard-ui dev",
     "typecheck": "pnpm -r --if-present typecheck",
     "build": "pnpm -r --if-present build",
-    "smoke": "tsx scripts/smoke-plan.ts"
+    "smoke": "tsx scripts/smoke-plan.ts",
+    "verify:runtime": "tsx scripts/verify-run-loop.ts",
+    "verify:drive-run": "tsx scripts/verify-drive-run.ts",
+    "verify:worker-adapter": "tsx scripts/verify-worker-adapter.ts",
+    "verify:self-bootstrap": "tsx scripts/verify-self-bootstrap.ts",
+    "bootstrap:self": "tsx scripts/bootstrap-self-run.ts",
+    "drive:run": "tsx scripts/drive-run.ts"
   },
   "dependencies": {
     "@autoresearch/domain": "workspace:*",

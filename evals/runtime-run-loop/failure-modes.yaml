@@ -1,0 +1,122 @@
+version: 1
+target:
+  name: "AISA run loop"
+  type: "workflow"
+
+failure_modes:
+  - id: "route_runtime_change_not_covered_by_run_suite"
+    surface: "routing"
+    description: "A runtime-affecting backend change lands without being exercised by the run-centered smoke suite."
+    user_impact: "Critical regressions can hide behind legacy goal or UI paths and escape the release gate."
+    severity: "major"
+    evidence_required:
+      - "changed_source_paths"
+      - "selected_smoke_cases"
+      - "suite_scope"
+    evaluator:
+      type: "deterministic"
+      implementation_hint: "Require backend runtime changes to map to at least one smoke case or a new case addition."
+    needs_full_trace: false
+
+  - id: "ops_duplicate_running_attempt_after_restart"
+    surface: "operations"
+    description: "A persisted running attempt is dispatched again after orchestrator restart."
+    user_impact: "The system replays work, corrupts the attempt timeline, and can mutate the same task twice."
+    severity: "blocker"
+    evidence_required:
+      - "attempt_statuses"
+      - "journal_events"
+      - "current_decision"
+    evaluator:
+      type: "deterministic"
+      implementation_hint: "Assert that a persisted running attempt is paused for recovery instead of getting a second attempt.started event."
+    needs_full_trace: true
+
+  - id: "exec_research_does_not_handoff_to_execution"
+    surface: "planning"
+    description: "A strong research result fails to move the loop into execution."
+    user_impact: "The system stalls in analysis even when it has enough evidence to act."
+    severity: "blocker"
+    evidence_required:
+      - "attempt_statuses"
+      - "evaluation_statuses"
+      - "current_decision"
+    evaluator:
+      type: "deterministic"
+      implementation_hint: "Check that a research attempt with actionable evidence leads to an execution attempt and a completed run."
+    needs_full_trace: true
+
+  - id: "exec_repeated_no_progress_without_pause"
+    surface: "execution"
+    description: "The loop keeps scheduling the same low-signal attempt type instead of pausing for steer."
+    user_impact: "Runtime cost grows while the system pretends it is still making progress."
+    severity: "blocker"
+    evidence_required:
+      - "attempt_statuses"
+      - "current_decision"
+      - "journal_events"
+    evaluator:
+      type: "deterministic"
+      implementation_hint: "Check that two trailing same-type completed attempts with no new signal end in waiting_steer."
+    needs_full_trace: true
+
+  - id: "artifact_malformed_writeback_hidden"
+    surface: "artifact"
+    description: "Malformed execution writeback is masked instead of surfacing as an explicit blocked state."
+    user_impact: "A bad worker result can look like success and poison later planning."
+    severity: "blocker"
+    evidence_required:
+      - "attempt_statuses"
+      - "blocking_reason"
+      - "journal_events"
+    evaluator:
+      type: "deterministic"
+      implementation_hint: "Execution parse failures must end in attempt.failed plus waiting_steer with the parse reason preserved."
+    needs_full_trace: true
+
+  - id: "ops_worker_process_failure_hidden"
+    surface: "operations"
+    description: "A worker process fails during a research or execution attempt but the run does not surface the failure as an explicit blocked state."
+    user_impact: "The system appears busy forever while the real failure is buried in worker logs."
+    severity: "blocker"
+    evidence_required:
+      - "attempt_statuses"
+      - "blocking_reason"
+      - "journal_events"
+    evaluator:
+      type: "deterministic"
+      implementation_hint: "Worker process failures must end in attempt.failed plus waiting_steer with the process error preserved."
+    needs_full_trace: true
+
+  - id: "outcome_completed_without_verified_execution"
+    surface: "outcome"
+    description: "A run reports completed even though no execution attempt verified the change."
+    user_impact: "Operators trust a false success and debug the wrong layer."
+    severity: "major"
+    evidence_required:
+      - "attempt_types"
+      - "evaluation_statuses"
+      - "current_decision"
+    evaluator:
+      type: "deterministic"
+      implementation_hint: "Completion requires an execution attempt whose verification_status is passed."
+    needs_full_trace: true
+
+  - id: "state_current_decision_drift"
+    surface: "outcome"
+    description: "current.json says one thing while attempts and journal show a different state."
+    user_impact: "The UI and the loop make decisions from a corrupted view of the run."
+    severity: "minor"
+    evidence_required:
+      - "current_decision"
+      - "attempt_statuses"
+      - "journal_events"
+    evaluator:
+      type: "deterministic"
+      implementation_hint: "Check that latest_attempt_id, waiting_for_human, and run_status agree with the terminal attempt history."
+    needs_full_trace: true
+
+notes:
+  target_specific_failures_to_add:
+    - "execution verification contract is still heuristic and needs dedicated artifact-schema checks"
+  reviewer_only_failures: []

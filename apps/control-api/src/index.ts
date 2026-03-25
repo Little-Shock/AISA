@@ -21,7 +21,7 @@ import {
 import { ContextManager } from "@autoresearch/context-manager";
 import { appendEvent, listEvents } from "@autoresearch/event-log";
 import { Orchestrator } from "@autoresearch/orchestrator";
-import { generateInitialPlan } from "@autoresearch/planner";
+import { buildSelfBootstrapRunTemplate, generateInitialPlan } from "@autoresearch/planner";
 import {
   appendRunJournal,
   ensureWorkspace,
@@ -152,6 +152,95 @@ export async function buildServer() {
     );
 
     return reply.code(201).send({ run, current });
+  });
+
+  app.post("/runs/self-bootstrap", async (request, reply) => {
+    const body = (request.body as
+      | {
+          owner_id?: string;
+          focus?: string;
+          launch?: boolean;
+          seed_steer?: boolean;
+        }
+      | undefined) ?? {
+      launch: true,
+      seed_steer: true
+    };
+    const template = buildSelfBootstrapRunTemplate({
+      workspaceRoot: repositoryRoot,
+      ownerId: body.owner_id,
+      focus: body.focus
+    });
+    const run = createRun(template.runInput);
+    let current = createCurrentDecision({
+      run_id: run.id,
+      run_status: "draft",
+      summary: "Self-bootstrap run created. Waiting to launch."
+    });
+
+    await saveRun(workspacePaths, run);
+    await saveCurrentDecision(workspacePaths, current);
+    await appendRunJournal(
+      workspacePaths,
+      createRunJournalEntry({
+        run_id: run.id,
+        type: "run.created",
+        payload: {
+          title: run.title,
+          owner_id: run.owner_id,
+          template: "self-bootstrap"
+        }
+      })
+    );
+
+    let runSteer = null;
+    if (body.seed_steer !== false) {
+      runSteer = createRunSteer({
+        run_id: run.id,
+        content: template.initialSteer
+      });
+      await saveRunSteer(workspacePaths, runSteer);
+      await appendRunJournal(
+        workspacePaths,
+        createRunJournalEntry({
+          run_id: run.id,
+          type: "run.steer.queued",
+          payload: {
+            content: runSteer.content,
+            template: "self-bootstrap"
+          }
+        })
+      );
+    }
+
+    if (body.launch !== false) {
+      current = updateCurrentDecision(current, {
+        run_status: "running",
+        waiting_for_human: false,
+        blocking_reason: null,
+        recommended_next_action: "start_first_attempt",
+        recommended_attempt_type: "research",
+        summary: "Self-bootstrap run launched. Loop will create the first attempt."
+      });
+      await saveCurrentDecision(workspacePaths, current);
+      await appendRunJournal(
+        workspacePaths,
+        createRunJournalEntry({
+          run_id: run.id,
+          type: "run.launched",
+          payload: {
+            template: "self-bootstrap"
+          }
+        })
+      );
+    }
+
+    return reply.code(201).send({
+      run,
+      current,
+      steer: runSteer,
+      template: "self-bootstrap"
+    });
   });
 
   app.post("/runs/:runId/launch", async (request, reply) => {

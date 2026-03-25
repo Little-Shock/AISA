@@ -1,5 +1,5 @@
-import { createWriteStream } from "node:fs";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { createWriteStream, constants as fsConstants } from "node:fs";
+import { access, chmod, mkdir, readFile, symlink, writeFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { join } from "node:path";
 import type {
@@ -32,6 +32,155 @@ export interface BranchExecutionResult {
   writeback: WorkerWriteback;
   reportMarkdown: string;
   exitCode: number;
+}
+
+const RESEARCH_ALLOWED_COMMANDS = [
+  "awk",
+  "basename",
+  "cat",
+  "cut",
+  "dirname",
+  "find",
+  "git",
+  "grep",
+  "head",
+  "jq",
+  "ls",
+  "nl",
+  "readlink",
+  "realpath",
+  "rg",
+  "sed",
+  "sort",
+  "stat",
+  "tail",
+  "uniq",
+  "wc",
+  "xargs"
+] as const;
+
+const RESEARCH_BLOCKED_COMMANDS = [
+  "bun",
+  "next",
+  "node",
+  "npm",
+  "npx",
+  "pnpm",
+  "python",
+  "python3",
+  "tsx",
+  "ts-node",
+  "uv",
+  "vite",
+  "yarn"
+] as const;
+
+export interface ResearchShellGuard {
+  binDir: string;
+  zdotdir: string;
+  env: NodeJS.ProcessEnv;
+  allowedCommands: string[];
+  blockedCommands: string[];
+}
+
+export function resolveSandboxForAttempt(
+  sandbox: CodexCliConfig["sandbox"],
+  attemptType: Attempt["attempt_type"]
+): CodexCliConfig["sandbox"] {
+  if (attemptType !== "execution") {
+    return sandbox;
+  }
+
+  return sandbox === "read-only" ? "workspace-write" : sandbox;
+}
+
+export function buildAttemptModeRules(
+  attemptType: Attempt["attempt_type"]
+): string[] {
+  if (attemptType === "execution") {
+    return [
+      "- You may modify files only within the provided workspace to complete the task.",
+      "- Keep the change as small as possible and leave clear verification evidence."
+    ];
+  }
+
+  return [
+    "- Work in read-only analysis mode. Do not modify files in the workspace.",
+    "- Prefer file inspection and simple read-only shell commands over build or package-script execution.",
+    "- Do not run package scripts, tsx, dev servers, or long-running processes during research.",
+    "- The runtime exposes only a restricted read-only shell path during research, so package managers and script runners are blocked.",
+    "- If command-based verification is needed, recommend it as the next execution attempt instead of doing it now."
+  ];
+}
+
+export async function prepareResearchShellGuard(input: {
+  artifactsDir: string;
+  baseEnv: NodeJS.ProcessEnv;
+}): Promise<ResearchShellGuard> {
+  const guardRoot = join(input.artifactsDir, "research-shell");
+  const binDir = join(guardRoot, "bin");
+  const zdotdir = join(guardRoot, "zdotdir");
+  const shellEnvFile = join(guardRoot, "shell-env.sh");
+  const basePath = input.baseEnv.PATH ?? process.env.PATH ?? "";
+  const allowedCommands: string[] = [];
+
+  await mkdir(binDir, { recursive: true });
+  await mkdir(zdotdir, { recursive: true });
+
+  for (const command of RESEARCH_ALLOWED_COMMANDS) {
+    const commandPath = await resolveCommandPath(command, basePath);
+    if (!commandPath) {
+      continue;
+    }
+
+    await symlink(commandPath, join(binDir, command));
+    allowedCommands.push(command);
+  }
+
+  for (const command of RESEARCH_BLOCKED_COMMANDS) {
+    const wrapperPath = join(binDir, command);
+    await writeFile(
+      wrapperPath,
+      [
+        "#!/bin/sh",
+        `echo \"AISA research mode blocks ${command}. Use file inspection now and leave command execution for an execution attempt.\" >&2`,
+        "exit 64"
+      ].join("\n"),
+      "utf8"
+    );
+    await chmod(wrapperPath, 0o755);
+  }
+
+  const shellEnv = [
+    `export PATH="${binDir}"`,
+    "export AISA_ATTEMPT_MODE=research"
+  ].join("\n");
+
+  await Promise.all([
+    writeFile(shellEnvFile, `${shellEnv}\n`, "utf8"),
+    writeFile(join(zdotdir, ".zshenv"), `${shellEnv}\n`, "utf8"),
+    writeFile(join(zdotdir, ".zprofile"), `${shellEnv}\n`, "utf8"),
+    writeFile(join(zdotdir, ".zshrc"), `${shellEnv}\n`, "utf8"),
+    writeJsonFile(join(guardRoot, "policy.json"), {
+      mode: "research",
+      allowed_commands: allowedCommands,
+      blocked_commands: [...RESEARCH_BLOCKED_COMMANDS]
+    })
+  ]);
+
+  return {
+    binDir,
+    zdotdir,
+    env: {
+      ...input.baseEnv,
+      ZDOTDIR: zdotdir,
+      BASH_ENV: shellEnvFile,
+      ENV: shellEnvFile,
+      AISA_ATTEMPT_MODE: "research"
+    },
+    allowedCommands,
+    blockedCommands: [...RESEARCH_BLOCKED_COMMANDS]
+  };
 }
 
 export class CodexCliWorkerAdapter {
@@ -131,11 +280,15 @@ export class CodexCliWorkerAdapter {
       child.stdin.end();
     });
 
-    stdoutStream.end();
-    stderrStream.end();
+    await Promise.all([closeStream(stdoutStream), closeStream(stderrStream)]);
 
     if (exitCode !== 0) {
-      throw new Error(`Codex CLI exited with code ${exitCode} for branch ${branch.id}`);
+      throw new Error(
+        await buildCodexFailureMessage({
+          stderrFile: branchPaths.stderrFile,
+          defaultMessage: `Codex CLI exited with code ${exitCode} for branch ${branch.id}`
+        })
+      );
     }
 
     const rawOutput = await readFile(outputFile, "utf8");
@@ -164,6 +317,10 @@ export class CodexCliWorkerAdapter {
     const attemptPaths = resolveAttemptPaths(workspacePaths, run.id, attempt.id);
     const outputFile = join(attemptPaths.attemptDir, "codex-output.json");
     const promptFile = join(attemptPaths.attemptDir, "worker-prompt.md");
+    const sandbox = resolveSandboxForAttempt(
+      this.config.sandbox,
+      attempt.attempt_type
+    );
 
     await mkdir(attemptPaths.artifactsDir, { recursive: true });
 
@@ -186,7 +343,7 @@ export class CodexCliWorkerAdapter {
       "-C",
       attempt.workspace_root,
       "-s",
-      this.config.sandbox,
+      sandbox,
       "--output-last-message",
       outputFile
     ];
@@ -207,9 +364,16 @@ export class CodexCliWorkerAdapter {
 
     const stdoutStream = createWriteStream(attemptPaths.stdoutFile, { flags: "a" });
     const stderrStream = createWriteStream(attemptPaths.stderrFile, { flags: "a" });
-    const env = {
+    let env: NodeJS.ProcessEnv = {
       ...process.env
     };
+
+    if (attempt.attempt_type === "research") {
+      env = (await prepareResearchShellGuard({
+        artifactsDir: attemptPaths.artifactsDir,
+        baseEnv: env
+      })).env;
+    }
 
     const exitCode = await new Promise<number>((resolve, reject) => {
       const child = spawn(this.config.command, args, {
@@ -245,11 +409,15 @@ export class CodexCliWorkerAdapter {
       child.stdin.end();
     });
 
-    stdoutStream.end();
-    stderrStream.end();
+    await Promise.all([closeStream(stdoutStream), closeStream(stderrStream)]);
 
     if (exitCode !== 0) {
-      throw new Error(`Codex CLI exited with code ${exitCode} for attempt ${attempt.id}`);
+      throw new Error(
+        await buildCodexFailureMessage({
+          stderrFile: attemptPaths.stderrFile,
+          defaultMessage: `Codex CLI exited with code ${exitCode} for attempt ${attempt.id}`
+        })
+      );
     }
 
     const rawOutput = await readFile(outputFile, "utf8");
@@ -341,16 +509,11 @@ function buildCodexAttemptPrompt(
   attempt: Attempt,
   context: unknown
 ): string {
-  const modeLine =
-    attempt.attempt_type === "execution"
-      ? "- You may modify files only within the provided workspace to complete the task."
-      : "- Work in read-only analysis mode. Do not modify files in the workspace.";
-
   return [
     "You are a Codex CLI worker inside AISA.",
     "",
     "Rules:",
-    modeLine,
+    ...buildAttemptModeRules(attempt.attempt_type),
     "- Use local repository evidence whenever possible.",
     "- If evidence is weak or missing, say so explicitly.",
     "- Return only valid JSON with no markdown fences and no extra commentary.",
@@ -400,6 +563,96 @@ function parseWritebackFromText(text: string): WorkerWriteback {
     : trimmed;
 
   return WorkerWritebackSchema.parse(JSON.parse(candidate));
+}
+
+async function resolveCommandPath(
+  commandName: string,
+  pathValue: string
+): Promise<string | null> {
+  for (const segment of pathValue.split(":")) {
+    if (!segment) {
+      continue;
+    }
+
+    const candidate = join(segment, commandName);
+    try {
+      await access(candidate, fsConstants.X_OK);
+      return candidate;
+    } catch {
+      continue;
+    }
+  }
+
+  return null;
+}
+
+async function closeStream(stream: {
+  end: (callback?: () => void) => void;
+  once: (event: string, listener: (error: Error) => void) => void;
+}): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    stream.once("error", reject);
+    stream.end(resolve);
+  });
+}
+
+async function buildCodexFailureMessage(input: {
+  stderrFile: string;
+  defaultMessage: string;
+}): Promise<string> {
+  const stderr = await readFile(input.stderrFile, "utf8").catch(() => "");
+  const excerpt = summarizeCodexStderr(stderr);
+
+  return excerpt ? `${input.defaultMessage}\n${excerpt}` : input.defaultMessage;
+}
+
+function summarizeCodexStderr(stderr: string): string | null {
+  const lines = stderr
+    .split(/\r?\n/u)
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  const ignoredPatterns = [
+    /^deprecated:/i,
+    /^mcp startup:/i,
+    /^tokens used$/i,
+    /^warning: no last agent message/i,
+    /^reconnecting\.\.\./i
+  ];
+  const preferredPatterns = [
+    /^ERROR:/i,
+    /^Error:/,
+    /unexpected status/i,
+    /unauthorized/i,
+    /forbidden/i,
+    /invalid token/i,
+    /listen EPERM/i,
+    /AISA research mode blocks/i
+  ];
+
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const line = lines[index];
+    if (ignoredPatterns.some((pattern) => pattern.test(line))) {
+      continue;
+    }
+
+    if (preferredPatterns.some((pattern) => pattern.test(line))) {
+      return `Worker stderr: ${line}`;
+    }
+  }
+
+  let fallback: string | null = null;
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const line = lines[index];
+    if (ignoredPatterns.some((pattern) => pattern.test(line))) {
+      continue;
+    }
+
+    fallback = line;
+    break;
+  }
+
+  return fallback ? `Worker stderr: ${fallback}` : null;
 }
 
 function buildBranchReportMarkdown(

@@ -1,0 +1,125 @@
+version: 1
+target:
+  name: "AISA run loop"
+  slug: "aisa-run-loop"
+  type: "workflow"
+  owner: "aisa-runtime"
+  source_paths:
+    - "packages/orchestrator/src/index.ts"
+    - "packages/judge/src/index.ts"
+    - "packages/worker-adapters/src/index.ts"
+    - "packages/state-store/src/index.ts"
+    - "scripts/verify-run-loop.ts"
+
+entrypoints:
+  primary_user_intents:
+    - "Validate that a run-centered backend change preserves the AISA runtime contract."
+    - "Turn a runtime failure into a reproducible regression case before changing orchestrator logic."
+  trigger_signals:
+    - "The change touches run lifecycle, current decision logic, evaluator behavior, worker adapter parsing, or persistence layout."
+    - "The failure report mentions duplicate attempts, worker process failures, bad execution artifacts, missing evidence, or restart recovery."
+  non_trigger_signals:
+    - "Pure UI styling changes that do not alter runtime semantics."
+    - "Standalone goal or branch legacy flows that are not part of the run-centered path."
+
+required_inputs:
+  required_user_inputs:
+    - "a code change, bug report, or design decision that affects run semantics"
+  optional_context:
+    - "a real run directory that reproduced the bug"
+    - "handoff notes that explain the intended runtime direction"
+  required_runtime_dependencies: []
+
+workflow:
+  required_steps:
+    - id: "inspect_runtime_contract"
+      description: "Inspect the current run, attempt, evaluator, and persistence contract before changing behavior."
+      evidence:
+        - "source_paths_loaded"
+        - "runtime_contract_summary"
+    - id: "select_or_recover_attempt"
+      description: "Choose the next attempt or explicitly recover a persisted running attempt without silently replaying it."
+      evidence:
+        - "current_decision"
+        - "attempt_selection_or_recovery"
+    - id: "execute_attempt_once"
+      description: "Dispatch at most one live execution for a given attempt lifecycle."
+      evidence:
+        - "attempt_started_event"
+        - "attempt_execution_trace"
+    - id: "persist_evidence_and_evaluation"
+      description: "Persist raw result, evaluation, journal events, and current decision together."
+      evidence:
+        - "attempt_result_or_failure"
+        - "evaluation_or_failure_reason"
+        - "current_decision_update"
+    - id: "expose_terminal_or_blocked_state"
+      description: "Expose completion, retry, or waiting-human state explicitly instead of masking failure."
+      evidence:
+        - "terminal_or_blocked_status"
+        - "blocking_reason_when_needed"
+  step_order_constraints:
+    - "A run cannot be marked completed before at least one execution attempt reaches verification_status=passed."
+    - "A persisted running attempt cannot be started again after restart without an explicit recovery policy."
+    - "A failed execution parse must surface as a blocked runtime state, not as a synthetic success."
+  forbidden_behaviors:
+    - "silently coercing malformed worker writeback into a passing result"
+    - "restarting a persisted running attempt by default after orchestrator restart"
+    - "continuing repeated no-progress attempts forever without waiting for human steer"
+    - "reporting completion without persisted attempt evidence"
+  allowed_shortcuts: []
+
+outputs:
+  required_artifacts:
+    - path: "runs/<run_id>/contract.json"
+      format: "run contract"
+      validation: "Exists for every runtime case and matches the launched run."
+    - path: "runs/<run_id>/current.json"
+      format: "current decision snapshot"
+      validation: "Reflects the final visible runtime state after the case finishes."
+    - path: "runs/<run_id>/journal.ndjson"
+      format: "ordered run journal"
+      validation: "Contains attempt and recovery events needed to reconstruct what happened."
+    - path: "runs/<run_id>/attempts/<attempt_id>/meta.json"
+      format: "attempt lifecycle metadata"
+      validation: "Captures attempt type, status, and terminal timestamps."
+    - path: "runs/<run_id>/attempts/<attempt_id>/result.json or failure journal entry"
+      format: "execution evidence or explicit failure signal"
+      validation: "Success stores result.json; failure stores an explicit journal event and blocking reason."
+  optional_artifacts: []
+  user_visible_outcomes:
+    - "completed when execution really verifies"
+    - "waiting_steer when the loop is blocked or ambiguous"
+    - "failed only when the runtime has an explicit terminal failure reason"
+
+quality_bar:
+  must_haves:
+    - "All smoke cases in evals/runtime-run-loop/datasets/smoke pass."
+    - "Every blocker failure leaves a reviewable journal trail and a blocking reason."
+    - "No case passes by matching a synthetic text rubric alone."
+  nice_to_haves:
+    - "Smoke output is machine-readable and easy to diff in CI."
+  explicit_non_goals:
+    - "GUI rendering quality"
+    - "legacy goal/branch UX parity"
+
+observability:
+  trace_fields_required:
+    - run_id
+    - attempt_id
+    - current_decision
+    - journal_events
+    - attempt_statuses
+    - evaluation_statuses
+    - blocking_reason
+  review_packet_requirements:
+    - full_trace_for_process_failures
+    - artifact_manifest
+    - current_decision_snapshot
+
+notes:
+  assumptions:
+    - "The run-centered path is the primary backend path under active development."
+    - "Legacy goal/branch logic may coexist, but new runtime coverage must anchor on runs."
+  open_questions:
+    - "Whether persisted running attempts should later become resumable instead of always pausing for human review."

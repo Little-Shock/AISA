@@ -1,5 +1,10 @@
 import type { BranchSpec, EvalSpec, Goal } from "@autoresearch/domain";
 import { BranchSpecSchema, EvalSpecSchema } from "@autoresearch/domain";
+export {
+  buildSelfBootstrapRunTemplate,
+  type SelfBootstrapTemplate,
+  type SelfBootstrapTemplateOptions
+} from "./self-bootstrap.js";
 
 export interface PlannerOutput {
   planMarkdown: string;

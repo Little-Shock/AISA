@@ -4,6 +4,7 @@
 
 - 根据 goal 生成初始 `plan.md`
 - 产出 `branch_specs.json` 和 `eval_spec.json`
+- 提供 run-centered 的模板化入口，比如 self-bootstrap run
 - 只做计划生成，不负责执行和状态推进
 
 边界：

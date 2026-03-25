@@ -1,0 +1,20 @@
+{
+  "id": "repeated-research-pauses-for-steer",
+  "description": "Two low-signal research attempts in a row should stop the loop and wait for human steer.",
+  "driver": "research_stall",
+  "max_ticks": 4,
+  "expected": {
+    "run_status": "waiting_steer",
+    "waiting_for_human": true,
+    "recommended_next_action": "wait_for_human",
+    "attempt_types": ["research", "research"],
+    "attempt_statuses": ["completed", "completed"],
+    "verification_statuses": ["not_applicable", "not_applicable"],
+    "required_journal_types": ["attempt.completed"],
+    "required_journal_counts": {
+      "attempt.started": 2,
+      "attempt.completed": 2
+    },
+    "blocking_reason_includes": "Need stronger grounded evidence"
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "id": "execution-parse-failure-surfaces-blocking-state",
+  "description": "Bad execution writeback must block the run and surface the parse failure instead of pretending to succeed.",
+  "driver": "execution_parse_failure",
+  "max_ticks": 4,
+  "expected": {
+    "run_status": "waiting_steer",
+    "waiting_for_human": true,
+    "recommended_next_action": "wait_for_human",
+    "attempt_types": ["research", "execution"],
+    "attempt_statuses": ["completed", "failed"],
+    "verification_statuses": ["not_applicable"],
+    "required_journal_types": ["attempt.failed"],
+    "required_journal_counts": {
+      "attempt.started": 2,
+      "attempt.completed": 1,
+      "attempt.failed": 1
+    },
+    "blocking_reason_includes": "Expected object, received string"
+  }
+}

@@ -383,8 +383,19 @@ export class Orchestrator {
       }
 
       const attempts = await listAttempts(this.workspacePaths, run.id);
+      const runningAttempt = attempts.find((attempt) => attempt.status === "running");
+
+      if (runningAttempt) {
+        const activeKey = this.getActiveAttemptKey(run.id, runningAttempt.id);
+
+        if (!this.activeAttempts.has(activeKey)) {
+          await this.recoverRunningAttempt(run.id, runningAttempt, current);
+        }
+        continue;
+      }
+
       const pendingAttempt = attempts.find((attempt) =>
-        ["created", "queued", "running"].includes(attempt.status)
+        ["created", "queued"].includes(attempt.status)
       );
 
       if (pendingAttempt) {
@@ -419,6 +430,47 @@ export class Orchestrator {
     }
   }
 
+  private async recoverRunningAttempt(
+    runId: string,
+    attempt: Attempt,
+    current: CurrentDecision | null
+  ): Promise<void> {
+    const message =
+      `Attempt ${attempt.id} was still marked running when the orchestrator resumed. ` +
+      "Recovery requires human review before retry.";
+    const stoppedAttempt = updateAttempt(attempt, {
+      status: "stopped",
+      ended_at: new Date().toISOString()
+    });
+    const nextCurrent = updateCurrentDecision(
+      current ?? createCurrentDecision({ run_id: runId }),
+      {
+        run_status: "waiting_steer",
+        latest_attempt_id: attempt.id,
+        recommended_next_action: "wait_for_human",
+        recommended_attempt_type: attempt.attempt_type,
+        summary: message,
+        blocking_reason: message,
+        waiting_for_human: true
+      }
+    );
+
+    await saveAttempt(this.workspacePaths, stoppedAttempt);
+    await saveCurrentDecision(this.workspacePaths, nextCurrent);
+    await appendRunJournal(
+      this.workspacePaths,
+      createRunJournalEntry({
+        run_id: runId,
+        attempt_id: attempt.id,
+        type: "attempt.recovery_required",
+        payload: {
+          previous_status: attempt.status,
+          recovery_policy: "pause_for_human_review"
+        }
+      })
+    );
+  }
+
   private async planNextAttempt(
     runId: string,
     current: CurrentDecision,
@@ -434,6 +486,23 @@ export class Orchestrator {
       : null;
 
     if (attempts.length === 0) {
+      if (queuedSteers.length > 0) {
+        return createAttempt({
+          run_id: run.id,
+          attempt_type: "research",
+          worker: this.adapter.type,
+          objective: this.buildSteeredAttemptObjective(
+            run,
+            current,
+            "research",
+            null,
+            queuedSteers.map((runSteer) => runSteer.content)
+          ),
+          success_criteria: run.success_criteria,
+          workspace_root: run.workspace_root
+        });
+      }
+
       return createAttempt({
         run_id: run.id,
         attempt_type: "research",
