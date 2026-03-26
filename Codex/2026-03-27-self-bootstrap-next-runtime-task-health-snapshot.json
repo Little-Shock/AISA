@@ -1,0 +1,50 @@
+{
+  "title": "把 runtime 健康快照接进 self-bootstrap 入口",
+  "summary": "现在历史 contract 漂移已经有只读体检，也被 `verify:runtime` 锁住了，但 `bootstrap:self` 和 self-bootstrap 模板还不会主动把这些真实回归喂给下一轮规划。下一步最小且更值的运行时任务，是在启动自举 run 前生成一份只读 runtime 健康快照，把 `verify:runtime` 和历史 contract 漂移结论持久化进 run 产物，再让首轮 research 直接继承这份证据。",
+  "why_now": [
+    "`scripts/verify-history-contract-drift.ts` 已经能稳定产出机器可读的旧漂移报告。",
+    "`scripts/bootstrap-self-run.ts` 现在只写静态 steer，不会把当前仓库的 runtime 健康状态带进新 run。",
+    "`packages/planner/src/self-bootstrap.ts` 的模板也还是通用提示，缺少本轮真实回归和证据入口。"
+  ],
+  "next_attempt_contract": {
+    "attempt_type": "execution",
+    "objective": "给 self-bootstrap 入口补一份只读 runtime 健康快照。在 `bootstrap:self` 或直接相关的最小运行时路径里，持久化当前 `verify:runtime` 结论和历史 contract 漂移报告，并让新建 self-bootstrap run 的首轮上下文或 steer 能直接引用这份快照。",
+    "success_criteria": [
+      "新建 self-bootstrap run 时，会留下机器可读的 runtime 健康快照产物，至少包含 `verify:runtime` 结论和历史 contract 漂移摘要。",
+      "`bootstrap:self` 生成的新 run，不再只靠静态模板提示，首轮 research 能读到这份快照里的具体回归事实。",
+      "`verify:self-bootstrap` 或直接相关的最小回归会显式断言健康快照已落盘，并且首轮上下文确实引用了它。",
+      "`pnpm typecheck`、`pnpm verify:self-bootstrap`、`pnpm verify:runtime` 从仓库根目录回放通过。"
+    ],
+    "required_evidence": [
+      "git 可见改动只触达 self-bootstrap 入口、模板和直接相关的最小回归。",
+      "留下一个机器可读的 runtime 健康快照样例或回放产物。",
+      "给出 `pnpm typecheck`、`pnpm verify:self-bootstrap`、`pnpm verify:runtime` 的回放结果。"
+    ],
+    "forbidden_shortcuts": [
+      "不要把健康快照只写进文案，不落机器可读产物。",
+      "不要在 bootstrap 阶段静默吞掉 `verify:runtime` 或历史漂移体检失败。",
+      "不要只改提示词文案，不让首轮上下文真正拿到快照证据。"
+    ],
+    "expected_artifacts": [
+      "scripts/bootstrap-self-run.ts",
+      "packages/planner/src/self-bootstrap.ts",
+      "scripts/verify-self-bootstrap.ts"
+    ],
+    "verification_plan": {
+      "commands": [
+        {
+          "purpose": "typecheck the workspace after the change",
+          "command": "pnpm typecheck"
+        },
+        {
+          "purpose": "verify the self-bootstrap entrypoint now persists runtime health snapshots",
+          "command": "pnpm verify:self-bootstrap"
+        },
+        {
+          "purpose": "replay the runtime regression suite after the change",
+          "command": "pnpm verify:runtime"
+        }
+      ]
+    }
+  }
+}

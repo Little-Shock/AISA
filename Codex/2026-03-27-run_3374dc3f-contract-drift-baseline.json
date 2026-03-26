@@ -1,48 +1,56 @@
 {
   "title": "run_3374dc3f 历史 contract 漂移基线",
-  "summary": "本地历史现场里还有 4 个 settled execution attempt 的 `meta.json` 和 `attempt_contract.json` 不一致，`review_packet.json` 也跟着保留了旧 contract。现有 `verify:runtime` 没扫这块，所以旧漂移还在沉默存活。",
+  "summary": "本地历史现场里还有 4 个 settled execution attempt 的 `meta.json` 和 `attempt_contract.json` 不一致，`review_packet.json` 也跟着保留了旧 contract。`verify:runtime` 现在会显式断言这 4 个旧漂移继续报错，避免它们再被当成正常历史。",
   "run_id": "run_3374dc3f",
   "drift_count": 4,
   "current_runtime_gap": [
-    "`package.json` 里的 `verify:runtime` 现在只跑 `scripts/verify-run-loop.ts`。",
-    "`scripts/verify-run-loop.ts` 校验的是临时 smoke 场景，不会扫描仓库里的历史 `runs/*/attempts/*`。"
+    "`package.json` 里的 `verify:runtime` 现在会跑 `scripts/verify-runtime.ts`。",
+    "`scripts/verify-runtime.ts` 会先回放 `scripts/verify-run-loop.ts`，再要求 `scripts/verify-history-contract-drift.ts` 对这 4 个旧漂移以非零退出。"
   ],
   "drifts": [
     {
+      "run_id": "run_3374dc3f",
       "attempt_id": "att_90103f12",
       "status": "completed",
       "objective_match": false,
       "success_criteria_match": false,
+      "review_packet_present": true,
       "review_packet_contract_matches_attempt": false,
       "meta_file": "runs/run_3374dc3f/attempts/att_90103f12/meta.json",
       "contract_file": "runs/run_3374dc3f/attempts/att_90103f12/attempt_contract.json",
       "review_packet_file": "runs/run_3374dc3f/attempts/att_90103f12/review_packet.json"
     },
     {
+      "run_id": "run_3374dc3f",
       "attempt_id": "att_ba6ead60",
       "status": "completed",
       "objective_match": false,
       "success_criteria_match": false,
+      "review_packet_present": true,
       "review_packet_contract_matches_attempt": false,
       "meta_file": "runs/run_3374dc3f/attempts/att_ba6ead60/meta.json",
       "contract_file": "runs/run_3374dc3f/attempts/att_ba6ead60/attempt_contract.json",
       "review_packet_file": "runs/run_3374dc3f/attempts/att_ba6ead60/review_packet.json"
     },
     {
+      "run_id": "run_3374dc3f",
       "attempt_id": "att_c6e69f01",
       "status": "failed",
       "objective_match": false,
       "success_criteria_match": true,
+      "review_packet_present": true,
       "review_packet_contract_matches_attempt": false,
       "meta_file": "runs/run_3374dc3f/attempts/att_c6e69f01/meta.json",
       "contract_file": "runs/run_3374dc3f/attempts/att_c6e69f01/attempt_contract.json",
       "review_packet_file": "runs/run_3374dc3f/attempts/att_c6e69f01/review_packet.json"
     },
     {
+      "run_id": "run_3374dc3f",
       "attempt_id": "att_ef6680e3",
       "status": "completed",
       "objective_match": false,
       "success_criteria_match": false,
+      "review_packet_present": true,
       "review_packet_contract_matches_attempt": false,
       "meta_file": "runs/run_3374dc3f/attempts/att_ef6680e3/meta.json",
       "contract_file": "runs/run_3374dc3f/attempts/att_ef6680e3/attempt_contract.json",
