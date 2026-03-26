@@ -68,11 +68,41 @@ class LowSignalResearchAdapter {
   }
 }
 
-class NoDispatchAdapter {
+class CheckpointResearchAdapter {
   readonly type = "fake-codex";
 
-  async runAttemptTask(): Promise<never> {
-    throw new Error("This case must not dispatch any new attempt.");
+  async runAttemptTask(input: { attempt: Attempt }): Promise<{
+    writeback: WorkerWriteback;
+    reportMarkdown: string;
+    exitCode: number;
+  }> {
+    if (input.attempt.attempt_type !== "research") {
+      throw new Error("Checkpoint auto-resume should dispatch research first.");
+    }
+
+    assert.match(
+      input.attempt.objective,
+      /clean git workspace|提交现场|区分哪些改动属于这轮目标/u
+    );
+
+    return {
+      writeback: {
+        summary: "Dirty workspace blocker was diagnosed and needs a stronger execution contract.",
+        findings: [
+          {
+            type: "fact",
+            content: "Checkpoint blocker came from preexisting workspace changes.",
+            evidence: ["attempt.checkpoint.blocked"]
+          }
+        ],
+        questions: [],
+        recommended_next_steps: ["Prepare a replayable execution contract that isolates the dirty workspace."],
+        confidence: 0.72,
+        artifacts: []
+      },
+      reportMarkdown: "# fake",
+      exitCode: 0
+    };
   }
 }
 
@@ -344,8 +374,8 @@ async function verifyRepeatedAutoResumeExhausts(): Promise<void> {
   );
 }
 
-async function verifyCheckpointBlockerStaysWaiting(): Promise<void> {
-  const { run, workspacePaths } = await bootstrapRun("checkpoint-blocker-stays-waiting");
+async function verifyCheckpointBlockerAutoResumesIntoResearch(): Promise<void> {
+  const { run, workspacePaths } = await bootstrapRun("checkpoint-blocker-auto-resume");
   const completedExecution = updateAttempt(
     createAttempt({
       run_id: run.id,
@@ -393,7 +423,7 @@ async function verifyCheckpointBlockerStaysWaiting(): Promise<void> {
 
   const orchestrator = new Orchestrator(
     workspacePaths,
-    new NoDispatchAdapter() as never,
+    new CheckpointResearchAdapter() as never,
     undefined,
     60_000,
     {
@@ -403,23 +433,36 @@ async function verifyCheckpointBlockerStaysWaiting(): Promise<void> {
   );
 
   await wait(40);
-  await settle(orchestrator, 4);
+  await orchestrator.tick();
+  await wait(30);
+  await orchestrator.tick();
+  await wait(80);
+  await orchestrator.tick();
+  await wait(40);
 
   const current = await getCurrentDecision(workspacePaths, run.id);
   const attempts = await listAttempts(workspacePaths, run.id);
   const journal = await listRunJournal(workspacePaths, run.id);
 
   assert.ok(current, "current decision must exist");
-  assert.equal(current.waiting_for_human, true, "checkpoint blocker should stay waiting");
-  assert.equal(current.run_status, "waiting_steer");
-  assert.equal(attempts.length, 1, "no new attempt should be dispatched");
-  assert.ok(
-    journal.some((entry) => entry.type === "run.auto_resume.blocked"),
-    "expected a blocked auto-resume marker"
+  assert.equal(current.waiting_for_human, false, "checkpoint blocker should auto-resume into research");
+  assert.equal(current.run_status, "running");
+  assert.equal(current.recommended_next_action, "continue_research");
+  assert.deepEqual(
+    attempts.map((attempt) => attempt.attempt_type),
+    ["execution", "research"]
+  );
+  assert.deepEqual(
+    attempts.map((attempt) => attempt.status),
+    ["completed", "completed"]
   );
   assert.ok(
-    !journal.some((entry) => entry.type === "run.auto_resume.scheduled"),
-    "checkpoint blocker must not schedule auto resume"
+    journal.some((entry) => entry.type === "run.auto_resume.scheduled"),
+    "expected the checkpoint blocker to schedule automatic resume"
+  );
+  assert.ok(
+    !journal.some((entry) => entry.type === "run.auto_resume.blocked"),
+    "checkpoint blocker should no longer hard-stop automatic resume"
   );
 }
 
@@ -634,8 +677,8 @@ async function main(): Promise<void> {
       run: verifyRepeatedAutoResumeExhausts
     },
     {
-      id: "checkpoint_blocker_stays_waiting",
-      run: verifyCheckpointBlockerStaysWaiting
+      id: "checkpoint_blocker_auto_resumes_into_research",
+      run: verifyCheckpointBlockerAutoResumesIntoResearch
     },
     {
       id: "recovery_auto_resumes_execution",

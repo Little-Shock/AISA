@@ -84,18 +84,216 @@ type ScenarioObservation = {
     attempt_status: string;
     path: string;
     has_packet: boolean;
+    matches_schema: boolean;
+    schema_error: string | null;
     matches_run_id: boolean;
     matches_attempt_id: boolean;
+    has_generated_at: boolean;
     has_attempt_contract: boolean;
     has_current_decision_snapshot: boolean;
+    snapshot_blocking_reason: string | null;
     journal_count: number;
     has_failure_context: boolean;
+    failure_message: string | null;
     has_result: boolean;
     has_evaluation: boolean;
     has_runtime_verification: boolean;
     artifact_manifest_count: number;
+    has_meta_artifact: boolean;
+    meta_artifact_exists: boolean;
+    has_contract_artifact: boolean;
+    contract_artifact_exists: boolean;
+    has_result_artifact: boolean;
+    result_artifact_exists: boolean;
+    has_evaluation_artifact: boolean;
+    evaluation_artifact_exists: boolean;
+    has_runtime_verification_artifact: boolean;
+    runtime_verification_artifact_exists: boolean;
   }>;
 };
+
+type JsonSchemaLite = {
+  $schema?: string;
+  title?: string;
+  type?: string | string[];
+  required?: string[];
+  properties?: Record<string, JsonSchemaLite>;
+  items?: JsonSchemaLite;
+  enum?: Array<string | number | boolean | null>;
+  additionalProperties?: boolean;
+};
+
+const REVIEW_PACKET_TOP_LEVEL_REQUIRED = [
+  "run_id",
+  "attempt_id",
+  "attempt",
+  "attempt_contract",
+  "current_decision_snapshot",
+  "context",
+  "journal",
+  "failure_context",
+  "result",
+  "evaluation",
+  "runtime_verification",
+  "artifact_manifest",
+  "generated_at"
+] as const;
+
+let reviewPacketSchemaCache: JsonSchemaLite | null = null;
+
+function describeJsonType(value: unknown): string {
+  if (value === null) {
+    return "null";
+  }
+
+  if (Array.isArray(value)) {
+    return "array";
+  }
+
+  return typeof value === "object" ? "object" : typeof value;
+}
+
+function formatSchemaValue(value: string | number | boolean | null): string {
+  return typeof value === "string" ? `"${value}"` : String(value);
+}
+
+function matchesSchemaType(expectedType: string, value: unknown): boolean {
+  if (expectedType === "integer") {
+    return typeof value === "number" && Number.isInteger(value);
+  }
+
+  return describeJsonType(value) === expectedType;
+}
+
+async function loadReviewPacketSchema(): Promise<JsonSchemaLite> {
+  if (reviewPacketSchemaCache) {
+    return reviewPacketSchemaCache;
+  }
+
+  const filePath = join(
+    process.cwd(),
+    "evals",
+    "runtime-run-loop",
+    "review-packet-schema.json"
+  );
+  const schema = JSON.parse(await readFile(filePath, "utf8")) as JsonSchemaLite;
+  const schemaTypes = Array.isArray(schema.type) ? schema.type : [schema.type].filter(Boolean);
+
+  assert.ok(
+    schemaTypes.includes("object"),
+    "review-packet-schema.json should describe an object payload"
+  );
+
+  for (const requiredKey of REVIEW_PACKET_TOP_LEVEL_REQUIRED) {
+    assert.ok(
+      schema.required?.includes(requiredKey),
+      `review-packet-schema.json should require ${requiredKey}`
+    );
+    assert.ok(
+      schema.properties?.[requiredKey],
+      `review-packet-schema.json should describe ${requiredKey}`
+    );
+  }
+
+  reviewPacketSchemaCache = schema;
+  return schema;
+}
+
+function validateJsonSchemaLite(
+  schema: JsonSchemaLite,
+  value: unknown,
+  path = "$"
+): string | null {
+  if (schema.enum && !schema.enum.some((candidate) => candidate === value)) {
+    return `${path} should be one of ${schema.enum.map(formatSchemaValue).join(", ")}`;
+  }
+
+  const allowedTypes = schema.type
+    ? Array.isArray(schema.type)
+      ? schema.type
+      : [schema.type]
+    : [];
+
+  if (allowedTypes.length > 0 && !allowedTypes.some((allowedType) => matchesSchemaType(allowedType, value))) {
+    return `${path} should be ${allowedTypes.join(" | ")} but got ${describeJsonType(value)}`;
+  }
+
+  if (value === null) {
+    return null;
+  }
+
+  if (Array.isArray(value)) {
+    if (!schema.items) {
+      return null;
+    }
+
+    for (let index = 0; index < value.length; index += 1) {
+      const error = validateJsonSchemaLite(schema.items, value[index], `${path}[${index}]`);
+      if (error) {
+        return error;
+      }
+    }
+
+    return null;
+  }
+
+  if (typeof value === "object") {
+    const record = value as Record<string, unknown>;
+
+    for (const requiredKey of schema.required ?? []) {
+      if (!(requiredKey in record)) {
+        return `${path}.${requiredKey} is required`;
+      }
+    }
+
+    for (const [key, propertySchema] of Object.entries(schema.properties ?? {})) {
+      if (!(key in record)) {
+        continue;
+      }
+
+      const error = validateJsonSchemaLite(propertySchema, record[key], `${path}.${key}`);
+      if (error) {
+        return error;
+      }
+    }
+
+    if (schema.additionalProperties === false) {
+      for (const key of Object.keys(record)) {
+        if (!schema.properties?.[key]) {
+          return `${path}.${key} is not allowed`;
+        }
+      }
+    }
+  }
+
+  return null;
+}
+
+async function validatePersistedReviewPacket(input: {
+  reviewPacketFile: string;
+}): Promise<{
+  matchesSchema: boolean;
+  schemaError: string | null;
+}> {
+  try {
+    const [schema, rawReviewPacket] = await Promise.all([
+      loadReviewPacketSchema(),
+      readFile(input.reviewPacketFile, "utf8")
+    ]);
+    const parsed = JSON.parse(rawReviewPacket) as unknown;
+    const schemaError = validateJsonSchemaLite(schema, parsed);
+
+    return {
+      matchesSchema: schemaError === null,
+      schemaError
+    };
+  } catch (error) {
+    return {
+      matchesSchema: false,
+      schemaError: error instanceof Error ? error.message : String(error)
+    };
+  }
+}
 
 class ScenarioAdapter {
   readonly type = "fake-codex";
@@ -589,7 +787,153 @@ async function seedExecutionRetryAfterRecoveryCase(input: {
   );
 }
 
+function parseYamlScalar(rawValue: string): unknown {
+  if (
+    (rawValue.startsWith('"') && rawValue.endsWith('"')) ||
+    (rawValue.startsWith("'") && rawValue.endsWith("'"))
+  ) {
+    return JSON.parse(
+      rawValue.startsWith("'")
+        ? `"${rawValue.slice(1, -1).replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`
+        : rawValue
+    );
+  }
+
+  if (rawValue === "true") {
+    return true;
+  }
+
+  if (rawValue === "false") {
+    return false;
+  }
+
+  if (rawValue === "null") {
+    return null;
+  }
+
+  if (/^-?\d+(?:\.\d+)?$/.test(rawValue)) {
+    return Number(rawValue);
+  }
+
+  return rawValue;
+}
+
+function parseSimpleYaml(text: string): Record<string, unknown> {
+  const lines = text
+    .split(/\r?\n/)
+    .map((line, index) => ({
+      line: index + 1,
+      indent: line.match(/^ */)?.[0].length ?? 0,
+      content: line.trim()
+    }))
+    .filter((line) => line.content.length > 0 && !line.content.startsWith("#"));
+
+  const root: Record<string, unknown> = {};
+  const stack: Array<{
+    indent: number;
+    container: Record<string, unknown> | unknown[];
+    type: "map" | "list";
+  }> = [
+    {
+      indent: -1,
+      container: root,
+      type: "map"
+    }
+  ];
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index]!;
+
+    if (line.indent % 2 !== 0) {
+      throw new Error(`Unsupported indentation on line ${line.line} in regression-gates.yaml`);
+    }
+
+    while (stack.length > 1 && line.indent <= stack[stack.length - 1]!.indent) {
+      stack.pop();
+    }
+
+    const parent = stack[stack.length - 1]!;
+
+    if (line.content.startsWith("- ")) {
+      if (parent.type !== "list") {
+        throw new Error(`Unexpected list item on line ${line.line} in regression-gates.yaml`);
+      }
+
+      parent.container.push(parseYamlScalar(line.content.slice(2).trim()));
+      continue;
+    }
+
+    const separatorIndex = line.content.indexOf(":");
+    if (separatorIndex <= 0) {
+      throw new Error(`Invalid YAML mapping on line ${line.line} in regression-gates.yaml`);
+    }
+
+    const key = line.content.slice(0, separatorIndex).trim();
+    const rawValue = line.content.slice(separatorIndex + 1).trim();
+
+    if (parent.type !== "map") {
+      throw new Error(`Unexpected mapping on line ${line.line} in regression-gates.yaml`);
+    }
+
+    if (rawValue.length > 0) {
+      parent.container[key] = parseYamlScalar(rawValue);
+      continue;
+    }
+
+    const nextLine = lines[index + 1];
+    const childContainer =
+      nextLine && nextLine.indent > line.indent && nextLine.content.startsWith("- ")
+        ? []
+        : {};
+
+    parent.container[key] = childContainer;
+    stack.push({
+      indent: line.indent,
+      container: childContainer,
+      type: Array.isArray(childContainer) ? "list" : "map"
+    });
+  }
+
+  return root;
+}
+
+async function assertRegressionGatesParseable(): Promise<void> {
+  const filePath = join(
+    process.cwd(),
+    "evals",
+    "runtime-run-loop",
+    "regression-gates.yaml"
+  );
+  const parsed = parseSimpleYaml(await readFile(filePath, "utf8"));
+  const promotionRule =
+    parsed.promotion_rule && typeof parsed.promotion_rule === "object"
+      ? (parsed.promotion_rule as Record<string, unknown>)
+      : null;
+  const gates =
+    parsed.gates && typeof parsed.gates === "object"
+      ? (parsed.gates as Record<string, unknown>)
+      : null;
+  const smokeGate =
+    gates?.smoke && typeof gates.smoke === "object"
+      ? (gates.smoke as Record<string, unknown>)
+      : null;
+
+  assert.equal(parsed.version, 1, "regression-gates.yaml should keep version=1");
+  assert.equal(
+    promotionRule?.require_review_packet_schema_stable,
+    true,
+    "regression-gates.yaml should keep review packet stability gate enabled"
+  );
+  assert.equal(
+    smokeGate?.required_pass_rate,
+    1,
+    "regression-gates.yaml should keep the smoke pass rate gate"
+  );
+}
+
 async function loadSmokeCases(): Promise<ScenarioCase[]> {
+  await assertRegressionGatesParseable();
+  await loadReviewPacketSchema();
   const smokeDir = join(process.cwd(), "evals", "runtime-run-loop", "datasets", "smoke");
   const entries = await readdir(smokeDir);
   const cases = await Promise.all(
@@ -741,23 +1085,55 @@ async function collectObservation(
     attempts
       .filter((attempt) => ["completed", "failed", "stopped"].includes(attempt.status))
       .map(async (attempt) => {
-        const reviewPacket = await getAttemptReviewPacket(workspacePaths, runId, attempt.id);
+        const reviewPacketPath = resolveAttemptPaths(workspacePaths, runId, attempt.id).reviewPacketFile;
+        const [reviewPacket, reviewPacketSchemaValidation] = await Promise.all([
+          getAttemptReviewPacket(workspacePaths, runId, attempt.id),
+          validatePersistedReviewPacket({
+            reviewPacketFile: reviewPacketPath
+          })
+        ]);
+        const artifactManifest = reviewPacket?.artifact_manifest ?? [];
+        const artifactByKind = new Map(
+          artifactManifest.map((artifact) => [artifact.kind, artifact] as const)
+        );
+        const metaArtifact = artifactByKind.get("attempt_meta") ?? null;
+        const contractArtifact = artifactByKind.get("attempt_contract") ?? null;
+        const resultArtifact = artifactByKind.get("attempt_result") ?? null;
+        const evaluationArtifact = artifactByKind.get("attempt_evaluation") ?? null;
+        const runtimeVerificationArtifact = artifactByKind.get("runtime_verification") ?? null;
+
         return {
           attempt_id: attempt.id,
           attempt_status: attempt.status,
-          path: resolveAttemptPaths(workspacePaths, runId, attempt.id).reviewPacketFile,
+          path: reviewPacketPath,
           has_packet: reviewPacket !== null,
+          matches_schema: reviewPacketSchemaValidation.matchesSchema,
+          schema_error: reviewPacketSchemaValidation.schemaError,
           matches_run_id: reviewPacket?.run_id === runId,
           matches_attempt_id:
             reviewPacket?.attempt_id === attempt.id && reviewPacket?.attempt.id === attempt.id,
+          has_generated_at:
+            typeof reviewPacket?.generated_at === "string" && reviewPacket.generated_at.length > 0,
           has_attempt_contract: reviewPacket?.attempt_contract !== null,
           has_current_decision_snapshot: reviewPacket?.current_decision_snapshot !== null,
+          snapshot_blocking_reason: reviewPacket?.current_decision_snapshot?.blocking_reason ?? null,
           journal_count: reviewPacket?.journal.length ?? 0,
           has_failure_context: reviewPacket?.failure_context !== null,
+          failure_message: reviewPacket?.failure_context?.message ?? null,
           has_result: reviewPacket?.result !== null,
           has_evaluation: reviewPacket?.evaluation !== null,
           has_runtime_verification: reviewPacket?.runtime_verification !== null,
-          artifact_manifest_count: reviewPacket?.artifact_manifest.length ?? 0
+          artifact_manifest_count: artifactManifest.length,
+          has_meta_artifact: metaArtifact !== null,
+          meta_artifact_exists: metaArtifact?.exists ?? false,
+          has_contract_artifact: contractArtifact !== null,
+          contract_artifact_exists: contractArtifact?.exists ?? false,
+          has_result_artifact: resultArtifact !== null,
+          result_artifact_exists: resultArtifact?.exists ?? false,
+          has_evaluation_artifact: evaluationArtifact !== null,
+          evaluation_artifact_exists: evaluationArtifact?.exists ?? false,
+          has_runtime_verification_artifact: runtimeVerificationArtifact !== null,
+          runtime_verification_artifact_exists: runtimeVerificationArtifact?.exists ?? false
         };
       })
   );
@@ -835,8 +1211,14 @@ function assertCase(scenario: ScenarioCase, observation: ScenarioObservation): v
     `${scenario.id}: settled attempts should all persist review packets`
   );
 
+  let blockerReasonCapturedInPacket = !scenario.expected.blocking_reason_includes;
+
   for (const reviewPacket of observation.review_packets) {
     assert.ok(reviewPacket.has_packet, `${scenario.id}: missing review packet for ${reviewPacket.attempt_id}`);
+    assert.ok(
+      reviewPacket.matches_schema,
+      `${scenario.id}: review packet schema mismatch for ${reviewPacket.attempt_id}: ${reviewPacket.schema_error ?? "unknown"}`
+    );
     assert.ok(
       reviewPacket.matches_run_id,
       `${scenario.id}: review packet run_id mismatch for ${reviewPacket.attempt_id}`
@@ -844,6 +1226,10 @@ function assertCase(scenario: ScenarioCase, observation: ScenarioObservation): v
     assert.ok(
       reviewPacket.matches_attempt_id,
       `${scenario.id}: review packet attempt metadata mismatch for ${reviewPacket.attempt_id}`
+    );
+    assert.ok(
+      reviewPacket.has_generated_at,
+      `${scenario.id}: review packet missing generated_at for ${reviewPacket.attempt_id}`
     );
     assert.ok(
       reviewPacket.has_attempt_contract,
@@ -856,6 +1242,26 @@ function assertCase(scenario: ScenarioCase, observation: ScenarioObservation): v
     assert.ok(
       reviewPacket.artifact_manifest_count > 0,
       `${scenario.id}: review packet missing artifact manifest for ${reviewPacket.attempt_id}`
+    );
+    assert.ok(
+      reviewPacket.has_meta_artifact && reviewPacket.meta_artifact_exists,
+      `${scenario.id}: review packet missing attempt meta artifact for ${reviewPacket.attempt_id}`
+    );
+    assert.ok(
+      reviewPacket.has_contract_artifact && reviewPacket.contract_artifact_exists,
+      `${scenario.id}: review packet missing attempt contract artifact for ${reviewPacket.attempt_id}`
+    );
+    assert.ok(
+      reviewPacket.has_result_artifact,
+      `${scenario.id}: review packet missing result manifest entry for ${reviewPacket.attempt_id}`
+    );
+    assert.ok(
+      reviewPacket.has_evaluation_artifact,
+      `${scenario.id}: review packet missing evaluation manifest entry for ${reviewPacket.attempt_id}`
+    );
+    assert.ok(
+      reviewPacket.has_runtime_verification_artifact,
+      `${scenario.id}: review packet missing runtime verification manifest entry for ${reviewPacket.attempt_id}`
     );
 
     if (reviewPacket.attempt_status === "completed") {
@@ -871,13 +1277,56 @@ function assertCase(scenario: ScenarioCase, observation: ScenarioObservation): v
         reviewPacket.has_runtime_verification,
         `${scenario.id}: completed attempt missing runtime verification in review packet for ${reviewPacket.attempt_id}`
       );
+      assert.ok(
+        reviewPacket.result_artifact_exists,
+        `${scenario.id}: completed attempt missing persisted result artifact for ${reviewPacket.attempt_id}`
+      );
+      assert.ok(
+        reviewPacket.evaluation_artifact_exists,
+        `${scenario.id}: completed attempt missing persisted evaluation artifact for ${reviewPacket.attempt_id}`
+      );
+      assert.ok(
+        reviewPacket.runtime_verification_artifact_exists,
+        `${scenario.id}: completed attempt missing persisted runtime verification artifact for ${reviewPacket.attempt_id}`
+      );
     } else {
       assert.ok(
         reviewPacket.journal_count > 0 || reviewPacket.has_failure_context,
         `${scenario.id}: blocker attempt missing journal and failure context for ${reviewPacket.attempt_id}`
       );
+      assert.ok(
+        reviewPacket.has_failure_context,
+        `${scenario.id}: blocker attempt missing failure context for ${reviewPacket.attempt_id}`
+      );
+    }
+
+    if (
+      scenario.expected.blocking_reason_includes &&
+      (
+        reviewPacket.snapshot_blocking_reason?.includes(
+          scenario.expected.blocking_reason_includes
+        ) ??
+        false
+      )
+    ) {
+      blockerReasonCapturedInPacket = true;
+    }
+
+    if (
+      scenario.expected.blocking_reason_includes &&
+      (
+        reviewPacket.failure_message?.includes(scenario.expected.blocking_reason_includes) ??
+        false
+      )
+    ) {
+      blockerReasonCapturedInPacket = true;
     }
   }
+
+  assert.ok(
+    blockerReasonCapturedInPacket,
+    `${scenario.id}: review packet should capture the blocking reason`
+  );
 }
 
 async function main(): Promise<void> {

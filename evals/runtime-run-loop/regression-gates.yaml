@@ -32,23 +32,3 @@ promotion_rule:
 notes:
   overrides:
     - "Until replay and held-out sets exist, smoke is the release gate for backend runtime changes."
-*** Add File: /Users/atou/AISA/evals/runtime-run-loop/datasets/smoke/happy-path-run-completes.json
-{
-  "id": "happy-path-run-completes",
-  "description": "Research produces an actionable next step, execution leaves verification evidence, and the run completes.",
-  "driver": "happy_path",
-  "max_ticks": 4,
-  "expected": {
-    "run_status": "completed",
-    "waiting_for_human": false,
-    "recommended_next_action": null,
-    "attempt_types": ["research", "execution"],
-    "attempt_statuses": ["completed", "completed"],
-    "verification_statuses": ["not_applicable", "passed"],
-    "required_journal_types": ["attempt.created", "attempt.started", "attempt.completed"],
-    "required_journal_counts": {
-      "attempt.started": 2,
-      "attempt.completed": 2
-    }
-  }
-}

@@ -1,78 +1,808 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "Review Packet",
+  "title": "AISA Runtime Review Packet",
   "type": "object",
   "required": [
-    "task_id",
-    "target",
-    "inputs",
-    "artifacts",
-    "meta"
+    "run_id",
+    "attempt_id",
+    "attempt",
+    "attempt_contract",
+    "current_decision_snapshot",
+    "context",
+    "journal",
+    "failure_context",
+    "result",
+    "evaluation",
+    "runtime_verification",
+    "artifact_manifest",
+    "generated_at"
   ],
   "properties": {
-    "task_id": {
+    "run_id": {
       "type": "string"
     },
-    "target": {
+    "attempt_id": {
+      "type": "string"
+    },
+    "attempt": {
       "type": "object",
       "required": [
-        "name",
-        "type"
+        "id",
+        "run_id",
+        "attempt_type",
+        "status",
+        "worker",
+        "objective",
+        "success_criteria",
+        "workspace_root",
+        "created_at",
+        "updated_at"
       ],
       "properties": {
-        "name": {
+        "id": {
           "type": "string"
         },
-        "type": {
+        "run_id": {
+          "type": "string"
+        },
+        "attempt_type": {
           "type": "string",
           "enum": [
-            "skill",
-            "workflow"
+            "research",
+            "execution"
+          ]
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "created",
+            "queued",
+            "running",
+            "completed",
+            "failed",
+            "stopped"
+          ]
+        },
+        "worker": {
+          "type": "string"
+        },
+        "objective": {
+          "type": "string"
+        },
+        "success_criteria": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "workspace_root": {
+          "type": "string"
+        },
+        "input_context_ref": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "result_ref": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "evaluation_ref": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "created_at": {
+          "type": "string"
+        },
+        "started_at": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "ended_at": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "updated_at": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": true
+    },
+    "attempt_contract": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "required": [
+        "attempt_id",
+        "run_id",
+        "attempt_type",
+        "objective",
+        "success_criteria",
+        "required_evidence",
+        "forbidden_shortcuts",
+        "expected_artifacts",
+        "created_at"
+      ],
+      "properties": {
+        "attempt_id": {
+          "type": "string"
+        },
+        "run_id": {
+          "type": "string"
+        },
+        "attempt_type": {
+          "type": "string",
+          "enum": [
+            "research",
+            "execution"
+          ]
+        },
+        "objective": {
+          "type": "string"
+        },
+        "success_criteria": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "required_evidence": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "forbidden_shortcuts": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "expected_artifacts": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "verification_plan": {
+          "type": "object",
+          "required": [
+            "commands"
+          ],
+          "properties": {
+            "commands": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": [
+                  "purpose",
+                  "command"
+                ],
+                "properties": {
+                  "purpose": {
+                    "type": "string"
+                  },
+                  "command": {
+                    "type": "string"
+                  },
+                  "cwd": {
+                    "type": "string"
+                  },
+                  "expected_exit_code": {
+                    "type": "integer"
+                  }
+                },
+                "additionalProperties": true
+              }
+            }
+          },
+          "additionalProperties": true
+        },
+        "created_at": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": true
+    },
+    "current_decision_snapshot": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "required": [
+        "run_id",
+        "run_status",
+        "best_attempt_id",
+        "latest_attempt_id",
+        "recommended_next_action",
+        "recommended_attempt_type",
+        "summary",
+        "blocking_reason",
+        "waiting_for_human",
+        "updated_at"
+      ],
+      "properties": {
+        "run_id": {
+          "type": "string"
+        },
+        "run_status": {
+          "type": "string",
+          "enum": [
+            "draft",
+            "running",
+            "waiting_steer",
+            "completed",
+            "failed",
+            "cancelled"
+          ]
+        },
+        "best_attempt_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "latest_attempt_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "recommended_next_action": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "recommended_attempt_type": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "research",
+            "execution",
+            null
+          ]
+        },
+        "summary": {
+          "type": "string"
+        },
+        "blocking_reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "waiting_for_human": {
+          "type": "boolean"
+        },
+        "updated_at": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": true
+    },
+    "context": {
+      "type": [
+        "object",
+        "null"
+      ]
+    },
+    "journal": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "run_id",
+          "ts",
+          "type",
+          "payload"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "attempt_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "ts": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string"
+          },
+          "payload": {
+            "type": "object"
+          }
+        },
+        "additionalProperties": true
+      }
+    },
+    "failure_context": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "required": [
+        "message",
+        "journal_event_id",
+        "journal_event_ts"
+      ],
+      "properties": {
+        "message": {
+          "type": "string"
+        },
+        "journal_event_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "journal_event_ts": {
+          "type": [
+            "string",
+            "null"
           ]
         }
       },
       "additionalProperties": true
     },
-    "inputs": {
-      "type": "object",
+    "result": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "required": [
+        "summary",
+        "findings",
+        "questions",
+        "recommended_next_steps",
+        "confidence",
+        "artifacts"
+      ],
       "properties": {
-        "prompt": {
-          "type": "object"
+        "summary": {
+          "type": "string"
         },
-        "trace": {
-          "type": "object"
+        "findings": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "type",
+              "content",
+              "evidence"
+            ],
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "fact",
+                  "hypothesis",
+                  "risk"
+                ]
+              },
+              "content": {
+                "type": "string"
+              },
+              "evidence": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "additionalProperties": true
+          }
         },
-        "final_output": {
-          "type": "object"
+        "questions": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "recommended_next_steps": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "confidence": {
+          "type": "number"
+        },
+        "verification_plan": {
+          "type": "object",
+          "required": [
+            "commands"
+          ],
+          "properties": {
+            "commands": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": [
+                  "purpose",
+                  "command"
+                ],
+                "properties": {
+                  "purpose": {
+                    "type": "string"
+                  },
+                  "command": {
+                    "type": "string"
+                  },
+                  "cwd": {
+                    "type": "string"
+                  },
+                  "expected_exit_code": {
+                    "type": "integer"
+                  }
+                },
+                "additionalProperties": true
+              }
+            }
+          },
+          "additionalProperties": true
+        },
+        "next_attempt_contract": {
+          "type": "object",
+          "required": [
+            "attempt_type",
+            "required_evidence"
+          ],
+          "properties": {
+            "attempt_type": {
+              "type": "string",
+              "enum": [
+                "research",
+                "execution"
+              ]
+            },
+            "objective": {
+              "type": "string"
+            },
+            "success_criteria": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "required_evidence": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "forbidden_shortcuts": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "expected_artifacts": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "verification_plan": {
+              "type": "object",
+              "required": [
+                "commands"
+              ],
+              "properties": {
+                "commands": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "required": [
+                      "purpose",
+                      "command"
+                    ],
+                    "properties": {
+                      "purpose": {
+                        "type": "string"
+                      },
+                      "command": {
+                        "type": "string"
+                      },
+                      "cwd": {
+                        "type": "string"
+                      },
+                      "expected_exit_code": {
+                        "type": "integer"
+                      }
+                    },
+                    "additionalProperties": true
+                  }
+                }
+              },
+              "additionalProperties": true
+            }
+          },
+          "additionalProperties": true
+        },
+        "artifacts": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "type",
+              "path"
+            ],
+            "properties": {
+              "type": {
+                "type": "string"
+              },
+              "path": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": true
+          }
         }
       },
       "additionalProperties": true
     },
-    "artifacts": {
+    "evaluation": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "required": [
+        "attempt_id",
+        "run_id",
+        "goal_progress",
+        "evidence_quality",
+        "verification_status",
+        "recommendation",
+        "suggested_attempt_type",
+        "rationale",
+        "missing_evidence",
+        "created_at"
+      ],
+      "properties": {
+        "attempt_id": {
+          "type": "string"
+        },
+        "run_id": {
+          "type": "string"
+        },
+        "goal_progress": {
+          "type": "number"
+        },
+        "evidence_quality": {
+          "type": "number"
+        },
+        "verification_status": {
+          "type": "string",
+          "enum": [
+            "passed",
+            "failed",
+            "not_applicable"
+          ]
+        },
+        "recommendation": {
+          "type": "string",
+          "enum": [
+            "continue",
+            "wait_human",
+            "complete",
+            "retry"
+          ]
+        },
+        "suggested_attempt_type": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "research",
+            "execution",
+            null
+          ]
+        },
+        "rationale": {
+          "type": "string"
+        },
+        "missing_evidence": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "created_at": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": true
+    },
+    "runtime_verification": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "required": [
+        "attempt_id",
+        "run_id",
+        "attempt_type",
+        "status",
+        "repo_root",
+        "git_head",
+        "git_status",
+        "changed_files",
+        "failure_code",
+        "failure_reason",
+        "command_results",
+        "created_at"
+      ],
+      "properties": {
+        "attempt_id": {
+          "type": "string"
+        },
+        "run_id": {
+          "type": "string"
+        },
+        "attempt_type": {
+          "type": "string",
+          "enum": [
+            "research",
+            "execution"
+          ]
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "passed",
+            "failed",
+            "not_applicable"
+          ]
+        },
+        "repo_root": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "git_head": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "git_status": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "changed_files": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "failure_code": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "missing_attempt_contract",
+            "missing_contract_verification_plan",
+            "missing_verification_plan",
+            "invalid_verification_plan",
+            "workspace_not_git_repo",
+            "no_git_changes",
+            "verification_command_failed",
+            null
+          ]
+        },
+        "failure_reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "command_results": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "purpose",
+              "command",
+              "cwd",
+              "expected_exit_code",
+              "exit_code",
+              "passed",
+              "stdout_file",
+              "stderr_file"
+            ],
+            "properties": {
+              "purpose": {
+                "type": "string"
+              },
+              "command": {
+                "type": "string"
+              },
+              "cwd": {
+                "type": "string"
+              },
+              "expected_exit_code": {
+                "type": "integer"
+              },
+              "exit_code": {
+                "type": "integer"
+              },
+              "passed": {
+                "type": "boolean"
+              },
+              "stdout_file": {
+                "type": "string"
+              },
+              "stderr_file": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": true
+          }
+        },
+        "created_at": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": true
+    },
+    "artifact_manifest": {
       "type": "array",
       "items": {
         "type": "object",
         "required": [
+          "kind",
           "path",
-          "name"
+          "exists",
+          "size_bytes"
         ],
         "properties": {
+          "kind": {
+            "type": "string"
+          },
           "path": {
             "type": "string"
           },
-          "name": {
-            "type": "string"
+          "exists": {
+            "type": "boolean"
           },
-          "format": {
-            "type": "string"
-          },
-          "content": {}
+          "size_bytes": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
         },
         "additionalProperties": true
       }
     },
-    "meta": {
-      "type": "object"
+    "generated_at": {
+      "type": "string"
     }
   },
   "additionalProperties": true

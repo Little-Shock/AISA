@@ -22,6 +22,7 @@ import {
   type AttemptContractDraft,
   type AttemptEvaluation,
   type AttemptReviewPacket,
+  type AttemptRuntimeVerification,
   type Branch,
   type CurrentDecision,
   type EvalSpec,
@@ -756,18 +757,29 @@ export class Orchestrator {
         result: execution.writeback,
         attemptPaths
       });
-      const evaluation = evaluateAttempt({
-        run,
-        attempt,
-        result: execution.writeback,
-        runtimeVerification: runtimeVerification.verification
-      });
-      await saveAttemptEvaluation(this.workspacePaths, evaluation);
-
-      attempt = updateAttempt(attempt, {
+      const completedAttemptForEvaluation = updateAttempt(attempt, {
         status: "completed",
         ended_at: new Date().toISOString(),
         result_ref: `runs/${runId}/attempts/${attempt.id}/result.json`,
+        evaluation_ref: null
+      });
+      const reviewPacketForEvaluation = await this.buildAttemptReviewPacket({
+        runId,
+        attempt: completedAttemptForEvaluation,
+        attemptContract,
+        currentSnapshot: current,
+        context,
+        result: execution.writeback,
+        evaluation: null,
+        runtimeVerification: runtimeVerification.verification,
+        journal: await listRunJournal(this.workspacePaths, runId)
+      });
+      const evaluation = evaluateAttempt({
+        reviewPacket: reviewPacketForEvaluation
+      });
+      await saveAttemptEvaluation(this.workspacePaths, evaluation);
+
+      attempt = updateAttempt(completedAttemptForEvaluation, {
         evaluation_ref: `runs/${runId}/attempts/${attempt.id}/evaluation.json`
       });
       await saveAttempt(this.workspacePaths, attempt);
@@ -951,25 +963,56 @@ export class Orchestrator {
       getAttemptRuntimeVerification(this.workspacePaths, runId, attemptId),
       listRunJournal(this.workspacePaths, runId)
     ]);
-    const attemptPaths = resolveAttemptPaths(this.workspacePaths, runId, attemptId);
-    const attemptJournal = journal.filter((entry) => entry.attempt_id === attemptId);
+    const reviewPacket = await this.buildAttemptReviewPacket({
+      runId,
+      attempt,
+      attemptContract,
+      currentSnapshot,
+      context,
+      result,
+      evaluation,
+      runtimeVerification,
+      journal
+    });
+
+    await saveAttemptReviewPacket(this.workspacePaths, reviewPacket);
+  }
+
+  private async buildAttemptReviewPacket(input: {
+    runId: string;
+    attempt: Attempt;
+    attemptContract: AttemptContract | null;
+    currentSnapshot: CurrentDecision | null;
+    context: unknown | null;
+    result: WorkerWriteback | null;
+    evaluation: AttemptEvaluation | null;
+    runtimeVerification: AttemptRuntimeVerification | null;
+    journal: Awaited<ReturnType<typeof listRunJournal>>;
+  }): Promise<AttemptReviewPacket> {
+    const attemptPaths = resolveAttemptPaths(
+      this.workspacePaths,
+      input.runId,
+      input.attempt.id
+    );
+    const attemptJournal = input.journal.filter((entry) => entry.attempt_id === input.attempt.id);
     const failureEntry = [...attemptJournal].reverse().find((entry) =>
       ["attempt.failed", "attempt.recovery_required"].includes(entry.type)
     );
     const failureMessage =
       this.getReviewPacketFailureMessage(failureEntry?.payload) ??
-      runtimeVerification?.failure_reason ??
-      (["failed", "stopped"].includes(attempt.status)
-        ? currentSnapshot?.blocking_reason ?? `Attempt ${attempt.id} ended as ${attempt.status}.`
+      input.runtimeVerification?.failure_reason ??
+      (["failed", "stopped"].includes(input.attempt.status)
+        ? input.currentSnapshot?.blocking_reason ??
+          `Attempt ${input.attempt.id} ended as ${input.attempt.status}.`
         : null);
 
-    const reviewPacket: AttemptReviewPacket = {
-      run_id: runId,
-      attempt_id: attemptId,
-      attempt,
-      attempt_contract: attemptContract,
-      current_decision_snapshot: currentSnapshot,
-      context,
+    return {
+      run_id: input.runId,
+      attempt_id: input.attempt.id,
+      attempt: input.attempt,
+      attempt_contract: input.attemptContract,
+      current_decision_snapshot: input.currentSnapshot,
+      context: input.context,
       journal: attemptJournal,
       failure_context: failureMessage
         ? {
@@ -978,25 +1021,23 @@ export class Orchestrator {
             journal_event_ts: failureEntry?.ts ?? null
           }
         : null,
-      result,
-      evaluation,
-      runtime_verification: runtimeVerification,
+      result: input.result,
+      evaluation: input.evaluation,
+      runtime_verification: input.runtimeVerification,
       artifact_manifest: await this.buildAttemptArtifactManifest({
         attemptPaths,
-        result,
-        runtimeVerification,
+        result: input.result,
+        runtimeVerification: input.runtimeVerification,
         journal: attemptJournal
       }),
       generated_at: new Date().toISOString()
     };
-
-    await saveAttemptReviewPacket(this.workspacePaths, reviewPacket);
   }
 
   private async buildAttemptArtifactManifest(input: {
     attemptPaths: ReturnType<typeof resolveAttemptPaths>;
     result: WorkerWriteback | null;
-    runtimeVerification: AttemptRuntimeVerificationOutcome["verification"] | null;
+    runtimeVerification: AttemptRuntimeVerification | null;
     journal: Awaited<ReturnType<typeof listRunJournal>>;
   }): Promise<ReviewPacketArtifact[]> {
     const candidatePaths = new Map<string, { kind: string; rawPath: string }>();
@@ -1180,17 +1221,23 @@ export class Orchestrator {
     switch (current.recommended_next_action) {
       case "start_first_attempt":
         return `理解仓库现状并找出目标的最佳下一步：${run.title}`;
-      case "continue_research":
+      case "continue_research": {
+        const checkpointResearchHint =
+          current.blocking_reason?.includes("Execution auto-checkpoint")
+            ? "先区分哪些改动属于这轮目标，哪些是预存现场，再留下可回放的下一轮执行约定，避免提交时继续混入脏工作区。"
+            : null;
         return [
           `继续研究目标：${run.title}`,
           current.blocking_reason
             ? `先怀疑并复核这个卡点：${current.blocking_reason}`
             : "先怀疑上一轮结论，再补上缺失证据并收束到最值得做的下一步。",
           latestResult ? `最新摘要：${latestResult.summary}` : null,
+          checkpointResearchHint,
           "不要延续默认假设，优先找出为什么现有方向可能不成立。"
         ]
           .filter(Boolean)
           .join("\n");
+      }
       case "start_execution":
       case "continue_execution":
         return [
@@ -1525,6 +1572,17 @@ export class Orchestrator {
       return;
     }
 
+    const blocker = this.detectAutomaticResumeBlocker({
+      current,
+      attempts,
+      journal
+    });
+
+    if (blocker) {
+      await this.persistAutomaticResumeBlocked(runId, current, journal, blocker);
+      return;
+    }
+
     const plan = this.buildAutomaticResumePlan({
       current,
       attempts,
@@ -1563,6 +1621,43 @@ export class Orchestrator {
     );
   }
 
+  private detectAutomaticResumeBlocker(input: {
+    current: CurrentDecision;
+    attempts: Attempt[];
+    journal: Awaited<ReturnType<typeof listRunJournal>>;
+  }): { reason: string; message: string } | null {
+    const latestAttempt = this.getLatestAttempt(input.current, input.attempts);
+    if (!latestAttempt) {
+      return null;
+    }
+
+    if (
+      latestAttempt.attempt_type !== "research" ||
+      latestAttempt.status !== "failed"
+    ) {
+      return null;
+    }
+
+    const failureMessage =
+      this.getAttemptJournalMessage(input.journal, latestAttempt.id, ["attempt.failed"]) ??
+      input.current.blocking_reason;
+    const providerBlocker = this.classifyProviderBlocker(failureMessage);
+
+    if (!providerBlocker || !failureMessage) {
+      return null;
+    }
+
+    return providerBlocker === "provider_rate_limited"
+      ? {
+          reason: providerBlocker,
+          message: `上一轮 research 命中 provider 限流，自动续跑已暂停。原始阻塞：${failureMessage}`
+        }
+      : {
+          reason: providerBlocker,
+          message: `上一轮 research 命中 provider 鉴权失败，自动续跑已暂停。原始阻塞：${failureMessage}`
+        };
+  }
+
   private buildAutomaticResumePlan(input: {
     current: CurrentDecision;
     attempts: Attempt[];
@@ -1588,7 +1683,21 @@ export class Orchestrator {
     }
 
     if (this.hasCheckpointBlocker(input.journal, latestAttempt.id)) {
-      return null;
+      const checkpointMessage =
+        this.getAttemptJournalMessage(input.journal, latestAttempt.id, [
+          "attempt.checkpoint.blocked"
+        ]) ??
+        input.current.blocking_reason ??
+        "Execution auto-checkpoint was blocked and needs workspace diagnosis.";
+
+      return {
+        next_action: "continue_research",
+        attempt_type: "research",
+        summary:
+          "人工窗口超时，系统自动转入工作区归因研究，先解决提交现场，再决定如何继续推进。",
+        blocking_reason: checkpointMessage,
+        reason: "checkpoint_blocked_needs_workspace_research"
+      };
     }
 
     if (latestAttempt.status === "stopped") {
@@ -1676,10 +1785,78 @@ export class Orchestrator {
     );
   }
 
+  private getAttemptJournalMessage(
+    journal: Awaited<ReturnType<typeof listRunJournal>>,
+    attemptId: string,
+    entryTypes: string[]
+  ): string | null {
+    for (let index = journal.length - 1; index >= 0; index -= 1) {
+      const entry = journal[index];
+      if (!entry || entry.attempt_id !== attemptId || !entryTypes.includes(entry.type)) {
+        continue;
+      }
+
+      const message = this.getReviewPacketFailureMessage(entry.payload);
+      if (message) {
+        return message;
+      }
+    }
+
+    return null;
+  }
+
+  private classifyProviderBlocker(
+    message: string | null | undefined
+  ): "provider_rate_limited" | "provider_auth_failed" | null {
+    if (!message) {
+      return null;
+    }
+
+    const rateLimitPatterns = [
+      /\b429\b/,
+      /rate[\s_-]?limit/i,
+      /too many requests/i,
+      /insufficient[_\s-]?quota/i,
+      /quota exceeded/i,
+      /resource[_\s-]?exhausted/i,
+      /throttl(?:e|ed|ing)/i,
+      /限流/u,
+      /配额/u
+    ];
+    if (rateLimitPatterns.some((pattern) => pattern.test(message))) {
+      return "provider_rate_limited";
+    }
+
+    const authPatterns = [
+      /\b401\b/,
+      /\b403\b/,
+      /unauthorized/i,
+      /forbidden/i,
+      /authentication/i,
+      /authorization/i,
+      /auth(?:\s+error|\s+failed)?/i,
+      /invalid api key/i,
+      /api key/i,
+      /invalid token/i,
+      /鉴权/u,
+      /认证/u,
+      /授权/u
+    ];
+    if (authPatterns.some((pattern) => pattern.test(message))) {
+      return "provider_auth_failed";
+    }
+
+    return null;
+  }
+
   private async persistAutomaticResumeBlocked(
     runId: string,
     current: CurrentDecision,
-    journal: Awaited<ReturnType<typeof listRunJournal>>
+    journal: Awaited<ReturnType<typeof listRunJournal>>,
+    blocker?: {
+      reason: string;
+      message: string;
+    }
   ): Promise<void> {
     if (this.hasAutoResumeTerminalEvent(journal, "run.auto_resume.blocked")) {
       return;
@@ -1692,8 +1869,9 @@ export class Orchestrator {
         attempt_id: current.latest_attempt_id,
         type: "run.auto_resume.blocked",
         payload: {
-          reason: "manual_only_blocker",
+          reason: blocker?.reason ?? "manual_only_blocker",
           message:
+            blocker?.message ??
             current.blocking_reason ??
             "当前阻塞涉及人工边界，系统未找到安全的自动续跑方案。"
         }

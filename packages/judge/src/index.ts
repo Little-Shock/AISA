@@ -2,14 +2,13 @@ import {
   AttemptEvaluationSchema,
   EvalResultSchema,
   isExecutionContractDraftReady,
-  type Attempt,
   type AttemptEvaluation,
   type AttemptRuntimeVerification,
+  type AttemptReviewPacket,
   type Branch,
   type EvalResult,
   type EvalSpec,
   type Goal,
-  type Run,
   type WorkerWriteback
 } from "@autoresearch/domain";
 
@@ -68,28 +67,42 @@ export function evaluateBranch(input: {
 }
 
 export function evaluateAttempt(input: {
-  run: Run;
-  attempt: Attempt;
-  result: WorkerWriteback;
-  runtimeVerification?: AttemptRuntimeVerification | null;
+  reviewPacket: AttemptReviewPacket;
 }): AttemptEvaluation {
-  const findingsScore = Math.min(input.result.findings.length / 3, 1);
-  const nextStepScore = input.result.recommended_next_steps.length > 0 ? 1 : 0;
-  const evidenceQuality =
-    input.result.findings.length === 0
-      ? 0
-      : input.result.findings.filter((finding) => finding.evidence.length > 0).length /
-        input.result.findings.length;
-  const confidenceScore = input.result.confidence;
-  const artifactScore = Math.min(input.result.artifacts.length, 1);
-  const openQuestionPenalty =
-    input.result.questions.length >= 3 ? 0.15 : input.result.questions.length > 0 ? 0.05 : 0;
-  const runtimeVerification = input.runtimeVerification ?? null;
+  const attempt = input.reviewPacket.attempt;
+  const result = input.reviewPacket.result;
+  const runtimeVerification = input.reviewPacket.runtime_verification ?? null;
 
-  if (input.attempt.attempt_type === "research") {
-    const hasExecutionContract = isExecutionContractDraftReady(
-      input.result.next_attempt_contract
+  if (attempt.status !== "completed") {
+    throw new Error(
+      `Attempt ${attempt.id} must be completed before judge evaluation can read its review packet.`
     );
+  }
+
+  if (!result) {
+    throw new Error(`Attempt ${attempt.id} review packet is missing result payload.`);
+  }
+
+  if (!runtimeVerification) {
+    throw new Error(
+      `Attempt ${attempt.id} review packet is missing runtime verification evidence.`
+    );
+  }
+
+  const findingsScore = Math.min(result.findings.length / 3, 1);
+  const nextStepScore = result.recommended_next_steps.length > 0 ? 1 : 0;
+  const evidenceQuality =
+    result.findings.length === 0
+      ? 0
+      : result.findings.filter((finding) => finding.evidence.length > 0).length /
+        result.findings.length;
+  const confidenceScore = result.confidence;
+  const artifactScore = Math.min(result.artifacts.length, 1);
+  const openQuestionPenalty =
+    result.questions.length >= 3 ? 0.15 : result.questions.length > 0 ? 0.05 : 0;
+
+  if (attempt.attempt_type === "research") {
+    const hasExecutionContract = isExecutionContractDraftReady(result.next_attempt_contract);
     const goalProgress = Math.max(
       0,
       Math.min(
@@ -110,8 +123,8 @@ export function evaluateAttempt(input: {
     const recommendation = goalProgress < 0.35 ? "retry" : "continue";
 
     return AttemptEvaluationSchema.parse({
-      attempt_id: input.attempt.id,
-      run_id: input.run.id,
+      attempt_id: attempt.id,
+      run_id: input.reviewPacket.run_id,
       goal_progress: goalProgress,
       evidence_quality: evidenceQuality,
       verification_status: "not_applicable",
@@ -124,7 +137,7 @@ export function evaluateAttempt(input: {
             : "research",
       rationale: `goal_progress=${goalProgress.toFixed(2)}, evidence_quality=${evidenceQuality.toFixed(
         2
-      )}, confidence=${confidenceScore.toFixed(2)}, next_steps=${input.result.recommended_next_steps.length}, execution_contract=${hasExecutionContract ? "ready" : "missing"}`,
+      )}, confidence=${confidenceScore.toFixed(2)}, next_steps=${result.recommended_next_steps.length}, execution_contract=${hasExecutionContract ? "ready" : "missing"}`,
       missing_evidence: buildMissingEvidence({
         attemptType: "research",
         evidenceQuality,
@@ -158,7 +171,7 @@ export function evaluateAttempt(input: {
     verificationStatus === "passed" ? rawGoalProgress : Math.min(rawGoalProgress, 0.34);
   const recommendation =
     verificationStatus === "passed"
-      ? goalProgress >= 0.75 && input.result.questions.length === 0
+      ? goalProgress >= 0.75 && result.questions.length === 0
         ? "complete"
         : goalProgress >= 0.45
           ? "wait_human"
@@ -183,8 +196,8 @@ export function evaluateAttempt(input: {
   });
 
   return AttemptEvaluationSchema.parse({
-    attempt_id: input.attempt.id,
-    run_id: input.run.id,
+    attempt_id: attempt.id,
+    run_id: input.reviewPacket.run_id,
     goal_progress: goalProgress,
     evidence_quality: evidenceQuality,
     verification_status: verificationStatus,
@@ -194,7 +207,7 @@ export function evaluateAttempt(input: {
       `goal_progress=${goalProgress.toFixed(2)}`,
       `evidence_quality=${evidenceQuality.toFixed(2)}`,
       `confidence=${confidenceScore.toFixed(2)}`,
-      `artifacts=${input.result.artifacts.length}`,
+      `artifacts=${result.artifacts.length}`,
       `runtime_verification=${runtimeVerification?.status ?? "missing"}`,
       runtimeVerification?.failure_code ? `failure_code=${runtimeVerification.failure_code}` : null
     ]
@@ -206,7 +219,7 @@ export function evaluateAttempt(input: {
 }
 
 function buildMissingEvidence(input: {
-  attemptType: Attempt["attempt_type"];
+  attemptType: AttemptReviewPacket["attempt"]["attempt_type"];
   evidenceQuality: number;
   nextStepScore: number;
   artifactScore: number;
