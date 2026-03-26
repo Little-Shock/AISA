@@ -505,6 +505,133 @@ async function verifyFailedExecutionAutoResumes(): Promise<void> {
   );
 }
 
+async function verifyRunLaunchResetsAutoResumeBudget(): Promise<void> {
+  const { run, workspacePaths, rootDir } = await bootstrapRun(
+    "run-launch-resets-auto-resume-budget"
+  );
+  await writeExecutionWorkspacePackage(rootDir);
+  await initializeGitRepo(rootDir);
+
+  await appendRunJournal(
+    workspacePaths,
+    createRunJournalEntry({
+      run_id: run.id,
+      type: "run.auto_resume.scheduled",
+      payload: {
+        cycle: 1,
+        next_action: "retry_attempt",
+        attempt_type: "research",
+        reason: "failed_research_retry"
+      }
+    })
+  );
+  await appendRunJournal(
+    workspacePaths,
+    createRunJournalEntry({
+      run_id: run.id,
+      type: "run.auto_resume.exhausted",
+      payload: {
+        attempted_cycles: 1,
+        message: "old exhaustion marker"
+      }
+    })
+  );
+  await appendRunJournal(
+    workspacePaths,
+    createRunJournalEntry({
+      run_id: run.id,
+      type: "run.launched",
+      payload: {}
+    })
+  );
+
+  const failedExecution = updateAttempt(
+    createAttempt({
+      run_id: run.id,
+      attempt_type: "execution",
+      worker: "fake-codex",
+      objective: "Resume execution after a fresh launch.",
+      success_criteria: run.success_criteria,
+      workspace_root: run.workspace_root
+    }),
+    {
+      status: "failed",
+      started_at: new Date().toISOString(),
+      ended_at: new Date().toISOString()
+    }
+  );
+
+  await saveAttempt(workspacePaths, failedExecution);
+  await saveCurrentDecision(
+    workspacePaths,
+    createCurrentDecision({
+      run_id: run.id,
+      run_status: "waiting_steer",
+      latest_attempt_id: failedExecution.id,
+      recommended_next_action: "wait_for_human",
+      recommended_attempt_type: "execution",
+      summary: "Execution failed after relaunch.",
+      blocking_reason: "Expected object, received string at artifacts[0]",
+      waiting_for_human: true
+    })
+  );
+  await appendRunJournal(
+    workspacePaths,
+    createRunJournalEntry({
+      run_id: run.id,
+      attempt_id: failedExecution.id,
+      type: "attempt.failed",
+      payload: {
+        message: "Expected object, received string at artifacts[0]"
+      }
+    })
+  );
+
+  const orchestrator = new Orchestrator(
+    workspacePaths,
+    new AutoResumeExecutionAdapter() as never,
+    undefined,
+    60_000,
+    {
+      waitingHumanAutoResumeMs: 30,
+      maxAutomaticResumeCycles: 1
+    }
+  );
+
+  await wait(40);
+  await settleUntil(orchestrator, {
+    workspacePaths,
+    runId: run.id,
+    predicate: (runStatus) => runStatus === "completed",
+    timeoutMs: 15_000,
+    delayMs: 120
+  });
+
+  const current = await getCurrentDecision(workspacePaths, run.id);
+  const attempts = await listAttempts(workspacePaths, run.id);
+  const journal = await listRunJournal(workspacePaths, run.id);
+  const autoResumeScheduled = journal.filter(
+    (entry) => entry.type === "run.auto_resume.scheduled"
+  ).length;
+  const autoResumeExhausted = journal.filter(
+    (entry) => entry.type === "run.auto_resume.exhausted"
+  ).length;
+
+  assert.ok(current, "current decision must exist");
+  assert.equal(current.waiting_for_human, false, "fresh launch should reset exhausted budget");
+  assert.equal(current.run_status, "completed");
+  assert.deepEqual(
+    attempts.map((attempt) => attempt.status),
+    ["failed", "completed"]
+  );
+  assert.equal(
+    autoResumeScheduled,
+    2,
+    "expected the fresh launch to allow one new automatic resume on top of the old history"
+  );
+  assert.equal(autoResumeExhausted, 1, "old exhaustion marker should not be duplicated");
+}
+
 async function verifyRepeatedAutoResumeExhausts(): Promise<void> {
   const { run, workspacePaths } = await bootstrapRun("auto-resume-exhaustion");
   await saveCurrentDecision(
@@ -1075,6 +1202,10 @@ async function main(): Promise<void> {
     {
       id: "failed_execution_auto_resumes",
       run: verifyFailedExecutionAutoResumes
+    },
+    {
+      id: "run_launch_resets_auto_resume_budget",
+      run: verifyRunLaunchResetsAutoResumeBudget
     },
     {
       id: "repeated_auto_resume_exhausts",

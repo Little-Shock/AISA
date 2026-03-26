@@ -1900,7 +1900,7 @@ export class Orchestrator {
         continue;
       }
 
-      if (entry.type === "run.steer.queued") {
+      if (this.isAutoResumeResetBoundary(entry.type)) {
         break;
       }
 
@@ -2114,7 +2114,7 @@ export class Orchestrator {
         continue;
       }
 
-      if (entry.type === "run.steer.queued") {
+      if (this.isAutoResumeResetBoundary(entry.type)) {
         return false;
       }
 
@@ -2124,6 +2124,14 @@ export class Orchestrator {
     }
 
     return false;
+  }
+
+  private isAutoResumeResetBoundary(type: string): boolean {
+    return (
+      type === "run.steer.queued" ||
+      type === "run.launched" ||
+      type === "run.manual_recovery"
+    );
   }
 
   private hasActiveAttemptForRun(runId: string): boolean {
