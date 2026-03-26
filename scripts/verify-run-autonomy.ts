@@ -199,6 +199,48 @@ class RecoveryExecutionAdapter {
   }
 }
 
+class FastRetryExecutionAdapter {
+  readonly type = "fake-codex";
+
+  async runAttemptTask(input: {
+    run: Run;
+    attempt: Attempt;
+  }): Promise<{
+    writeback: WorkerWriteback;
+    reportMarkdown: string;
+    exitCode: number;
+  }> {
+    if (input.attempt.attempt_type !== "execution") {
+      throw new Error("Rate-limited execution retry should stay in execution.");
+    }
+
+    await writeFile(
+      join(input.run.workspace_root, "execution-change.md"),
+      `execution change from ${input.attempt.id}\n`,
+      "utf8"
+    );
+
+    return {
+      writeback: {
+        summary: "Provider recovered and the execution retry completed.",
+        findings: [
+          {
+            type: "fact",
+            content: "Execution retried after the transient provider limit.",
+            evidence: ["execution-change.md"]
+          }
+        ],
+        questions: [],
+        recommended_next_steps: [],
+        confidence: 0.86,
+        artifacts: [{ type: "patch", path: "artifacts/diff.patch" }]
+      },
+      reportMarkdown: "# fake",
+      exitCode: 0
+    };
+  }
+}
+
 async function wait(ms: number): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -234,6 +276,45 @@ async function settleUntil(
   }
 
   throw new Error(`Timed out while waiting for run ${input.runId} to reach the expected state.`);
+}
+
+async function settleUntilSnapshot(
+  orchestrator: Orchestrator,
+  input: {
+    workspacePaths: ReturnType<typeof resolveWorkspacePaths>;
+    runId: string;
+    predicate: (snapshot: {
+      runStatus: string | null;
+      waitingForHuman: boolean;
+      attempts: Awaited<ReturnType<typeof listAttempts>>;
+    }) => boolean;
+    timeoutMs?: number;
+    delayMs?: number;
+  }
+): Promise<void> {
+  const timeoutMs = input.timeoutMs ?? 10_000;
+  const delayMs = input.delayMs ?? 80;
+  const deadline = Date.now() + timeoutMs;
+
+  while (Date.now() < deadline) {
+    await orchestrator.tick();
+    const [current, attempts] = await Promise.all([
+      getCurrentDecision(input.workspacePaths, input.runId),
+      listAttempts(input.workspacePaths, input.runId)
+    ]);
+    if (
+      input.predicate({
+        runStatus: current?.run_status ?? null,
+        waitingForHuman: current?.waiting_for_human ?? false,
+        attempts
+      })
+    ) {
+      return;
+    }
+    await wait(delayMs);
+  }
+
+  throw new Error(`Timed out while waiting for run ${input.runId} to reach the expected snapshot.`);
 }
 
 async function bootstrapRun(title: string): Promise<{
@@ -797,6 +878,198 @@ async function verifyRecoveryAutoResumesExecution(): Promise<void> {
   );
 }
 
+async function verifyRateLimitedExecutionRetriesQuickly(): Promise<void> {
+  const { run, workspacePaths, rootDir } = await bootstrapRun("rate-limited-execution-retry");
+  await writeExecutionWorkspacePackage(rootDir);
+  await initializeGitRepo(rootDir);
+
+  const failedExecution = updateAttempt(
+    createAttempt({
+      run_id: run.id,
+      attempt_type: "execution",
+      worker: "fake-codex",
+      objective: "Retry the same execution after a transient provider rate limit.",
+      success_criteria: run.success_criteria,
+      workspace_root: run.workspace_root
+    }),
+    {
+      status: "failed",
+      started_at: new Date().toISOString(),
+      ended_at: new Date().toISOString()
+    }
+  );
+
+  await saveAttempt(workspacePaths, failedExecution);
+  await saveCurrentDecision(
+    workspacePaths,
+    createCurrentDecision({
+      run_id: run.id,
+      run_status: "waiting_steer",
+      latest_attempt_id: failedExecution.id,
+      recommended_next_action: "wait_for_human",
+      recommended_attempt_type: "execution",
+      summary: "Execution hit a transient provider limit.",
+      blocking_reason: "ERROR: exceeded retry limit, last status: 429 Too Many Requests",
+      waiting_for_human: true
+    })
+  );
+  await appendRunJournal(
+    workspacePaths,
+    createRunJournalEntry({
+      run_id: run.id,
+      attempt_id: failedExecution.id,
+      type: "attempt.failed",
+      payload: {
+        message: "ERROR: exceeded retry limit, last status: 429 Too Many Requests"
+      }
+    })
+  );
+
+  const orchestrator = new Orchestrator(
+    workspacePaths,
+    new FastRetryExecutionAdapter() as never,
+    undefined,
+    60_000,
+    {
+      waitingHumanAutoResumeMs: 5_000,
+      maxAutomaticResumeCycles: 2,
+      providerRateLimitAutoResumeMs: 30,
+      maxProviderRateLimitAutoResumeCycles: 4
+    }
+  );
+
+  await wait(60);
+  await settleUntil(orchestrator, {
+    workspacePaths,
+    runId: run.id,
+    predicate: (runStatus) => runStatus === "completed",
+    timeoutMs: 15_000,
+    delayMs: 120
+  });
+
+  const current = await getCurrentDecision(workspacePaths, run.id);
+  const attempts = await listAttempts(workspacePaths, run.id);
+  const journal = await listRunJournal(workspacePaths, run.id);
+
+  assert.ok(current, "current decision must exist");
+  assert.equal(current.waiting_for_human, false);
+  assert.equal(current.run_status, "completed");
+  assert.deepEqual(
+    attempts.map((attempt) => attempt.attempt_type),
+    ["execution", "execution"]
+  );
+  assert.deepEqual(
+    attempts.map((attempt) => attempt.status),
+    ["failed", "completed"]
+  );
+  assert.ok(
+    journal.some(
+      (entry) =>
+        entry.type === "run.auto_resume.scheduled" &&
+        entry.payload.reason === "provider_rate_limited_retry_execution"
+    ),
+    "provider 429 should schedule a fast execution retry instead of waiting for human steer"
+  );
+  assert.ok(
+    !journal.some((entry) => entry.type === "run.auto_resume.blocked"),
+    "provider 429 should not be treated as a manual blocker"
+  );
+}
+
+async function verifyRateLimitedResearchRetriesQuickly(): Promise<void> {
+  const { run, workspacePaths } = await bootstrapRun("rate-limited-research-retry");
+
+  const failedResearch = updateAttempt(
+    createAttempt({
+      run_id: run.id,
+      attempt_type: "research",
+      worker: "fake-codex",
+      objective: "Retry the same research after a transient provider rate limit.",
+      success_criteria: run.success_criteria,
+      workspace_root: run.workspace_root
+    }),
+    {
+      status: "failed",
+      started_at: new Date().toISOString(),
+      ended_at: new Date().toISOString()
+    }
+  );
+
+  await saveAttempt(workspacePaths, failedResearch);
+  await saveCurrentDecision(
+    workspacePaths,
+    createCurrentDecision({
+      run_id: run.id,
+      run_status: "waiting_steer",
+      latest_attempt_id: failedResearch.id,
+      recommended_next_action: "wait_for_human",
+      recommended_attempt_type: "research",
+      summary: "Research hit a transient provider limit.",
+      blocking_reason: "ERROR: exceeded retry limit, last status: 429 Too Many Requests",
+      waiting_for_human: true
+    })
+  );
+  await appendRunJournal(
+    workspacePaths,
+    createRunJournalEntry({
+      run_id: run.id,
+      attempt_id: failedResearch.id,
+      type: "attempt.failed",
+      payload: {
+        message: "ERROR: exceeded retry limit, last status: 429 Too Many Requests"
+      }
+    })
+  );
+
+  const orchestrator = new Orchestrator(
+    workspacePaths,
+    new LowSignalResearchAdapter() as never,
+    undefined,
+    60_000,
+    {
+      waitingHumanAutoResumeMs: 5_000,
+      maxAutomaticResumeCycles: 2,
+      providerRateLimitAutoResumeMs: 30,
+      maxProviderRateLimitAutoResumeCycles: 4
+    }
+  );
+
+  await wait(60);
+  await settleUntilSnapshot(orchestrator, {
+    workspacePaths,
+    runId: run.id,
+    predicate: ({ attempts }) => attempts[1]?.status === "completed",
+    timeoutMs: 2_000,
+    delayMs: 80
+  });
+
+  const current = await getCurrentDecision(workspacePaths, run.id);
+  const attempts = await listAttempts(workspacePaths, run.id);
+  const journal = await listRunJournal(workspacePaths, run.id);
+
+  assert.ok(current, "current decision must exist");
+  assert.deepEqual(
+    attempts.slice(0, 2).map((attempt) => attempt.attempt_type),
+    ["research", "research"]
+  );
+  assert.deepEqual(
+    attempts.slice(0, 2).map((attempt) => attempt.status),
+    ["failed", "completed"]
+  );
+  assert.ok(
+    journal.some(
+      (entry) =>
+        entry.type === "run.auto_resume.scheduled" &&
+        entry.payload.reason === "provider_rate_limited_retry_research"
+    ),
+    "provider 429 should schedule a fast research retry instead of blocking on human steer"
+  );
+  assert.ok(
+    !journal.some((entry) => entry.type === "run.auto_resume.blocked"),
+    "provider 429 should not be treated as a manual blocker"
+  );
+}
+
 async function main(): Promise<void> {
   const checks: Array<{ id: string; run: () => Promise<void> }> = [
     {
@@ -810,6 +1083,14 @@ async function main(): Promise<void> {
     {
       id: "checkpoint_blocker_auto_resumes_execution",
       run: verifyCheckpointBlockerAutoResumesIntoExecution
+    },
+    {
+      id: "rate_limited_execution_retries_quickly",
+      run: verifyRateLimitedExecutionRetriesQuickly
+    },
+    {
+      id: "rate_limited_research_retries_quickly",
+      run: verifyRateLimitedResearchRetriesQuickly
     },
     {
       id: "recovery_auto_resumes_execution",

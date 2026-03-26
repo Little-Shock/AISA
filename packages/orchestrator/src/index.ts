@@ -97,6 +97,8 @@ export interface OrchestratorOptions {
   attemptHeartbeatStaleMs?: number;
   waitingHumanAutoResumeMs?: number;
   maxAutomaticResumeCycles?: number;
+  providerRateLimitAutoResumeMs?: number;
+  maxProviderRateLimitAutoResumeCycles?: number;
 }
 
 export class Orchestrator {
@@ -108,6 +110,8 @@ export class Orchestrator {
   private readonly attemptHeartbeatStaleMs: number;
   private readonly waitingHumanAutoResumeMs: number;
   private readonly maxAutomaticResumeCycles: number;
+  private readonly providerRateLimitAutoResumeMs: number;
+  private readonly maxProviderRateLimitAutoResumeCycles: number;
 
   constructor(
     private readonly workspacePaths: WorkspacePaths,
@@ -124,6 +128,12 @@ export class Orchestrator {
     this.maxAutomaticResumeCycles =
       options.maxAutomaticResumeCycles ??
       readPositiveIntegerEnv("AISA_MAX_AUTOMATIC_RESUME_CYCLES", 3);
+    this.providerRateLimitAutoResumeMs =
+      options.providerRateLimitAutoResumeMs ??
+      readPositiveIntegerEnv("AISA_PROVIDER_RATE_LIMIT_AUTO_RESUME_MS", 15_000);
+    this.maxProviderRateLimitAutoResumeCycles =
+      options.maxProviderRateLimitAutoResumeCycles ??
+      readPositiveIntegerEnv("AISA_MAX_PROVIDER_RATE_LIMIT_AUTO_RESUME_CYCLES", 8);
   }
 
   start(): void {
@@ -1635,15 +1645,23 @@ export class Orchestrator {
       return;
     }
 
+    const journal = await listRunJournal(this.workspacePaths, runId);
+    const autoResumePolicy = this.getAutomaticResumePolicy({
+      current,
+      attempts,
+      journal
+    });
     const updatedAtMs = Date.parse(current.updated_at);
-    if (Number.isNaN(updatedAtMs) || Date.now() - updatedAtMs < this.waitingHumanAutoResumeMs) {
+    if (Number.isNaN(updatedAtMs) || Date.now() - updatedAtMs < autoResumePolicy.delayMs) {
       return;
     }
 
-    const journal = await listRunJournal(this.workspacePaths, runId);
-    const automaticResumeCount = this.countAutomaticResumeCyclesSinceLastSteer(journal);
+    const automaticResumeCount = this.countAutomaticResumeCyclesSinceLastSteer(
+      journal,
+      autoResumePolicy.reasonPrefix
+    );
 
-    if (automaticResumeCount >= this.maxAutomaticResumeCycles) {
+    if (automaticResumeCount >= autoResumePolicy.maxCycles) {
       await this.persistAutomaticResumeExhausted(runId, current, journal, automaticResumeCount);
       return;
     }
@@ -1707,31 +1725,25 @@ export class Orchestrator {
       return null;
     }
 
-    if (
-      latestAttempt.attempt_type !== "research" ||
-      latestAttempt.status !== "failed"
-    ) {
+    if (latestAttempt.status !== "failed") {
       return null;
     }
 
-    const failureMessage =
-      this.getAttemptJournalMessage(input.journal, latestAttempt.id, ["attempt.failed"]) ??
-      input.current.blocking_reason;
+    const failureMessage = this.getLatestAttemptFailureMessage({
+      current: input.current,
+      journal: input.journal,
+      latestAttempt
+    });
     const providerBlocker = this.classifyProviderBlocker(failureMessage);
 
-    if (!providerBlocker || !failureMessage) {
+    if (providerBlocker !== "provider_auth_failed" || !failureMessage) {
       return null;
     }
 
-    return providerBlocker === "provider_rate_limited"
-      ? {
-          reason: providerBlocker,
-          message: `上一轮 research 命中 provider 限流，自动续跑已暂停。原始阻塞：${failureMessage}`
-        }
-      : {
-          reason: providerBlocker,
-          message: `上一轮 research 命中 provider 鉴权失败，自动续跑已暂停。原始阻塞：${failureMessage}`
-        };
+    return {
+      reason: providerBlocker,
+      message: `上一轮${latestAttempt.attempt_type === "execution" ? "execution" : "research"}命中 provider 鉴权失败，自动续跑已暂停。原始阻塞：${failureMessage}`
+    };
   }
 
   private buildAutomaticResumePlan(input: {
@@ -1789,6 +1801,32 @@ export class Orchestrator {
     }
 
     if (latestAttempt.status === "failed") {
+      const failureMessage = this.getLatestAttemptFailureMessage({
+        current: input.current,
+        journal: input.journal,
+        latestAttempt
+      });
+      const providerBlocker = this.classifyProviderBlocker(failureMessage);
+
+      if (providerBlocker === "provider_rate_limited") {
+        return {
+          next_action: "retry_attempt",
+          attempt_type: latestAttempt.attempt_type,
+          summary:
+            latestAttempt.attempt_type === "execution"
+              ? "provider 限流，系统短退避后自动重试上一轮执行。"
+              : "provider 限流，系统短退避后自动重试上一轮研究。",
+          blocking_reason:
+            failureMessage ??
+            input.current.blocking_reason ??
+            "上一轮命中 provider 限流，系统会短退避后重试。",
+          reason:
+            latestAttempt.attempt_type === "execution"
+              ? "provider_rate_limited_retry_execution"
+              : "provider_rate_limited_retry_research"
+        };
+      }
+
       if (latestAttempt.attempt_type === "execution") {
         return {
           next_action: "retry_attempt",
@@ -1851,7 +1889,8 @@ export class Orchestrator {
   }
 
   private countAutomaticResumeCyclesSinceLastSteer(
-    journal: Awaited<ReturnType<typeof listRunJournal>>
+    journal: Awaited<ReturnType<typeof listRunJournal>>,
+    reasonPrefix?: string
   ): number {
     let count = 0;
 
@@ -1866,11 +1905,54 @@ export class Orchestrator {
       }
 
       if (entry.type === "run.auto_resume.scheduled") {
+        if (
+          reasonPrefix &&
+          !String(entry.payload.reason ?? "").startsWith(reasonPrefix)
+        ) {
+          continue;
+        }
         count += 1;
       }
     }
 
     return count;
+  }
+
+  private getAutomaticResumePolicy(input: {
+    current: CurrentDecision;
+    attempts: Attempt[];
+    journal: Awaited<ReturnType<typeof listRunJournal>>;
+  }): {
+    delayMs: number;
+    maxCycles: number;
+    reasonPrefix?: string;
+  } {
+    const latestAttempt = this.getLatestAttempt(input.current, input.attempts);
+    if (!latestAttempt || latestAttempt.status !== "failed") {
+      return {
+        delayMs: this.waitingHumanAutoResumeMs,
+        maxCycles: this.maxAutomaticResumeCycles
+      };
+    }
+
+    const failureMessage = this.getLatestAttemptFailureMessage({
+      current: input.current,
+      journal: input.journal,
+      latestAttempt
+    });
+    const providerBlocker = this.classifyProviderBlocker(failureMessage);
+    if (providerBlocker === "provider_rate_limited") {
+      return {
+        delayMs: this.providerRateLimitAutoResumeMs,
+        maxCycles: this.maxProviderRateLimitAutoResumeCycles,
+        reasonPrefix: "provider_rate_limited_retry_"
+      };
+    }
+
+    return {
+      delayMs: this.waitingHumanAutoResumeMs,
+      maxCycles: this.maxAutomaticResumeCycles
+    };
   }
 
   private hasCheckpointBlocker(
@@ -1900,6 +1982,17 @@ export class Orchestrator {
     }
 
     return null;
+  }
+
+  private getLatestAttemptFailureMessage(input: {
+    current: CurrentDecision;
+    journal: Awaited<ReturnType<typeof listRunJournal>>;
+    latestAttempt: Attempt;
+  }): string | null {
+    return (
+      this.getAttemptJournalMessage(input.journal, input.latestAttempt.id, ["attempt.failed"]) ??
+      input.current.blocking_reason
+    );
   }
 
   private classifyProviderBlocker(
