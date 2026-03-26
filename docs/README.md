@@ -5,6 +5,7 @@
 当前文档：
 
 - `implementation-blueprint.md`
+- `remote-observability-cloudflare.md`
 - `decisions/0001-mvp-runtime.md`
 
 约定：

@@ -59,16 +59,159 @@ type GoalDetail = {
   }>;
 };
 
-const apiBaseUrl =
-  process.env.NEXT_PUBLIC_CONTROL_API_URL ?? "http://127.0.0.1:8787";
+type RunSummaryItem = {
+  run: {
+    id: string;
+    title: string;
+    description: string;
+    workspace_root: string;
+    created_at: string;
+  };
+  current: {
+    run_status: string;
+    latest_attempt_id: string | null;
+    recommended_next_action: string | null;
+    recommended_attempt_type: string | null;
+    summary: string;
+    blocking_reason: string | null;
+    waiting_for_human: boolean;
+  } | null;
+  attempt_count: number;
+};
+
+type RunDetail = {
+  run: {
+    id: string;
+    title: string;
+    description: string;
+    workspace_root: string;
+    owner_id: string;
+    success_criteria: string[];
+    constraints: string[];
+    created_at: string;
+    updated_at: string;
+  };
+  current: {
+    run_status: string;
+    best_attempt_id: string | null;
+    latest_attempt_id: string | null;
+    recommended_next_action: string | null;
+    recommended_attempt_type: string | null;
+    summary: string;
+    blocking_reason: string | null;
+    waiting_for_human: boolean;
+    updated_at: string;
+  } | null;
+  attempts: Array<{
+    id: string;
+    attempt_type: string;
+    status: string;
+    worker: string;
+    objective: string;
+    success_criteria: string[];
+    workspace_root: string;
+    created_at: string;
+    started_at: string | null;
+    ended_at: string | null;
+  }>;
+  attempt_details: Array<{
+    attempt: {
+      id: string;
+      attempt_type: string;
+      status: string;
+      worker: string;
+      objective: string;
+      success_criteria: string[];
+      workspace_root: string;
+      created_at: string;
+      started_at: string | null;
+      ended_at: string | null;
+    };
+    contract: {
+      objective: string;
+      success_criteria: string[];
+      required_evidence: string[];
+      forbidden_shortcuts: string[];
+      expected_artifacts: string[];
+      verification_plan?: {
+        commands: Array<{
+          purpose: string;
+          command: string;
+          expected_exit_code?: number;
+        }>;
+      };
+    } | null;
+    result: {
+      summary: string;
+      findings: Array<{
+        type: string;
+        content: string;
+        evidence: string[];
+      }>;
+      recommended_next_steps: string[];
+      confidence: number;
+    } | null;
+    evaluation: {
+      verification_status: string;
+      recommendation: string;
+      suggested_attempt_type: string | null;
+      rationale: string;
+      missing_evidence: string[];
+      goal_progress: number;
+      evidence_quality: number;
+    } | null;
+    runtime_verification: {
+      status: string;
+      failure_code: string | null;
+      failure_reason: string | null;
+      changed_files: string[];
+      command_results: Array<{
+        purpose: string;
+        command: string;
+        passed: boolean;
+        exit_code: number;
+        expected_exit_code: number;
+      }>;
+    } | null;
+    stdout_excerpt: string;
+    stderr_excerpt: string;
+    journal: Array<{
+      type: string;
+      ts: string;
+    }>;
+  }>;
+  steers: Array<{
+    id: string;
+    content: string;
+    status: string;
+    attempt_id: string | null;
+    created_at: string;
+  }>;
+  journal: Array<{
+    id: string;
+    type: string;
+    ts: string;
+    attempt_id: string | null;
+  }>;
+  report: string;
+};
+
+type ViewMode = "runs" | "goals";
+
+const apiBaseUrl = "/api/control";
+const controlApiDisplay = "same-origin /api/control";
 const defaultWorkspace =
   process.env.NEXT_PUBLIC_DEFAULT_WORKSPACE_ROOT ??
   "E:\\00.Lark_Projects\\36_team_research";
 
 export default function Page() {
+  const [viewMode, setViewMode] = useState<ViewMode>("runs");
   const [goals, setGoals] = useState<GoalSummaryItem[]>([]);
+  const [runs, setRuns] = useState<RunSummaryItem[]>([]);
   const [selectedGoalId, setSelectedGoalId] = useState<string | null>(null);
+  const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const [detail, setDetail] = useState<GoalDetail | null>(null);
+  const [runDetail, setRunDetail] = useState<RunDetail | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [goalForm, setGoalForm] = useState({
@@ -86,40 +229,50 @@ export default function Page() {
 
   useEffect(() => {
     void loadGoals();
+    void loadRuns();
   }, []);
 
   useEffect(() => {
-    if (!selectedGoalId) {
-      return;
-    }
-
-    void loadDetail(selectedGoalId);
     const timer = window.setInterval(() => {
       void loadGoals();
-      void loadDetail(selectedGoalId);
+      void loadRuns();
+      if (selectedGoalId) {
+        void loadGoalDetail(selectedGoalId);
+      }
+      if (selectedRunId) {
+        void loadRunDetail(selectedRunId);
+      }
     }, 4000);
 
     return () => window.clearInterval(timer);
-  }, [selectedGoalId]);
+  }, [selectedGoalId, selectedRunId]);
 
   const selectedGoal = useMemo(
     () => goals.find((item) => item.goal.id === selectedGoalId) ?? null,
     [goals, selectedGoalId]
   );
+  const selectedRun = useMemo(
+    () => runs.find((item) => item.run.id === selectedRunId) ?? null,
+    [runs, selectedRunId]
+  );
 
   const overviewStats = useMemo(() => {
-    const totalGoals = goals.length;
     const runningGoals = goals.filter((item) => item.goal.status === "running").length;
-    const activeBranches = goals.reduce((sum, item) => sum + item.running_count, 0);
-    const keptBranches = goals.reduce((sum, item) => sum + item.kept_count, 0);
+    const runningRuns = runs.filter(
+      (item) => item.current?.run_status === "running"
+    ).length;
+    const runAttempts = runs.reduce((sum, item) => sum + item.attempt_count, 0);
+    const waitingRuns = runs.filter((item) => item.current?.waiting_for_human).length;
 
     return [
-      { label: "目标总数", value: String(totalGoals).padStart(2, "0") },
-      { label: "运行中目标", value: String(runningGoals).padStart(2, "0") },
-      { label: "活跃分支", value: String(activeBranches).padStart(2, "0") },
-      { label: "已保留分支", value: String(keptBranches).padStart(2, "0") }
+      { label: "Run 总数", value: String(runs.length).padStart(2, "0") },
+      { label: "运行中 Run", value: String(runningRuns).padStart(2, "0") },
+      { label: "Attempt 总数", value: String(runAttempts).padStart(2, "0") },
+      { label: "等待人工", value: String(waitingRuns).padStart(2, "0") },
+      { label: "Goal 总数", value: String(goals.length).padStart(2, "0") },
+      { label: "运行中 Goal", value: String(runningGoals).padStart(2, "0") }
     ];
-  }, [goals]);
+  }, [goals, runs]);
 
   async function loadGoals() {
     const response = await fetch(`${apiBaseUrl}/goals`);
@@ -133,13 +286,34 @@ export default function Page() {
     }
   }
 
-  async function loadDetail(goalId: string) {
+  async function loadRuns() {
+    const response = await fetch(`${apiBaseUrl}/runs`);
+    const payload = (await response.json()) as { runs: RunSummaryItem[] };
+    setRuns(payload.runs);
+
+    if (!selectedRunId && payload.runs.length > 0) {
+      startTransition(() => {
+        setSelectedRunId(payload.runs[0].run.id);
+      });
+    }
+  }
+
+  async function loadGoalDetail(goalId: string) {
     const response = await fetch(`${apiBaseUrl}/goals/${goalId}`);
     if (!response.ok) {
       return;
     }
     const payload = (await response.json()) as GoalDetail;
     setDetail(payload);
+  }
+
+  async function loadRunDetail(runId: string) {
+    const response = await fetch(`${apiBaseUrl}/runs/${runId}`);
+    if (!response.ok) {
+      return;
+    }
+    const payload = (await response.json()) as RunDetail;
+    setRunDetail(payload);
   }
 
   async function createGoal() {
@@ -167,7 +341,7 @@ export default function Page() {
       const payload = (await response.json()) as { goal: { id: string } };
       await loadGoals();
       setSelectedGoalId(payload.goal.id);
-      await loadDetail(payload.goal.id);
+      await loadGoalDetail(payload.goal.id);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
@@ -189,7 +363,7 @@ export default function Page() {
       }
 
       await loadGoals();
-      await loadDetail(goalId);
+      await loadGoalDetail(goalId);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
@@ -210,7 +384,7 @@ export default function Page() {
         throw new Error("重跑分支失败");
       }
 
-      await loadDetail(goalId);
+      await loadGoalDetail(goalId);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
@@ -241,7 +415,7 @@ export default function Page() {
       }
 
       setSteerText("");
-      await loadDetail(goalId);
+      await loadGoalDetail(goalId);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
@@ -254,21 +428,21 @@ export default function Page() {
       <div className="dashboard-frame">
         <section className="hero-panel">
           <div className="hero-copy">
-            <div className="hero-eyebrow">AutoResearch / 中文控制台</div>
+            <div className="hero-eyebrow">AISA / Run Console</div>
             <h1 className="hero-title">
-              多 Agent 研究总控台
-              <span>不是聊天页，是任务编排与收敛面板。</span>
+              运行台与研究台
+              <span>先看 run 的真实状态，再回头看旧的 goal 和 branch 面板。</span>
             </h1>
             <p className="hero-description">
-              围绕一个目标同时启动多个 Codex 分支，沉淀共享上下文、插入人工 steer，
-              再用评分与报告把探索过程压成可执行结论。
+              这里把 run-centered 的运行事实拉到前台。能看 current decision、attempt 契约、
+              写回结果、运行时回放、steer 和日志尾部，方便盯自举任务的真实状态。
             </p>
           </div>
 
           <div className="hero-meta">
             <div className="meta-card">
               <span className="meta-label">控制 API</span>
-              <strong>{apiBaseUrl}</strong>
+              <strong>{controlApiDisplay}</strong>
             </div>
             <div className="meta-card">
               <span className="meta-label">默认工作区</span>
@@ -284,107 +458,308 @@ export default function Page() {
               </article>
             ))}
           </div>
+
+          <div className="mode-switch" aria-label="console mode">
+            <button
+              type="button"
+              className={`mode-switch-button${viewMode === "runs" ? " is-active" : ""}`}
+              onClick={() => setViewMode("runs")}
+            >
+              Run Console
+            </button>
+            <button
+              type="button"
+              className={`mode-switch-button${viewMode === "goals" ? " is-active" : ""}`}
+              onClick={() => setViewMode("goals")}
+            >
+              Goal Console
+            </button>
+          </div>
         </section>
 
         {error ? <section className="error-banner">{error}</section> : null}
 
         <div className="content-grid">
           <aside className="left-rail">
-            <Panel
-              title="发起新目标"
-              subtitle="把一个高层问题收束成可并行探索的研究任务。"
-            >
-              <div className="form-stack">
-                <Field
-                  label="目标标题"
-                  value={goalForm.title}
-                  onChange={(value) => setGoalForm((current) => ({ ...current, title: value }))}
-                />
-                <TextAreaField
-                  label="问题描述"
-                  value={goalForm.description}
-                  onChange={(value) =>
-                    setGoalForm((current) => ({ ...current, description: value }))
-                  }
-                />
-                <TextAreaField
-                  label="成功标准"
-                  value={goalForm.success_criteria}
-                  onChange={(value) =>
-                    setGoalForm((current) => ({ ...current, success_criteria: value }))
-                  }
-                />
-                <TextAreaField
-                  label="约束条件"
-                  value={goalForm.constraints}
-                  onChange={(value) =>
-                    setGoalForm((current) => ({ ...current, constraints: value }))
-                  }
-                />
-                <Field
-                  label="Owner"
-                  value={goalForm.owner_id}
-                  onChange={(value) =>
-                    setGoalForm((current) => ({ ...current, owner_id: value }))
-                  }
-                />
-                <Field
-                  label="工作区路径"
-                  value={goalForm.workspace_root}
-                  onChange={(value) =>
-                    setGoalForm((current) => ({ ...current, workspace_root: value }))
-                  }
-                />
-                <button
-                  type="button"
-                  className="button button-primary"
-                  onClick={() => void createGoal()}
-                  disabled={busy === "create"}
+            {viewMode === "runs" ? (
+              <Panel
+                title={`运行池 · ${runs.length}`}
+                subtitle="这里展示所有 run-centered 任务，包括自举 run。"
+              >
+                <div className="run-list">
+                  {runs.length === 0 ? (
+                    <EmptyState text="还没有 run。先用 self-bootstrap 或 API 启动一条。" />
+                  ) : (
+                    runs.map((item) => {
+                      const selected = item.run.id === selectedRunId;
+                      return (
+                        <button
+                          key={item.run.id}
+                          type="button"
+                          className={`goal-card run-card${selected ? " is-selected" : ""}`}
+                          onClick={() => {
+                            setSelectedRunId(item.run.id);
+                            void loadRunDetail(item.run.id);
+                          }}
+                        >
+                          <div className="goal-card-head">
+                            <strong>{item.run.title}</strong>
+                            <StatusPill value={item.current?.run_status ?? "draft"} />
+                          </div>
+                          <div className="goal-card-body">
+                            {item.run.id}
+                            <br />
+                            {item.run.workspace_root}
+                          </div>
+                          <div className="goal-card-meta">
+                            attempt {item.attempt_count} ·{" "}
+                            {item.current?.recommended_next_action ?? "暂无动作"}
+                          </div>
+                          <p className="run-card-summary">
+                            {truncateText(
+                              item.current?.summary || item.run.description,
+                              140
+                            )}
+                          </p>
+                        </button>
+                      );
+                    })
+                  )}
+                </div>
+              </Panel>
+            ) : (
+              <>
+                <Panel
+                  title="发起新目标"
+                  subtitle="把一个高层问题收束成可并行探索的研究任务。"
                 >
-                  {busy === "create" ? "创建中..." : "创建目标"}
-                </button>
-              </div>
-            </Panel>
+                  <div className="form-stack">
+                    <Field
+                      label="目标标题"
+                      value={goalForm.title}
+                      onChange={(value) => setGoalForm((current) => ({ ...current, title: value }))}
+                    />
+                    <TextAreaField
+                      label="问题描述"
+                      value={goalForm.description}
+                      onChange={(value) =>
+                        setGoalForm((current) => ({ ...current, description: value }))
+                      }
+                    />
+                    <TextAreaField
+                      label="成功标准"
+                      value={goalForm.success_criteria}
+                      onChange={(value) =>
+                        setGoalForm((current) => ({ ...current, success_criteria: value }))
+                      }
+                    />
+                    <TextAreaField
+                      label="约束条件"
+                      value={goalForm.constraints}
+                      onChange={(value) =>
+                        setGoalForm((current) => ({ ...current, constraints: value }))
+                      }
+                    />
+                    <Field
+                      label="Owner"
+                      value={goalForm.owner_id}
+                      onChange={(value) =>
+                        setGoalForm((current) => ({ ...current, owner_id: value }))
+                      }
+                    />
+                    <Field
+                      label="工作区路径"
+                      value={goalForm.workspace_root}
+                      onChange={(value) =>
+                        setGoalForm((current) => ({ ...current, workspace_root: value }))
+                      }
+                    />
+                    <button
+                      type="button"
+                      className="button button-primary"
+                      onClick={() => void createGoal()}
+                      disabled={busy === "create"}
+                    >
+                      {busy === "create" ? "创建中..." : "创建目标"}
+                    </button>
+                  </div>
+                </Panel>
 
-            <Panel
-              title={`目标池 · ${goals.length}`}
-              subtitle="这里展示所有 goal 的整体推进状态。"
-            >
-              <div className="goal-list">
-                {goals.length === 0 ? (
-                  <EmptyState text="还没有目标。先在上方创建一个，然后启动第一轮分支。" />
-                ) : (
-                  goals.map((item) => {
-                    const selected = item.goal.id === selectedGoalId;
-                    return (
-                      <button
-                        key={item.goal.id}
-                        type="button"
-                        className={`goal-card${selected ? " is-selected" : ""}`}
-                        onClick={() => {
-                          setSelectedGoalId(item.goal.id);
-                          void loadDetail(item.goal.id);
-                        }}
-                      >
-                        <div className="goal-card-head">
-                          <strong>{item.goal.title}</strong>
-                          <StatusPill value={item.goal.status} />
-                        </div>
-                        <div className="goal-card-body">{item.goal.workspace_root}</div>
-                        <div className="goal-card-meta">
-                          分支 {item.branch_count} · 运行中 {item.running_count} · 已保留{" "}
-                          {item.kept_count}
-                        </div>
-                      </button>
-                    );
-                  })
-                )}
-              </div>
-            </Panel>
+                <Panel
+                  title={`目标池 · ${goals.length}`}
+                  subtitle="这里展示所有 goal 的整体推进状态。"
+                >
+                  <div className="goal-list">
+                    {goals.length === 0 ? (
+                      <EmptyState text="还没有目标。先在上方创建一个，然后启动第一轮分支。" />
+                    ) : (
+                      goals.map((item) => {
+                        const selected = item.goal.id === selectedGoalId;
+                        return (
+                          <button
+                            key={item.goal.id}
+                            type="button"
+                            className={`goal-card${selected ? " is-selected" : ""}`}
+                            onClick={() => {
+                              setSelectedGoalId(item.goal.id);
+                              void loadGoalDetail(item.goal.id);
+                            }}
+                          >
+                            <div className="goal-card-head">
+                              <strong>{item.goal.title}</strong>
+                              <StatusPill value={item.goal.status} />
+                            </div>
+                            <div className="goal-card-body">{item.goal.workspace_root}</div>
+                            <div className="goal-card-meta">
+                              分支 {item.branch_count} · 运行中 {item.running_count} · 已保留{" "}
+                              {item.kept_count}
+                            </div>
+                          </button>
+                        );
+                      })
+                    )}
+                  </div>
+                </Panel>
+              </>
+            )}
           </aside>
 
           <section className="main-stage">
-            {detail && selectedGoal ? (
+            {viewMode === "runs" ? (
+              runDetail && selectedRun ? (
+                <>
+                  <Panel
+                    title={runDetail.run.title}
+                    subtitle="只读运行台。看 current decision、attempt 契约、写回、回放验证和日志，不在这里介入。"
+                    actions={
+                      <div className="action-row">
+                        <button
+                          type="button"
+                          className="button button-secondary"
+                          onClick={() => {
+                            void loadRuns();
+                            void loadRunDetail(runDetail.run.id);
+                          }}
+                        >
+                          刷新
+                        </button>
+                      </div>
+                    }
+                  >
+                    <div className="summary-grid">
+                      <InfoCard label="Run 状态" value={statusLabel(runDetail.current?.run_status ?? "draft")} />
+                      <InfoCard
+                        label="最新动作"
+                        value={runDetail.current?.recommended_next_action ?? "暂无"}
+                      />
+                      <InfoCard
+                        label="最新 Attempt"
+                        value={runDetail.current?.latest_attempt_id ?? "暂无"}
+                      />
+                      <InfoCard
+                        label="Attempt 数量"
+                        value={String(runDetail.attempts.length)}
+                      />
+                      <InfoCard label="Owner" value={runDetail.run.owner_id} />
+                      <InfoCard label="工作区" value={runDetail.run.workspace_root} />
+                    </div>
+
+                    <div className="dual-grid">
+                      <SubPanel title="Run Contract" accent="emerald">
+                        <p className="body-copy">{runDetail.run.description}</p>
+                        <SectionList title="成功标准" items={runDetail.run.success_criteria} />
+                        <SectionList title="约束条件" items={runDetail.run.constraints} />
+                        <SectionList
+                          title="运行元信息"
+                          items={[
+                            `Run ID: ${runDetail.run.id}`,
+                            `创建时间: ${formatDateTime(runDetail.run.created_at)}`,
+                            `更新时间: ${formatDateTime(runDetail.run.updated_at)}`
+                          ]}
+                        />
+                      </SubPanel>
+
+                      <SubPanel title="Current Decision" accent="amber">
+                        <p className="body-copy">
+                          {runDetail.current?.summary ?? "还没有 current decision。"}
+                        </p>
+                        <SectionList
+                          title="当前状态"
+                          items={[
+                            `Run 状态: ${statusLabel(runDetail.current?.run_status ?? "draft")}`,
+                            `推荐 attempt 类型: ${runDetail.current?.recommended_attempt_type ?? "暂无"}`,
+                            `等待人工: ${runDetail.current?.waiting_for_human ? "是" : "否"}`,
+                            `最新 attempt: ${runDetail.current?.latest_attempt_id ?? "暂无"}`
+                          ]}
+                        />
+                        <SectionList
+                          title="排队 / 已应用 Steer"
+                          items={runDetail.steers.map((steer) => {
+                            const attemptPart = steer.attempt_id ? ` · ${steer.attempt_id}` : "";
+                            return `[${statusLabel(steer.status)}]${attemptPart} ${steer.content}`;
+                          })}
+                        />
+                        {runDetail.current?.blocking_reason ? (
+                          <Callout tone="rose" title="当前卡点">
+                            {runDetail.current.blocking_reason}
+                          </Callout>
+                        ) : null}
+                      </SubPanel>
+                    </div>
+                  </Panel>
+
+                  <Panel
+                    title="Attempt 时间线"
+                    subtitle="每条 attempt 都展示契约、结果、判断、回放验证和日志尾部。"
+                  >
+                    <div className="attempt-list">
+                      {runDetail.attempt_details.length === 0 ? (
+                        <EmptyState text="还没有 attempt 细节。" />
+                      ) : (
+                        [...runDetail.attempt_details].reverse().map((detailItem) => (
+                          <AttemptCard key={detailItem.attempt.id} detail={detailItem} />
+                        ))
+                      )}
+                    </div>
+                  </Panel>
+
+                  <div className="dual-grid">
+                    <Panel
+                      title="Run 报告"
+                      subtitle="如果 loop 已经生成 run 级报告，这里会直接显示。"
+                    >
+                      <pre className="report-block">
+                        {runDetail.report || "还没有 run report。"}
+                      </pre>
+                    </Panel>
+
+                    <Panel
+                      title="Run 日志"
+                      subtitle="这里只看 run-centered 事实时间线。"
+                    >
+                      <div className="event-list">
+                        {[...runDetail.journal].reverse().slice(0, 24).map((entry) => (
+                          <article key={entry.id} className="event-row">
+                            <strong>{activityLabel(entry.type)}</strong>
+                            <span>
+                              {formatDateTime(entry.ts)}
+                              {entry.attempt_id ? ` · ${entry.attempt_id}` : ""}
+                            </span>
+                          </article>
+                        ))}
+                      </div>
+                    </Panel>
+                  </div>
+                </>
+              ) : (
+                <Panel
+                  title="还没有选中 Run"
+                  subtitle="先从左侧运行池里选一条 run。"
+                >
+                  <EmptyState text="这块区域会展示 run 合同、current decision、attempt 证据、运行日志和最终报告。" />
+                </Panel>
+              )
+            ) : detail && selectedGoal ? (
               <>
                 <Panel
                   title={detail.goal.title}
@@ -404,7 +779,7 @@ export default function Page() {
                         className="button button-secondary"
                         onClick={() => {
                           void loadGoals();
-                          void loadDetail(detail.goal.id);
+                          void loadGoalDetail(detail.goal.id);
                         }}
                       >
                         刷新
@@ -514,8 +889,8 @@ export default function Page() {
                     <div className="event-list">
                       {detail.events.slice(-16).reverse().map((event) => (
                         <article key={event.event_id} className="event-row">
-                          <strong>{eventLabel(event.type)}</strong>
-                          <span>{new Date(event.ts).toLocaleString("zh-CN")}</span>
+                          <strong>{activityLabel(event.type)}</strong>
+                          <span>{formatDateTime(event.ts)}</span>
                         </article>
                       ))}
                     </div>
@@ -537,6 +912,142 @@ export default function Page() {
   );
 }
 
+function AttemptCard({
+  detail
+}: {
+  detail: RunDetail["attempt_details"][number];
+}) {
+  const contractCommands =
+    detail.contract?.verification_plan?.commands.map((command) => {
+      const exitCode =
+        typeof command.expected_exit_code === "number"
+          ? ` · exit ${command.expected_exit_code}`
+          : "";
+      return `${command.purpose} · ${command.command}${exitCode}`;
+    }) ?? [];
+  const replayCommands =
+    detail.runtime_verification?.command_results.map((command) => {
+      const verdict = command.passed ? "通过" : "失败";
+      return `${verdict} · ${command.purpose} · ${command.command} · ${command.exit_code}/${command.expected_exit_code}`;
+    }) ?? [];
+
+  return (
+    <article className="attempt-card">
+      <div className="attempt-card-head">
+        <div>
+          <div className="attempt-id">{detail.attempt.id}</div>
+          <div className="attempt-meta-line">
+            {detail.attempt.attempt_type} · worker {detail.attempt.worker} · 创建{" "}
+            {formatDateTime(detail.attempt.created_at)}
+          </div>
+        </div>
+        <StatusPill value={detail.attempt.status} />
+      </div>
+
+      <p className="attempt-objective">{detail.attempt.objective}</p>
+
+      <div className="attempt-stats">
+        <MiniMetric label="开始" value={formatDateTime(detail.attempt.started_at)} />
+        <MiniMetric label="结束" value={formatDateTime(detail.attempt.ended_at)} />
+        <MiniMetric
+          label="判断"
+          value={statusLabel(detail.evaluation?.recommendation ?? "未判断")}
+        />
+        <MiniMetric
+          label="回放"
+          value={statusLabel(detail.runtime_verification?.status ?? "未运行")}
+        />
+      </div>
+
+      <div className="attempt-grid">
+        <div className="attempt-section">
+          <div className="attempt-section-title">Attempt 契约</div>
+          <SectionList
+            title="成功标准"
+            items={detail.contract?.success_criteria ?? detail.attempt.success_criteria}
+          />
+          <SectionList
+            title="必留证据"
+            items={detail.contract?.required_evidence ?? []}
+          />
+          <SectionList
+            title="禁止取巧"
+            items={detail.contract?.forbidden_shortcuts ?? []}
+          />
+          <SectionList title="期望产物" items={detail.contract?.expected_artifacts ?? []} />
+          <SectionList title="契约回放命令" items={contractCommands} />
+        </div>
+
+        <div className="attempt-section">
+          <div className="attempt-section-title">结果与判断</div>
+          <p className="body-copy">
+            {detail.result?.summary ?? "还没有写回结果。"}
+          </p>
+          <SectionList
+            title="下一步"
+            items={detail.result?.recommended_next_steps ?? []}
+          />
+          <SectionList
+            title="判断缺口"
+            items={detail.evaluation?.missing_evidence ?? []}
+          />
+          <SectionList
+            title="运行时回放"
+            items={replayCommands}
+          />
+          {detail.runtime_verification?.failure_reason ? (
+            <Callout tone="rose" title="回放失败原因">
+              {detail.runtime_verification.failure_reason}
+            </Callout>
+          ) : null}
+          <SectionList
+            title="改动文件"
+            items={detail.runtime_verification?.changed_files ?? []}
+          />
+          {detail.evaluation ? (
+            <CodeBlock
+              title="判断摘要"
+              value={[
+                `推荐动作: ${detail.evaluation.recommendation}`,
+                `建议类型: ${detail.evaluation.suggested_attempt_type ?? "无"}`,
+                `goal_progress: ${detail.evaluation.goal_progress.toFixed(2)}`,
+                `evidence_quality: ${detail.evaluation.evidence_quality.toFixed(2)}`,
+                `verification_status: ${detail.evaluation.verification_status}`,
+                "",
+                detail.evaluation.rationale
+              ].join("\n")}
+            />
+          ) : null}
+        </div>
+      </div>
+
+      <div className="attempt-grid">
+        <div className="attempt-section">
+          <div className="attempt-section-title">日志尾部</div>
+          <CodeBlock
+            title="stderr"
+            value={detail.stderr_excerpt || "暂无 stderr 输出。"}
+          />
+        </div>
+
+        <div className="attempt-section">
+          <div className="attempt-section-title">辅助输出</div>
+          <CodeBlock
+            title="stdout"
+            value={detail.stdout_excerpt || "暂无 stdout 输出。"}
+          />
+          <SectionList
+            title="Attempt 时间线"
+            items={detail.journal.map(
+              (entry) => `${formatDateTime(entry.ts)} · ${activityLabel(entry.type)}`
+            )}
+          />
+        </div>
+      </div>
+    </article>
+  );
+}
+
 function splitLines(value: string): string[] {
   return value
     .split("\n")
@@ -545,7 +1056,23 @@ function splitLines(value: string): string[] {
     .filter(Boolean);
 }
 
-function statusLabel(value: string): string {
+function truncateText(value: string, maxLength: number): string {
+  if (value.length <= maxLength) {
+    return value;
+  }
+
+  return `${value.slice(0, maxLength).trimEnd()}...`;
+}
+
+function formatDateTime(value: string | null | undefined): string {
+  if (!value) {
+    return "未记录";
+  }
+
+  return new Date(value).toLocaleString("zh-CN");
+}
+
+function statusLabel(value: string) {
   const labels: Record<string, string> = {
     draft: "草稿",
     planned: "已规划",
@@ -564,13 +1091,19 @@ function statusLabel(value: string): string {
     respawned: "待重启",
     stopped: "已停止",
     applied: "已应用",
-    expired: "已过期"
+    expired: "已过期",
+    continue: "继续",
+    retry: "重试",
+    complete: "完成",
+    wait_human: "等待人工",
+    passed: "通过",
+    not_applicable: "不适用"
   };
 
   return labels[value] ?? value;
 }
 
-function eventLabel(type: string): string {
+function activityLabel(type: string) {
   const labels: Record<string, string> = {
     "goal.created": "目标已创建",
     "plan.generated": "计划已生成",
@@ -583,7 +1116,20 @@ function eventLabel(type: string): string {
     "report.updated": "报告已更新",
     "steer.queued": "Steer 已排队",
     "steer.applied": "Steer 已应用",
-    "goal.completed": "目标已结束"
+    "goal.completed": "目标已结束",
+    "run.created": "Run 已创建",
+    "run.launched": "Run 已启动",
+    "run.steer.queued": "Run steer 已排队",
+    "attempt.created": "Attempt 已创建",
+    "attempt.started": "Attempt 已开始",
+    "attempt.completed": "Attempt 已完成",
+    "attempt.failed": "Attempt 失败",
+    "attempt.recovery_required": "Attempt 需要人工恢复",
+    "attempt.verification.passed": "回放验证通过",
+    "attempt.verification.failed": "回放验证失败",
+    "attempt.checkpoint.created": "检查点已创建",
+    "attempt.checkpoint.blocked": "检查点被阻塞",
+    "attempt.checkpoint.skipped": "检查点已跳过"
   };
 
   return labels[type] ?? type;
@@ -690,6 +1236,15 @@ function InfoCard({ label, value }: { label: string; value: string }) {
   );
 }
 
+function MiniMetric({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="mini-metric">
+      <span>{label}</span>
+      <strong>{value}</strong>
+    </div>
+  );
+}
+
 function SectionList({ title, items }: { title: string; items: string[] }) {
   return (
     <section className="section-list">
@@ -700,6 +1255,38 @@ function SectionList({ title, items }: { title: string; items: string[] }) {
         ))}
       </ul>
     </section>
+  );
+}
+
+function CodeBlock({
+  title,
+  value
+}: {
+  title: string;
+  value: string;
+}) {
+  return (
+    <section className="section-list">
+      <div className="section-list-title">{title}</div>
+      <pre className="mono-block">{value}</pre>
+    </section>
+  );
+}
+
+function Callout({
+  title,
+  tone,
+  children
+}: {
+  title: string;
+  tone: "rose";
+  children: React.ReactNode;
+}) {
+  return (
+    <div className={`callout callout-${tone}`}>
+      <strong>{title}</strong>
+      <p>{children}</p>
+    </div>
   );
 }
 

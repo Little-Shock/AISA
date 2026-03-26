@@ -16,6 +16,7 @@
 - worker 默认以 `read-only` 模式分析目标工作区
 - 运行时状态优先落地到文件系统，而不是数据库和消息队列
 - `control-api` 在同一进程内托管 `orchestrator`，用于跑通 MVP 闭环
+- dashboard 默认通过同源 `/api/control/*` 代理访问本机 `control-api`，方便后续只暴露一个安全入口
 
 ## 当前能力
 
@@ -27,6 +28,7 @@
 - 进行规则型评分和推荐
 - 聚合 current report
 - 在 dashboard 中查看 goal、branch、context、report、events
+- 在 dashboard 中查看 run、attempt 契约、回放验证和日志尾部
 - 队列 steer，并支持 branch rerun
 
 ## 目录
@@ -83,6 +85,12 @@ pnpm dev
 
 - Dashboard: [http://127.0.0.1:3000](http://127.0.0.1:3000)
 - Control API: [http://127.0.0.1:8787](http://127.0.0.1:8787)
+
+说明：
+
+- 浏览器默认只访问 dashboard 自己的 `/api/control/*` 路径。
+- dashboard 服务端再把请求转发到本机 `control-api`。
+- 这样后续做 Cloudflare Tunnel 时，只需要暴露 dashboard，一个入口就能在手机或其他机器上看运行状态。
 
 如果只想启动后端：
 

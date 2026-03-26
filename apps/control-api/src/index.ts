@@ -24,8 +24,10 @@ import { Orchestrator } from "@autoresearch/orchestrator";
 import { buildSelfBootstrapRunTemplate, generateInitialPlan } from "@autoresearch/planner";
 import {
   appendRunJournal,
+  getAttemptContract,
   ensureWorkspace,
   getAttemptEvaluation,
+  getAttemptLogExcerpt,
   getAttemptResult,
   getAttemptRuntimeVerification,
   getCurrentDecision,
@@ -128,12 +130,25 @@ export async function buildServer(
       const attemptDetails = await Promise.all(
         attempts.map(async (attempt) => ({
           attempt,
+          contract: await getAttemptContract(workspacePaths, runId, attempt.id),
           result: await getAttemptResult(workspacePaths, runId, attempt.id),
           evaluation: await getAttemptEvaluation(workspacePaths, runId, attempt.id),
           runtime_verification: await getAttemptRuntimeVerification(
             workspacePaths,
             runId,
             attempt.id
+          ),
+          stdout_excerpt: await getAttemptLogExcerpt(
+            workspacePaths,
+            runId,
+            attempt.id,
+            "stdout"
+          ),
+          stderr_excerpt: await getAttemptLogExcerpt(
+            workspacePaths,
+            runId,
+            attempt.id,
+            "stderr"
           ),
           journal: journal.filter((entry) => entry.attempt_id === attempt.id)
         }))

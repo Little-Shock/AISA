@@ -171,6 +171,32 @@ textarea {
   gap: 14px;
 }
 
+.mode-switch {
+  display: inline-flex;
+  gap: 10px;
+  padding: 8px;
+  border-radius: 999px;
+  background: rgba(255, 251, 245, 0.72);
+  border: 1px solid rgba(32, 27, 21, 0.08);
+  width: fit-content;
+}
+
+.mode-switch-button {
+  border: 0;
+  border-radius: 999px;
+  padding: 10px 16px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.mode-switch-button.is-active {
+  background: linear-gradient(135deg, #124f45, #1b7767);
+  color: #fffaf5;
+  box-shadow: 0 10px 24px rgba(15, 92, 79, 0.2);
+}
+
 .stat-card {
   padding: 18px;
   border-radius: 24px;
@@ -243,8 +269,10 @@ textarea {
 
 .form-stack,
 .goal-list,
+.run-list,
 .branch-list,
-.event-list {
+.event-list,
+.attempt-list {
   display: grid;
   gap: 12px;
 }
@@ -330,9 +358,12 @@ textarea {
 }
 
 .goal-card,
+.run-card,
 .branch-card,
 .info-card,
-.sub-panel {
+.sub-panel,
+.attempt-card,
+.attempt-section {
   border: 1px solid rgba(32, 27, 21, 0.09);
   background: var(--paper-strong);
 }
@@ -356,6 +387,12 @@ textarea {
 .goal-card.is-selected {
   background: linear-gradient(180deg, rgba(15, 92, 79, 0.12), rgba(255, 251, 245, 0.94));
   border-color: rgba(15, 92, 79, 0.24);
+}
+
+.run-card-summary {
+  margin: 12px 0 0;
+  color: var(--muted);
+  line-height: 1.65;
 }
 
 .goal-card-head {
@@ -506,6 +543,28 @@ textarea {
   gap: 10px;
 }
 
+.callout {
+  margin-top: 16px;
+  padding: 14px 16px;
+  border-radius: 18px;
+  border: 1px solid rgba(158, 67, 56, 0.16);
+}
+
+.callout strong {
+  display: block;
+  margin-bottom: 6px;
+}
+
+.callout p {
+  margin: 0;
+  line-height: 1.7;
+}
+
+.callout-rose {
+  background: var(--rose-soft);
+  color: var(--rose);
+}
+
 .branch-card {
   padding: 16px;
   border-radius: 22px;
@@ -527,6 +586,100 @@ textarea {
   margin-top: 6px;
   color: var(--muted);
   font-size: 13px;
+}
+
+.attempt-card {
+  padding: 18px;
+  border-radius: 24px;
+  display: grid;
+  gap: 16px;
+}
+
+.attempt-card-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+}
+
+.attempt-id {
+  font-size: 1.05rem;
+  font-weight: 700;
+}
+
+.attempt-meta-line {
+  margin-top: 6px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.attempt-objective {
+  margin: 0;
+  color: var(--ink);
+  line-height: 1.8;
+}
+
+.attempt-stats,
+.attempt-grid {
+  display: grid;
+  gap: 12px;
+}
+
+.attempt-stats {
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+}
+
+.mini-metric {
+  padding: 12px 14px;
+  border-radius: 18px;
+  background: rgba(255, 252, 247, 0.88);
+  border: 1px solid rgba(32, 27, 21, 0.07);
+}
+
+.mini-metric span {
+  display: block;
+  color: var(--muted);
+  font-size: 12px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.mini-metric strong {
+  display: block;
+  margin-top: 8px;
+  line-height: 1.6;
+}
+
+.attempt-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.attempt-section {
+  padding: 16px;
+  border-radius: 22px;
+}
+
+.attempt-section-title {
+  margin-bottom: 8px;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.mono-block {
+  margin: 0;
+  padding: 14px 16px;
+  border-radius: 18px;
+  background: rgba(23, 20, 17, 0.92);
+  color: #f8f0e3;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family:
+    "SFMono-Regular",
+    "Menlo",
+    "Consolas",
+    monospace;
+  font-size: 12px;
+  line-height: 1.7;
 }
 
 .report-block {
@@ -565,7 +718,8 @@ textarea {
 
 @media (max-width: 1120px) {
   .content-grid,
-  .dual-grid {
+  .dual-grid,
+  .attempt-grid {
     grid-template-columns: 1fr;
   }
 }

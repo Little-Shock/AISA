@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   createAttempt,
+  createAttemptContract,
   createCurrentDecision,
   createRun,
   createRunJournalEntry,
@@ -12,8 +13,10 @@ import {
 import {
   appendRunJournal,
   ensureWorkspace,
+  resolveAttemptPaths,
   resolveWorkspacePaths,
   saveAttempt,
+  saveAttemptContract,
   saveAttemptEvaluation,
   saveAttemptResult,
   saveAttemptRuntimeVerification,
@@ -73,6 +76,29 @@ async function main(): Promise<void> {
     })
   );
   await saveAttempt(workspacePaths, attempt);
+  await saveAttemptContract(
+    workspacePaths,
+    createAttemptContract({
+      attempt_id: attempt.id,
+      run_id: run.id,
+      attempt_type: "execution",
+      objective: attempt.objective,
+      success_criteria: attempt.success_criteria,
+      required_evidence: [
+        "git-visible workspace changes",
+        "runtime replay success"
+      ],
+      expected_artifacts: ["artifacts/runtime.patch"],
+      verification_plan: {
+        commands: [
+          {
+            purpose: "replay runtime suite",
+            command: "pnpm verify:runtime"
+          }
+        ]
+      }
+    })
+  );
   await saveAttemptResult(workspacePaths, run.id, attempt.id, {
     summary: "Execution left a replayable verification plan.",
     findings: [
@@ -179,6 +205,16 @@ async function main(): Promise<void> {
     );
   }
 
+  const attemptPaths = resolveAttemptPaths(workspacePaths, run.id, attempt.id);
+  await Promise.all([
+    writeFile(attemptPaths.stdoutFile, "stdout tail line\n", "utf8"),
+    writeFile(
+      attemptPaths.stderrFile,
+      "stderr tail line\nverification still visible\n",
+      "utf8"
+    )
+  ]);
+
   const app = await buildServer({
     workspaceRoot: rootDir,
     startOrchestrator: false
@@ -211,9 +247,12 @@ async function main(): Promise<void> {
       attempts: Array<{ id: string }>;
       attempt_details: Array<{
         attempt: { id: string };
+        contract: { required_evidence: string[] } | null;
         result: { summary: string; verification_plan?: { commands: Array<{ command: string }> } } | null;
         evaluation: { verification_status: string } | null;
         runtime_verification: { status: string; changed_files: string[] } | null;
+        stdout_excerpt: string;
+        stderr_excerpt: string;
         journal: Array<{ type: string }>;
       }>;
     };
@@ -221,6 +260,10 @@ async function main(): Promise<void> {
     assert.equal(payload.attempts.length, 1);
     assert.equal(payload.attempt_details.length, 1);
     assert.equal(payload.attempt_details[0]?.attempt.id, attempt.id);
+    assert.deepEqual(payload.attempt_details[0]?.contract?.required_evidence, [
+      "git-visible workspace changes",
+      "runtime replay success"
+    ]);
     assert.equal(
       payload.attempt_details[0]?.result?.verification_plan?.commands[0]?.command,
       "pnpm verify:runtime"
@@ -240,6 +283,8 @@ async function main(): Promise<void> {
         "attempt.checkpoint.created"
       ]
     );
+    assert.equal(payload.attempt_details[0]?.stdout_excerpt, "stdout tail line");
+    assert.ok(payload.attempt_details[0]?.stderr_excerpt.includes("verification still visible"));
 
     console.log(
       JSON.stringify(
@@ -247,6 +292,7 @@ async function main(): Promise<void> {
           run_id: run.id,
           attempt_id: attempt.id,
           detail_fields: {
+            has_contract: payload.attempt_details[0]?.contract !== null,
             has_result: payload.attempt_details[0]?.result !== null,
             has_evaluation: payload.attempt_details[0]?.evaluation !== null,
             has_runtime_verification:

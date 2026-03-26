@@ -567,6 +567,29 @@ export async function getAttemptRuntimeVerification(
   }
 }
 
+export async function getAttemptLogExcerpt(
+  paths: WorkspacePaths,
+  runId: string,
+  attemptId: string,
+  stream: "stdout" | "stderr",
+  maxChars = 4000
+): Promise<string> {
+  const attemptPaths = resolveAttemptPaths(paths, runId, attemptId);
+  const filePath = stream === "stdout" ? attemptPaths.stdoutFile : attemptPaths.stderrFile;
+
+  try {
+    const raw = await readFile(filePath, "utf8");
+    const trimmed = raw.trimEnd();
+    if (trimmed.length <= maxChars) {
+      return trimmed;
+    }
+
+    return trimmed.slice(-maxChars);
+  } catch {
+    return "";
+  }
+}
+
 export async function saveRunSteer(
   paths: WorkspacePaths,
   runSteer: RunSteer
