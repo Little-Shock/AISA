@@ -1,0 +1,46 @@
+{
+  "title": "补历史 contract 漂移体检",
+  "summary": "下一步最小也最值的运行时任务，不是再改新 flow，而是先把历史 execution attempt 的 contract 漂移显式体检出来。先做只读扫描，稳定报出 `run_3374dc3f` 里已经存在的 4 个旧漂移，避免 runtime 继续把坏现场当正常历史。",
+  "why_now": [
+    "本地 `run_3374dc3f` 还留着 4 个 execution attempt 漂移，详见 `Codex/2026-03-27-run_3374dc3f-contract-drift-baseline.json`。",
+    "`review_packet.json` 会把旧 contract 一起持久化下来，说明漂移已经不是单文件问题，而是会污染后续评审证据。",
+    "`verify:runtime` 现在只回放 `scripts/verify-run-loop.ts`，不会对仓库里真实历史 run 做体检，所以这类坏现场还没有自动红线。"
+  ],
+  "next_attempt_contract": {
+    "attempt_type": "execution",
+    "objective": "新增只读历史 contract 漂移校验脚本，扫描 `runs/*/attempts/*` 下的 `meta.json` 和 `attempt_contract.json`，把 execution attempt 的 objective 或 success_criteria 漂移显式报错，并先让 `run_3374dc3f` 里的 4 个旧漂移稳定出现在失败结果里。不要静默重写旧 run。",
+    "success_criteria": [
+      "新增一个只读校验入口，发现 drift 时稳定输出 attempt 列表并以非零退出码失败。",
+      "`run_3374dc3f` 的 `att_90103f12`、`att_ba6ead60`、`att_c6e69f01`、`att_ef6680e3` 被稳定识别为 drift。",
+      "校验逻辑不修改历史 `runs/` 里的 `meta.json`、`attempt_contract.json` 或 `review_packet.json`。",
+      "`pnpm typecheck` 和 `pnpm verify:runtime` 在接入这条体检后可回放通过。"
+    ],
+    "required_evidence": [
+      "git 可见改动至少包含新的只读校验脚本和直接相关的回归入口。",
+      "留下机器可读的 drift 报告，能指向每个旧漂移的 `meta.json`、`attempt_contract.json` 和 `review_packet.json`。",
+      "给出 `pnpm typecheck` 和 `pnpm verify:runtime` 的回放结果。"
+    ],
+    "forbidden_shortcuts": [
+      "不要静默改写 `runs/run_3374dc3f` 里的旧现场文件。",
+      "不要只硬编码这 4 个 attempt id，而不实现通用扫描规则。",
+      "不要把 drift 记成 warning 后继续当成功。"
+    ],
+    "expected_artifacts": [
+      "scripts/verify-history-contract-drift.ts",
+      "package.json",
+      "Codex/2026-03-27-run_3374dc3f-contract-drift-baseline.json"
+    ],
+    "verification_plan": {
+      "commands": [
+        {
+          "purpose": "typecheck the workspace after the change",
+          "command": "pnpm typecheck"
+        },
+        {
+          "purpose": "replay the runtime regression suite after the change",
+          "command": "pnpm verify:runtime"
+        }
+      ]
+    }
+  }
+}
