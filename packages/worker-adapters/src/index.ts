@@ -4,6 +4,7 @@ import {
   chmod,
   lstat,
   mkdir,
+  realpath,
   readFile,
   readlink,
   symlink,
@@ -20,7 +21,11 @@ import type {
   Run,
   WorkerWriteback
 } from "@autoresearch/domain";
-import { WorkerWritebackSchema } from "@autoresearch/domain";
+import {
+  WorkerArtifactTypeValues,
+  WorkerFindingTypeValues,
+  WorkerWritebackSchema
+} from "@autoresearch/domain";
 import type { WorkspacePaths } from "@autoresearch/state-store";
 import {
   resolveAttemptPaths,
@@ -549,6 +554,13 @@ function buildCodexAttemptPrompt(
   attemptContract: AttemptContract,
   context: unknown
 ): string {
+  const workerFindingTypes = formatQuotedValues(WorkerFindingTypeValues);
+  const workerArtifactTypes = formatQuotedValues(WorkerArtifactTypeValues);
+  const executionArtifactExample = {
+    type: "patch",
+    path: "runs/<run_id>/attempts/<attempt_id>/artifacts/diff.patch"
+  };
+
   return [
     "You are a Codex CLI worker inside AISA.",
     "",
@@ -584,6 +596,18 @@ function buildCodexAttemptPrompt(
       : null,
     attempt.attempt_type === "execution"
       ? "Do not replace the contract verification plan with a different one after execution starts."
+      : null,
+    attempt.attempt_type === "execution"
+      ? `Allowed findings.type values: ${workerFindingTypes}. Do not invent values like "gap".`
+      : null,
+    attempt.attempt_type === "execution"
+      ? `artifacts must be an array of objects with stable keys. Allowed artifacts[].type values: ${workerArtifactTypes}.`
+      : null,
+    attempt.attempt_type === "execution"
+      ? `Copy this artifacts object shape when you have one: ${JSON.stringify(executionArtifactExample)}`
+      : null,
+    attempt.attempt_type === "execution"
+      ? 'Do not return artifacts as plain strings like "artifacts/diff.patch".'
       : null,
     attempt.attempt_type === "research"
       ? "If you recommend execution next, include next_attempt_contract with replayable verification commands."
@@ -638,12 +662,17 @@ function buildCodexAttemptPrompt(
                 ]
               }
             : undefined,
-        artifacts: []
+        artifacts:
+          attempt.attempt_type === "execution" ? [executionArtifactExample] : []
       },
       null,
       2
     )
   ].join("\n");
+}
+
+function formatQuotedValues(values: readonly string[]): string {
+  return values.map((value) => `"${value}"`).join(", ");
 }
 
 function parseWritebackFromText(text: string): WorkerWriteback {
@@ -667,7 +696,7 @@ async function resolveCommandPath(
     const candidate = join(segment, commandName);
     try {
       await access(candidate, fsConstants.X_OK);
-      return candidate;
+      return await realpath(candidate);
     } catch {
       continue;
     }

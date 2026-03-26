@@ -147,6 +147,8 @@ async function main(): Promise<void> {
     repo_root: rootDir,
     git_head: "deadbeef",
     git_status: [" M packages/orchestrator/src/index.ts"],
+    preexisting_git_status: [],
+    new_git_status: [" M packages/orchestrator/src/index.ts"],
     changed_files: ["packages/orchestrator/src/index.ts"],
     failure_code: null,
     failure_reason: null,

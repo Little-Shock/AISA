@@ -1,0 +1,26 @@
+{
+  "id": "execution-dirty-workspace-without-new-changes-fails-verification",
+  "description": "A dirty workspace should not let execution pass verification when the attempt leaves no new git-visible delta beyond the preflight baseline.",
+  "driver": "execution_dirty_workspace_without_new_changes_fails_verification",
+  "max_ticks": 12,
+  "expected": {
+    "run_status": "waiting_steer",
+    "waiting_for_human": true,
+    "recommended_next_action": "wait_for_human",
+    "attempt_types": ["research", "execution"],
+    "attempt_statuses": ["completed", "completed"],
+    "verification_statuses": ["not_applicable", "failed"],
+    "required_journal_types": [
+      "attempt.completed",
+      "attempt.verification.failed",
+      "attempt.checkpoint.skipped"
+    ],
+    "required_journal_counts": {
+      "attempt.started": 2,
+      "attempt.completed": 2,
+      "attempt.verification.failed": 1,
+      "attempt.checkpoint.skipped": 1
+    },
+    "blocking_reason_includes": "preflight baseline"
+  }
+}

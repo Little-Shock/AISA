@@ -1,0 +1,26 @@
+{
+  "id": "execution-runtime-source-drift-requires-restart",
+  "description": "A verified execution that edits live in-process runtime source must stop for restart before the loop can dispatch the next attempt.",
+  "driver": "execution_runtime_source_drift_requires_restart",
+  "max_ticks": 12,
+  "expected": {
+    "run_status": "waiting_steer",
+    "waiting_for_human": true,
+    "recommended_next_action": "continue_execution",
+    "attempt_types": ["research", "execution"],
+    "attempt_statuses": ["completed", "completed"],
+    "verification_statuses": ["not_applicable", "passed"],
+    "required_journal_types": [
+      "attempt.completed",
+      "attempt.verification.passed",
+      "attempt.restart_required"
+    ],
+    "required_journal_counts": {
+      "attempt.started": 2,
+      "attempt.completed": 2,
+      "attempt.verification.passed": 1,
+      "attempt.restart_required": 1
+    },
+    "blocking_reason_includes": "packages/orchestrator/src/index.ts"
+  }
+}

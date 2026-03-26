@@ -247,10 +247,25 @@ export const EvalSpecSchema = z.object({
   rerun_threshold: z.number().min(0).max(1)
 });
 
+export const WorkerFindingTypeValues = ["fact", "hypothesis", "risk"] as const;
+export const WorkerArtifactTypeValues = [
+  "patch",
+  "command_result",
+  "test_result",
+  "report",
+  "log",
+  "screenshot"
+] as const;
+
 export const WorkerFindingSchema = z.object({
-  type: z.enum(["fact", "hypothesis", "risk"]),
+  type: z.enum(WorkerFindingTypeValues),
   content: z.string().min(1),
   evidence: z.array(z.string().min(1)).default([])
+});
+
+export const WorkerArtifactSchema = z.object({
+  type: z.enum(WorkerArtifactTypeValues),
+  path: z.string().min(1)
 });
 
 export const VerificationCommandSchema = z.object({
@@ -293,6 +308,7 @@ export const RuntimeVerificationFailureCodeSchema = z.enum([
   "missing_verification_plan",
   "invalid_verification_plan",
   "workspace_not_git_repo",
+  "missing_preflight_baseline",
   "no_git_changes",
   "verification_command_failed"
 ]);
@@ -316,6 +332,8 @@ export const AttemptRuntimeVerificationSchema = z.object({
   repo_root: z.string().nullable(),
   git_head: z.string().nullable(),
   git_status: z.array(z.string().min(1)).default([]),
+  preexisting_git_status: z.array(z.string().min(1)).default([]),
+  new_git_status: z.array(z.string().min(1)).default([]),
   changed_files: z.array(z.string().min(1)).default([]),
   failure_code: RuntimeVerificationFailureCodeSchema.nullable(),
   failure_reason: z.string().nullable(),
@@ -343,14 +361,7 @@ export const WorkerWritebackSchema = z.object({
   confidence: z.number().min(0).max(1),
   verification_plan: ExecutionVerificationPlanSchema.optional(),
   next_attempt_contract: AttemptContractDraftSchema.optional(),
-  artifacts: z
-    .array(
-      z.object({
-        type: z.string().min(1),
-        path: z.string().min(1)
-      })
-    )
-    .default([])
+  artifacts: z.array(WorkerArtifactSchema).default([])
 });
 
 export const ReviewPacketArtifactSchema = z.object({
@@ -464,6 +475,7 @@ export type AttemptRuntimeVerification = z.infer<typeof AttemptRuntimeVerificati
 export type AttemptHeartbeatStatus = z.infer<typeof AttemptHeartbeatStatusSchema>;
 export type AttemptHeartbeat = z.infer<typeof AttemptHeartbeatSchema>;
 export type WorkerWriteback = z.infer<typeof WorkerWritebackSchema>;
+export type WorkerArtifact = z.infer<typeof WorkerArtifactSchema>;
 export type ReviewPacketArtifact = z.infer<typeof ReviewPacketArtifactSchema>;
 export type AttemptReviewPacket = z.infer<typeof AttemptReviewPacketSchema>;
 export type ContextSnapshot = z.infer<typeof ContextSnapshotSchema>;

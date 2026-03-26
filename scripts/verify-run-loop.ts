@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, writeFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -11,6 +11,7 @@ import {
   createRun,
   createRunJournalEntry,
   updateAttempt,
+  WorkerWritebackSchema,
   type Attempt,
   type Run,
   type WorkerWriteback
@@ -43,7 +44,9 @@ type ScenarioDriver =
   | "research_stall"
   | "research_command_failure"
   | "execution_verified_next_step_continues"
+  | "execution_runtime_source_drift_requires_restart"
   | "execution_checkpoint_blocked_dirty_workspace"
+  | "execution_dirty_workspace_without_new_changes_fails_verification"
   | "execution_missing_verification_plan"
   | "execution_parse_failure"
   | "orphaned_running_attempt"
@@ -110,6 +113,13 @@ type ScenarioObservation = {
     evaluation_artifact_exists: boolean;
     has_runtime_verification_artifact: boolean;
     runtime_verification_artifact_exists: boolean;
+    runtime_verification_status: string | null;
+    runtime_verification_failure_code: string | null;
+    runtime_verification_preexisting_git_status: string[];
+    runtime_verification_new_git_status: string[];
+    runtime_verification_changed_files: string[];
+    restart_required_message: string | null;
+    restart_required_affected_files: string[];
   }>;
 };
 
@@ -326,7 +336,28 @@ class ScenarioAdapter {
     }
 
     if (this.driver === "execution_parse_failure" && input.attempt.attempt_type === "execution") {
-      throw new Error("Expected object, received string at artifacts[0]");
+      WorkerWritebackSchema.parse({
+        summary: "坏 execution writeback 不该被吞掉。",
+        findings: [
+          {
+            type: "fact",
+            content: "留下了一个字符串 artifacts。",
+            evidence: ["execution-change.md"]
+          }
+        ],
+        questions: [],
+        recommended_next_steps: [],
+        confidence: 0.42,
+        verification_plan: {
+          commands: [
+            {
+              purpose: "confirm the malformed writeback case stays blocked",
+              command: "test -n malformed-writeback"
+            }
+          ]
+        },
+        artifacts: ["artifacts/diff.patch"]
+      });
     }
 
     if (this.driver === "research_command_failure" && input.attempt.attempt_type === "research") {
@@ -339,25 +370,36 @@ class ScenarioAdapter {
       [
         "happy_path",
         "execution_verified_next_step_continues",
+        "execution_runtime_source_drift_requires_restart",
         "execution_checkpoint_blocked_dirty_workspace",
         "execution_missing_verification_plan",
         "execution_retry_after_recovery_preserves_contract"
       ].includes(this.driver) &&
       input.attempt.attempt_type === "execution"
     ) {
-      await writeFile(
-        join(input.run.workspace_root, "execution-change.md"),
-        `execution change from ${input.attempt.id}\n`,
-        "utf8"
-      );
+      if (this.driver === "execution_runtime_source_drift_requires_restart") {
+        await writeFile(
+          join(input.run.workspace_root, "packages", "orchestrator", "src", "index.ts"),
+          `export const runtimeMarker = "${input.attempt.id}";\n`,
+          "utf8"
+        );
+      } else {
+        await writeFile(
+          join(input.run.workspace_root, "execution-change.md"),
+          `execution change from ${input.attempt.id}\n`,
+          "utf8"
+        );
+      }
     }
 
     const writeback =
       this.driver === "happy_path" ||
       this.driver === "running_attempt_owned_elsewhere" ||
       this.driver === "execution_verified_next_step_continues" ||
+      this.driver === "execution_runtime_source_drift_requires_restart" ||
       this.driver === "execution_parse_failure" ||
       this.driver === "execution_checkpoint_blocked_dirty_workspace" ||
+      this.driver === "execution_dirty_workspace_without_new_changes_fails_verification" ||
       this.driver === "execution_missing_verification_plan" ||
       this.driver === "execution_retry_after_recovery_preserves_contract"
         ? this.buildHappyPathWriteback(input.attempt, nextCount)
@@ -372,6 +414,10 @@ class ScenarioAdapter {
 
   private buildHappyPathWriteback(attempt: Attempt, passNumber: number): WorkerWriteback {
     if (attempt.attempt_type === "research") {
+      const expectedArtifact =
+        this.driver === "execution_runtime_source_drift_requires_restart"
+          ? "packages/orchestrator/src/index.ts"
+          : "execution-change.md";
       return {
         summary: "Repository understanding is strong enough to start execution.",
         findings: [
@@ -395,17 +441,34 @@ class ScenarioAdapter {
           forbidden_shortcuts: [
             "do not claim success without replayable verification"
           ],
-          expected_artifacts: ["execution-change.md"],
+          expected_artifacts: [expectedArtifact],
           verification_plan: {
             commands: [
               {
                 purpose: "confirm the execution change was written",
-                command: `test -f execution-change.md && rg -n "^execution change from" execution-change.md`
+                command: this.buildExecutionVerificationCommand()
               }
             ]
           }
         },
         artifacts: []
+      };
+    }
+
+    if (this.driver === "execution_runtime_source_drift_requires_restart") {
+      return {
+        summary: "Patched a live runtime source file and found the next execution move.",
+        findings: [
+          {
+            type: "fact",
+            content: "Updated the in-process runtime source",
+            evidence: ["packages/orchestrator/src/index.ts"]
+          }
+        ],
+        questions: [],
+        recommended_next_steps: ["Resume the follow-up execution step after restart."],
+        confidence: 0.86,
+        artifacts: [{ type: "patch", path: "artifacts/diff.patch" }]
       };
     }
 
@@ -433,7 +496,7 @@ class ScenarioAdapter {
             commands: [
               {
                 purpose: "confirm the execution change was written",
-                command: `test -f execution-change.md && rg -n "^execution change from ${attempt.id}$" execution-change.md`
+                command: this.buildExecutionVerificationCommand(attempt.id)
               }
             ]
           };
@@ -455,6 +518,23 @@ class ScenarioAdapter {
     };
   }
 
+  private buildExecutionVerificationCommand(attemptId?: string): string {
+    if (this.driver === "execution_dirty_workspace_without_new_changes_fails_verification") {
+      return "test -f README.md && rg -n '^# temp runtime repo' README.md";
+    }
+
+    if (this.driver === "execution_runtime_source_drift_requires_restart") {
+      const marker = attemptId ?? ".+";
+      return `test -f packages/orchestrator/src/index.ts && rg -n '^export const runtimeMarker = "${marker}";$' packages/orchestrator/src/index.ts`;
+    }
+
+    if (!attemptId) {
+      return 'test -f execution-change.md && rg -n "^execution change from" execution-change.md';
+    }
+
+    return `test -f execution-change.md && rg -n "^execution change from ${attemptId}$" execution-change.md`;
+  }
+
   private buildStuckWriteback(passNumber: number): WorkerWriteback {
     return {
       summary: `Research pass ${passNumber} still needs stronger evidence.`,
@@ -473,11 +553,61 @@ class ScenarioAdapter {
   }
 }
 
-async function settle(orchestrator: Orchestrator, iterations: number): Promise<void> {
-  for (let index = 0; index < iterations; index += 1) {
-    await orchestrator.tick();
-    await new Promise((resolve) => setTimeout(resolve, 100));
+async function settle(input: {
+  orchestrator: Orchestrator;
+  workspacePaths: ReturnType<typeof resolveWorkspacePaths>;
+  runId: string;
+  iterations: number;
+}): Promise<void> {
+  for (let index = 0; index < input.iterations; index += 1) {
+    await input.orchestrator.tick();
+    await sleep(50);
+    await waitForRunningAttemptsToSettle(input.workspacePaths, input.runId);
+    if (await isRunQuiescent(input.workspacePaths, input.runId)) {
+      return;
+    }
+    await sleep(50);
   }
+}
+
+async function waitForRunningAttemptsToSettle(
+  workspacePaths: ReturnType<typeof resolveWorkspacePaths>,
+  runId: string,
+  timeoutMs = 1_500
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+
+  while (Date.now() < deadline) {
+    const attempts = await listAttempts(workspacePaths, runId);
+    if (!attempts.some((attempt) => attempt.status === "running")) {
+      return;
+    }
+    await sleep(50);
+  }
+}
+
+async function isRunQuiescent(
+  workspacePaths: ReturnType<typeof resolveWorkspacePaths>,
+  runId: string
+): Promise<boolean> {
+  const [current, attempts] = await Promise.all([
+    getCurrentDecision(workspacePaths, runId),
+    listAttempts(workspacePaths, runId)
+  ]);
+
+  if (!current) {
+    return true;
+  }
+
+  if (attempts.some((attempt) => ["created", "queued", "running"].includes(attempt.status))) {
+    return false;
+  }
+
+  return current.run_status !== "running";
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 async function bootstrapRun(rootDir: string, title: string): Promise<{
@@ -668,6 +798,8 @@ async function seedExecutionRetryAfterRecoveryCase(input: {
     repo_root: null,
     git_head: null,
     git_status: [],
+    preexisting_git_status: [],
+    new_git_status: [],
     changed_files: [],
     failure_code: null,
     failure_reason: null,
@@ -979,12 +1111,20 @@ async function runCase(scenario: ScenarioCase): Promise<ScenarioObservation> {
     await initializeGitRepo(rootDir, true);
   }
 
+  if (scenario.driver === "execution_dirty_workspace_without_new_changes_fails_verification") {
+    await initializeGitRepo(rootDir, true);
+  }
+
   if (
     scenario.driver === "happy_path" ||
     scenario.driver === "execution_verified_next_step_continues" ||
+    scenario.driver === "execution_runtime_source_drift_requires_restart" ||
     scenario.driver === "execution_missing_verification_plan" ||
     scenario.driver === "execution_retry_after_recovery_preserves_contract"
   ) {
+    if (scenario.driver === "execution_runtime_source_drift_requires_restart") {
+      await seedLiveRuntimeSourceFixture(rootDir);
+    }
     await initializeGitRepo(rootDir, false);
   }
 
@@ -1006,7 +1146,12 @@ async function runCase(scenario: ScenarioCase): Promise<ScenarioObservation> {
     undefined,
     60_000
   );
-  await settle(orchestrator, scenario.max_ticks);
+  await settle({
+    orchestrator,
+    workspacePaths,
+    runId: run.id,
+    iterations: scenario.max_ticks
+  });
   const persistedRun = await getRun(workspacePaths, run.id);
 
   assert.equal(persistedRun.id, run.id, `${scenario.id}: persisted run missing`);
@@ -1059,6 +1204,12 @@ async function initializeGitRepo(rootDir: string, leaveDirty: boolean): Promise<
   if (leaveDirty) {
     await writeFile(join(rootDir, "README.md"), "# temp runtime repo\n\nleft dirty\n", "utf8");
   }
+}
+
+async function seedLiveRuntimeSourceFixture(rootDir: string): Promise<void> {
+  const runtimeDir = join(rootDir, "packages", "orchestrator", "src");
+  await mkdir(runtimeDir, { recursive: true });
+  await writeFile(join(runtimeDir, "index.ts"), 'export const runtimeMarker = "seed";\n', "utf8");
 }
 
 async function runCommand(rootDir: string, args: string[]): Promise<void> {
@@ -1122,6 +1273,20 @@ async function collectObservation(
         const resultArtifact = artifactByKind.get("attempt_result") ?? null;
         const evaluationArtifact = artifactByKind.get("attempt_evaluation") ?? null;
         const runtimeVerificationArtifact = artifactByKind.get("runtime_verification") ?? null;
+        const restartRequiredEntry = [...(reviewPacket?.journal ?? [])]
+          .reverse()
+          .find((entry) => entry.type === "attempt.restart_required");
+        const restartRequiredPayload =
+          restartRequiredEntry?.payload && typeof restartRequiredEntry.payload === "object"
+            ? restartRequiredEntry.payload
+            : null;
+        const restartRequiredAffectedFiles = Array.isArray(
+          restartRequiredPayload?.affected_files
+        )
+          ? restartRequiredPayload.affected_files.filter(
+              (filePath): filePath is string => typeof filePath === "string"
+            )
+          : [];
 
         return {
           attempt_id: attempt.id,
@@ -1154,7 +1319,21 @@ async function collectObservation(
           has_evaluation_artifact: evaluationArtifact !== null,
           evaluation_artifact_exists: evaluationArtifact?.exists ?? false,
           has_runtime_verification_artifact: runtimeVerificationArtifact !== null,
-          runtime_verification_artifact_exists: runtimeVerificationArtifact?.exists ?? false
+          runtime_verification_artifact_exists: runtimeVerificationArtifact?.exists ?? false,
+          runtime_verification_status: reviewPacket?.runtime_verification?.status ?? null,
+          runtime_verification_failure_code:
+            reviewPacket?.runtime_verification?.failure_code ?? null,
+          runtime_verification_preexisting_git_status:
+            reviewPacket?.runtime_verification?.preexisting_git_status ?? [],
+          runtime_verification_new_git_status:
+            reviewPacket?.runtime_verification?.new_git_status ?? [],
+          runtime_verification_changed_files:
+            reviewPacket?.runtime_verification?.changed_files ?? [],
+          restart_required_message:
+            typeof restartRequiredPayload?.message === "string"
+              ? restartRequiredPayload.message
+              : null,
+          restart_required_affected_files: restartRequiredAffectedFiles
         };
       })
   );
@@ -1348,6 +1527,83 @@ function assertCase(scenario: ScenarioCase, observation: ScenarioObservation): v
     blockerReasonCapturedInPacket,
     `${scenario.id}: review packet should capture the blocking reason`
   );
+
+  if (scenario.driver === "execution_checkpoint_blocked_dirty_workspace") {
+    const executionPacket = observation.review_packets.find(
+      (packet) => packet.runtime_verification_status === "passed"
+    );
+    assert.ok(
+      executionPacket,
+      `${scenario.id}: expected a completed execution review packet with runtime verification`
+    );
+    assert.ok(
+      executionPacket.runtime_verification_preexisting_git_status.includes(" M README.md"),
+      `${scenario.id}: runtime verification should keep the preexisting dirty baseline`
+    );
+    assert.deepEqual(
+      executionPacket.runtime_verification_new_git_status,
+      ["?? execution-change.md"],
+      `${scenario.id}: runtime verification should isolate the new git delta`
+    );
+    assert.deepEqual(
+      executionPacket.runtime_verification_changed_files,
+      ["execution-change.md"],
+      `${scenario.id}: changed_files should only report the new delta`
+    );
+  }
+
+  if (scenario.driver === "execution_dirty_workspace_without_new_changes_fails_verification") {
+    const executionPacket = observation.review_packets.find(
+      (packet) => packet.runtime_verification_status === "failed"
+    );
+    assert.ok(
+      executionPacket,
+      `${scenario.id}: expected a failed execution review packet with runtime verification`
+    );
+    assert.equal(
+      executionPacket.runtime_verification_failure_code,
+      "no_git_changes",
+      `${scenario.id}: dirty workspace without new delta should fail as no_git_changes`
+    );
+    assert.ok(
+      executionPacket.runtime_verification_preexisting_git_status.includes(" M README.md"),
+      `${scenario.id}: runtime verification should keep the dirty baseline`
+    );
+    assert.deepEqual(
+      executionPacket.runtime_verification_new_git_status,
+      [],
+      `${scenario.id}: runtime verification should not invent a new git delta`
+    );
+    assert.deepEqual(
+      executionPacket.runtime_verification_changed_files,
+      [],
+      `${scenario.id}: changed_files should stay empty when execution leaves no new delta`
+    );
+  }
+
+  if (scenario.driver === "execution_runtime_source_drift_requires_restart") {
+    const executionPacket = observation.review_packets.find(
+      (packet) => packet.runtime_verification_status === "passed"
+    );
+    assert.ok(
+      executionPacket,
+      `${scenario.id}: expected a completed execution review packet with runtime verification`
+    );
+    assert.deepEqual(
+      executionPacket.runtime_verification_changed_files,
+      ["packages/orchestrator/src/index.ts"],
+      `${scenario.id}: runtime verification should record the changed runtime source file`
+    );
+    assert.ok(
+      executionPacket.restart_required_message?.includes("Restart before the next dispatch"),
+      `${scenario.id}: review packet should record the restart-required message`
+    );
+    assert.deepEqual(
+      executionPacket.restart_required_affected_files,
+      ["packages/orchestrator/src/index.ts"],
+      `${scenario.id}: review packet should record the affected runtime files`
+    );
+  }
 }
 
 async function main(): Promise<void> {

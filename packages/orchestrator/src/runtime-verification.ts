@@ -15,11 +15,47 @@ import {
   type WorkerWriteback
 } from "@autoresearch/domain";
 import type { AttemptPaths } from "@autoresearch/state-store";
-import { writeJsonFile } from "@autoresearch/state-store";
+import { readJsonFile, writeJsonFile } from "@autoresearch/state-store";
 
 export interface AttemptRuntimeVerificationOutcome {
   verification: AttemptRuntimeVerification;
   artifact_path: string;
+}
+
+interface GitCheckpointPreflightArtifact {
+  status: "ready" | "not_git_repo";
+  repo_root: string | null;
+  head_before: string | null;
+  status_before: string[];
+  created_at: string;
+}
+
+interface GitStatusDelta {
+  preexistingGitStatus: string[];
+  newGitStatus: string[];
+  changedFiles: string[];
+}
+
+const CHECKPOINT_PREFLIGHT_FILE_NAME = "git-checkpoint-preflight.json";
+const LIVE_RUNTIME_SOURCE_PREFIXES = [
+  "apps/control-api/src/",
+  "packages/context-manager/src/",
+  "packages/domain/src/",
+  "packages/event-log/src/",
+  "packages/judge/src/",
+  "packages/orchestrator/src/",
+  "packages/planner/src/",
+  "packages/report-builder/src/",
+  "packages/state-store/src/",
+  "packages/worker-adapters/src/"
+] as const;
+
+export function detectLiveRuntimeSourceDrift(changedFiles: string[]): string[] {
+  return [...new Set(changedFiles)]
+    .filter((filePath) =>
+      LIVE_RUNTIME_SOURCE_PREFIXES.some((prefix) => filePath.startsWith(prefix))
+    )
+    .sort();
 }
 
 export async function runAttemptRuntimeVerification(input: {
@@ -39,6 +75,8 @@ export async function runAttemptRuntimeVerification(input: {
       repo_root: null,
       git_head: null,
       git_status: [],
+      preexisting_git_status: [],
+      new_git_status: [],
       changed_files: [],
       failure_code: null,
       failure_reason: null,
@@ -95,10 +133,39 @@ export async function runAttemptRuntimeVerification(input: {
 
   const workspaceRoot = resolve(input.attempt.workspace_root);
   const gitHead = await readGitHead(repoRoot);
-  const gitStatusAfterExecution = await readGitStatus(repoRoot);
-  const changedFilesAfterExecution = extractChangedFiles(gitStatusAfterExecution);
+  const checkpointPreflight = await readCheckpointPreflight(input.attemptPaths);
+  if (
+    !checkpointPreflight ||
+    checkpointPreflight.status !== "ready" ||
+    checkpointPreflight.repo_root !== repoRoot
+  ) {
+    const currentGitStatus = await readGitStatus(repoRoot);
+    return await writeVerificationArtifact(input.attemptPaths, {
+      attempt_id: input.attempt.id,
+      run_id: input.run.id,
+      attempt_type: input.attempt.attempt_type,
+      status: "failed",
+      repo_root: repoRoot,
+      git_head: gitHead,
+      git_status: currentGitStatus,
+      preexisting_git_status: checkpointPreflight?.status_before ?? [],
+      new_git_status: [],
+      changed_files: [],
+      failure_code: "missing_preflight_baseline",
+      failure_reason:
+        "Execution verification requires the git preflight baseline captured before dispatch, but that baseline is missing or unreadable.",
+      command_results: [],
+      created_at: new Date().toISOString()
+    });
+  }
 
-  if (changedFilesAfterExecution.length === 0) {
+  const gitStatusAfterExecution = await readGitStatus(repoRoot);
+  const gitStatusDelta = buildGitStatusDelta({
+    statusBefore: checkpointPreflight.status_before,
+    statusAfter: gitStatusAfterExecution
+  });
+
+  if (gitStatusDelta.changedFiles.length === 0) {
     return await writeVerificationArtifact(input.attemptPaths, {
       attempt_id: input.attempt.id,
       run_id: input.run.id,
@@ -107,10 +174,12 @@ export async function runAttemptRuntimeVerification(input: {
       repo_root: repoRoot,
       git_head: gitHead,
       git_status: gitStatusAfterExecution,
-      changed_files: changedFilesAfterExecution,
+      preexisting_git_status: gitStatusDelta.preexistingGitStatus,
+      new_git_status: gitStatusDelta.newGitStatus,
+      changed_files: gitStatusDelta.changedFiles,
       failure_code: "no_git_changes",
       failure_reason:
-        "Execution attempt finished without any git-visible workspace changes, so the runtime cannot treat it as a verified implementation step.",
+        "Execution attempt finished without any new git-visible workspace changes beyond the preflight baseline, so the runtime cannot treat it as a verified implementation step.",
       command_results: [],
       created_at: new Date().toISOString()
     });
@@ -134,7 +203,9 @@ export async function runAttemptRuntimeVerification(input: {
         repo_root: repoRoot,
         git_head: gitHead,
         git_status: gitStatusAfterExecution,
-        changed_files: changedFilesAfterExecution,
+        preexisting_git_status: gitStatusDelta.preexistingGitStatus,
+        new_git_status: gitStatusDelta.newGitStatus,
+        changed_files: gitStatusDelta.changedFiles,
         failure_code: "invalid_verification_plan",
         failure_reason: resolvedCwd.reason,
         command_results: commandResults,
@@ -170,6 +241,12 @@ export async function runAttemptRuntimeVerification(input: {
     commandResults.push(commandResult);
 
     if (!commandResult.passed) {
+      const currentGitStatus = await readGitStatus(repoRoot);
+      const currentGitStatusDelta = buildGitStatusDelta({
+        statusBefore: checkpointPreflight.status_before,
+        statusAfter: currentGitStatus
+      });
+
       return await writeVerificationArtifact(input.attemptPaths, {
         attempt_id: input.attempt.id,
         run_id: input.run.id,
@@ -177,8 +254,10 @@ export async function runAttemptRuntimeVerification(input: {
         status: "failed",
         repo_root: repoRoot,
         git_head: gitHead,
-        git_status: await readGitStatus(repoRoot),
-        changed_files: extractChangedFiles(await readGitStatus(repoRoot)),
+        git_status: currentGitStatus,
+        preexisting_git_status: currentGitStatusDelta.preexistingGitStatus,
+        new_git_status: currentGitStatusDelta.newGitStatus,
+        changed_files: currentGitStatusDelta.changedFiles,
         failure_code: "verification_command_failed",
         failure_reason: [
           `Verification command failed for "${command.purpose}".`,
@@ -192,6 +271,10 @@ export async function runAttemptRuntimeVerification(input: {
   }
 
   const finalGitStatus = await readGitStatus(repoRoot);
+  const finalGitStatusDelta = buildGitStatusDelta({
+    statusBefore: checkpointPreflight.status_before,
+    statusAfter: finalGitStatus
+  });
   return await writeVerificationArtifact(input.attemptPaths, {
     attempt_id: input.attempt.id,
     run_id: input.run.id,
@@ -200,7 +283,9 @@ export async function runAttemptRuntimeVerification(input: {
     repo_root: repoRoot,
     git_head: gitHead,
     git_status: finalGitStatus,
-    changed_files: extractChangedFiles(finalGitStatus),
+    preexisting_git_status: finalGitStatusDelta.preexistingGitStatus,
+    new_git_status: finalGitStatusDelta.newGitStatus,
+    changed_files: finalGitStatusDelta.changedFiles,
     failure_code: null,
     failure_reason: null,
     command_results: commandResults,
@@ -223,6 +308,8 @@ async function buildFailedVerificationArtifact(input: {
     repo_root: null,
     git_head: null,
     git_status: [],
+    preexisting_git_status: [],
+    new_git_status: [],
     changed_files: [],
     failure_code: input.failureCode,
     failure_reason: input.failureReason,
@@ -241,6 +328,45 @@ async function writeVerificationArtifact(
   return {
     verification: parsed,
     artifact_path: artifactPath
+  };
+}
+
+async function readCheckpointPreflight(
+  attemptPaths: AttemptPaths
+): Promise<GitCheckpointPreflightArtifact | null> {
+  try {
+    return await readJsonFile<GitCheckpointPreflightArtifact>(
+      join(attemptPaths.artifactsDir, CHECKPOINT_PREFLIGHT_FILE_NAME)
+    );
+  } catch {
+    return null;
+  }
+}
+
+function buildGitStatusDelta(input: {
+  statusBefore: string[];
+  statusAfter: string[];
+}): GitStatusDelta {
+  const remainingPreexistingStatus = new Map<string, number>();
+  for (const line of input.statusBefore) {
+    remainingPreexistingStatus.set(line, (remainingPreexistingStatus.get(line) ?? 0) + 1);
+  }
+
+  const newGitStatus: string[] = [];
+  for (const line of input.statusAfter) {
+    const remainingCount = remainingPreexistingStatus.get(line) ?? 0;
+    if (remainingCount > 0) {
+      remainingPreexistingStatus.set(line, remainingCount - 1);
+      continue;
+    }
+
+    newGitStatus.push(line);
+  }
+
+  return {
+    preexistingGitStatus: [...input.statusBefore],
+    newGitStatus,
+    changedFiles: extractChangedFiles(newGitStatus)
   };
 }
 

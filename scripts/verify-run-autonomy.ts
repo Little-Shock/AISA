@@ -475,7 +475,7 @@ async function verifyFailedExecutionAutoResumes(): Promise<void> {
     workspacePaths,
     runId: run.id,
     predicate: (runStatus) => runStatus === "completed",
-    timeoutMs: 15_000,
+    timeoutMs: 20_000,
     delayMs: 120
   });
 
@@ -671,11 +671,16 @@ async function verifyRepeatedAutoResumeExhausts(): Promise<void> {
   assert.ok(current, "current decision must exist");
   assert.equal(current.waiting_for_human, true, "run should eventually stop for human steer");
   assert.equal(current.run_status, "waiting_steer");
+  assert.equal(current.recommended_next_action, "wait_for_human");
   assert.equal(autoResumeScheduled, 2, "expected two automatic resume rounds before retreat");
   assert.equal(autoResumeExhausted, 1, "expected a single exhaustion marker");
   assert.ok(
     current.blocking_reason?.includes("自动续跑已尝试 2 轮"),
     "current decision should explain that the automatic budget was exhausted"
+  );
+  assert.ok(
+    !journal.some((entry) => entry.type === "run.auto_resume.retreat"),
+    "the exhaustion path should stop for human steer instead of retreating into more research"
   );
   assert.deepEqual(
     attempts.map((attempt) => attempt.attempt_type),
@@ -1197,6 +1202,111 @@ async function verifyRateLimitedResearchRetriesQuickly(): Promise<void> {
   );
 }
 
+async function verifyRuntimeSourceDriftBlocksAutoResume(): Promise<void> {
+  const { run, workspacePaths } = await bootstrapRun("runtime-source-drift-blocks-auto-resume");
+
+  const completedExecution = updateAttempt(
+    createAttempt({
+      run_id: run.id,
+      attempt_type: "execution",
+      worker: "fake-codex",
+      objective: "Resume the next execution step after restart.",
+      success_criteria: run.success_criteria,
+      workspace_root: run.workspace_root
+    }),
+    {
+      status: "completed",
+      started_at: new Date().toISOString(),
+      ended_at: new Date().toISOString()
+    }
+  );
+
+  const restartMessage = [
+    "Execution changed live runtime source files already loaded by the in-process control-api/orchestrator.",
+    "Restart before the next dispatch. Affected files: packages/orchestrator/src/index.ts"
+  ].join(" ");
+
+  await saveAttempt(workspacePaths, completedExecution);
+  await saveCurrentDecision(
+    workspacePaths,
+    createCurrentDecision({
+      run_id: run.id,
+      run_status: "waiting_steer",
+      latest_attempt_id: completedExecution.id,
+      recommended_next_action: "continue_execution",
+      recommended_attempt_type: "execution",
+      summary: restartMessage,
+      blocking_reason: restartMessage,
+      waiting_for_human: true
+    })
+  );
+  await appendRunJournal(
+    workspacePaths,
+    createRunJournalEntry({
+      run_id: run.id,
+      attempt_id: completedExecution.id,
+      type: "attempt.completed",
+      payload: {
+        recommendation: "continue",
+        goal_progress: 0.75,
+        suggested_attempt_type: "execution"
+      }
+    })
+  );
+  await appendRunJournal(
+    workspacePaths,
+    createRunJournalEntry({
+      run_id: run.id,
+      attempt_id: completedExecution.id,
+      type: "attempt.restart_required",
+      payload: {
+        reason: "runtime_source_drift",
+        message: restartMessage,
+        affected_files: ["packages/orchestrator/src/index.ts"]
+      }
+    })
+  );
+
+  const orchestrator = new Orchestrator(
+    workspacePaths,
+    new RecoveryExecutionAdapter() as never,
+    undefined,
+    60_000,
+    {
+      waitingHumanAutoResumeMs: 30,
+      maxAutomaticResumeCycles: 2
+    }
+  );
+
+  await wait(40);
+  await settle(orchestrator, 6, 80);
+
+  const current = await getCurrentDecision(workspacePaths, run.id);
+  const attempts = await listAttempts(workspacePaths, run.id);
+  const journal = await listRunJournal(workspacePaths, run.id);
+
+  assert.ok(current, "current decision must exist");
+  assert.equal(current.waiting_for_human, true);
+  assert.equal(current.run_status, "waiting_steer");
+  assert.equal(current.recommended_next_action, "continue_execution");
+  assert.deepEqual(
+    attempts.map((attempt) => attempt.status),
+    ["completed"]
+  );
+  assert.ok(
+    !journal.some((entry) => entry.type === "run.auto_resume.scheduled"),
+    "runtime source drift should not auto-schedule the next attempt"
+  );
+  assert.ok(
+    journal.some(
+      (entry) =>
+        entry.type === "run.auto_resume.blocked" &&
+        entry.payload.reason === "runtime_source_drift"
+    ),
+    "runtime source drift should leave an explicit automatic-resume blocker"
+  );
+}
+
 async function main(): Promise<void> {
   const checks: Array<{ id: string; run: () => Promise<void> }> = [
     {
@@ -1222,6 +1332,10 @@ async function main(): Promise<void> {
     {
       id: "rate_limited_research_retries_quickly",
       run: verifyRateLimitedResearchRetriesQuickly
+    },
+    {
+      id: "runtime_source_drift_blocks_auto_resume",
+      run: verifyRuntimeSourceDriftBlocksAutoResume
     },
     {
       id: "recovery_auto_resumes_execution",

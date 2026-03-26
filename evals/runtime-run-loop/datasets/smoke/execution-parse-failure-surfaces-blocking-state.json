@@ -2,7 +2,7 @@
   "id": "execution-parse-failure-surfaces-blocking-state",
   "description": "Bad execution writeback must block the run and surface the parse failure instead of pretending to succeed.",
   "driver": "execution_parse_failure",
-  "max_ticks": 4,
+  "max_ticks": 6,
   "expected": {
     "run_status": "waiting_steer",
     "waiting_for_human": true,

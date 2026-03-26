@@ -550,7 +550,15 @@
             ],
             "properties": {
               "type": {
-                "type": "string"
+                "type": "string",
+                "enum": [
+                  "patch",
+                  "command_result",
+                  "test_result",
+                  "report",
+                  "log",
+                  "screenshot"
+                ]
               },
               "path": {
                 "type": "string"
@@ -648,6 +656,8 @@
         "repo_root",
         "git_head",
         "git_status",
+        "preexisting_git_status",
+        "new_git_status",
         "changed_files",
         "failure_code",
         "failure_reason",
@@ -694,6 +704,18 @@
             "type": "string"
           }
         },
+        "preexisting_git_status": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "new_git_status": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
         "changed_files": {
           "type": "array",
           "items": {
@@ -711,6 +733,7 @@
             "missing_verification_plan",
             "invalid_verification_plan",
             "workspace_not_git_repo",
+            "missing_preflight_baseline",
             "no_git_changes",
             "verification_command_failed",
             null

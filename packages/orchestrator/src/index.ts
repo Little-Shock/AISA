@@ -88,6 +88,7 @@ import {
   type AttemptCheckpointOutcome
 } from "./git-checkpoint.js";
 import {
+  detectLiveRuntimeSourceDrift,
   runAttemptRuntimeVerification,
   type AttemptRuntimeVerificationOutcome
 } from "./runtime-verification.js";
@@ -824,6 +825,14 @@ export class Orchestrator {
         attempt,
         checkpointOutcome
       );
+      const runtimeSourceDriftFiles = detectLiveRuntimeSourceDrift(
+        runtimeVerification.verification.changed_files
+      );
+      nextCurrent = this.applyRuntimeSourceDriftOutcomeToCurrentDecision(
+        nextCurrent,
+        attempt,
+        runtimeSourceDriftFiles
+      );
       finalCurrentDecision = nextCurrent;
       await saveCurrentDecision(this.workspacePaths, nextCurrent);
       await saveRunReport(
@@ -863,6 +872,12 @@ export class Orchestrator {
       );
       await this.appendRuntimeVerificationJournal(runId, attempt.id, runtimeVerification);
       await this.appendCheckpointJournal(runId, attempt.id, checkpointOutcome);
+      await this.appendRuntimeSourceDriftJournal(
+        runId,
+        attempt.id,
+        runtimeSourceDriftFiles,
+        runtimeVerification.artifact_path
+      );
     } catch (error) {
       attempt = updateAttempt(attempt, {
         status: "failed",
@@ -1015,7 +1030,11 @@ export class Orchestrator {
     );
     const attemptJournal = input.journal.filter((entry) => entry.attempt_id === input.attempt.id);
     const failureEntry = [...attemptJournal].reverse().find((entry) =>
-      ["attempt.failed", "attempt.recovery_required"].includes(entry.type)
+      [
+        "attempt.failed",
+        "attempt.recovery_required",
+        "attempt.restart_required"
+      ].includes(entry.type)
     );
     const failureMessage =
       this.getReviewPacketFailureMessage(failureEntry?.payload) ??
@@ -1187,6 +1206,34 @@ export class Orchestrator {
     });
   }
 
+  private applyRuntimeSourceDriftOutcomeToCurrentDecision(
+    current: CurrentDecision,
+    attempt: Attempt,
+    affectedFiles: string[]
+  ): CurrentDecision {
+    if (attempt.attempt_type !== "execution" || affectedFiles.length === 0) {
+      return current;
+    }
+
+    const message = this.buildRuntimeSourceDriftMessage(affectedFiles);
+    const preservedNextAction =
+      current.recommended_next_action ??
+      (current.recommended_attempt_type === "execution"
+        ? "continue_execution"
+        : current.recommended_attempt_type === "research"
+          ? "continue_research"
+          : "wait_for_human");
+    return updateCurrentDecision(current, {
+      run_status: "waiting_steer",
+      latest_attempt_id: attempt.id,
+      recommended_next_action: preservedNextAction,
+      recommended_attempt_type: current.recommended_attempt_type ?? attempt.attempt_type,
+      summary: message,
+      blocking_reason: [current.blocking_reason, message].filter(Boolean).join(" "),
+      waiting_for_human: true
+    });
+  }
+
   private async appendCheckpointJournal(
     runId: string,
     attemptId: string,
@@ -1227,8 +1274,41 @@ export class Orchestrator {
           message: checkpointOutcome.message,
           artifact_path: checkpointOutcome.artifact_path
         }
+        })
+      );
+  }
+
+  private async appendRuntimeSourceDriftJournal(
+    runId: string,
+    attemptId: string,
+    affectedFiles: string[],
+    artifactPath: string
+  ): Promise<void> {
+    if (affectedFiles.length === 0) {
+      return;
+    }
+
+    await appendRunJournal(
+      this.workspacePaths,
+      createRunJournalEntry({
+        run_id: runId,
+        attempt_id: attemptId,
+        type: "attempt.restart_required",
+        payload: {
+          reason: "runtime_source_drift",
+          message: this.buildRuntimeSourceDriftMessage(affectedFiles),
+          affected_files: affectedFiles,
+          artifact_path: artifactPath
+        }
       })
     );
+  }
+
+  private buildRuntimeSourceDriftMessage(affectedFiles: string[]): string {
+    return [
+      "Execution changed live runtime source files already loaded by the in-process control-api/orchestrator.",
+      `Restart before the next dispatch. Affected files: ${affectedFiles.join(", ")}`
+    ].join(" ");
   }
 
   private buildPlannedAttemptObjective(
@@ -1326,9 +1406,7 @@ export class Orchestrator {
         recommended_next_action: "wait_for_human",
         recommended_attempt_type: nextAttemptType,
         summary: result.summary,
-        blocking_reason:
-          evaluation.missing_evidence[0] ??
-          `Loop paused after repeated ${attempt.attempt_type} attempts without fresh progress.`,
+        blocking_reason: this.buildRepeatedAttemptPauseReason(attempt, evaluation),
         waiting_for_human: true
       });
     }
@@ -1446,6 +1524,17 @@ export class Orchestrator {
     }
 
     return this.countTrailingCompletedAttemptsOfType(attempts, attempt.attempt_type) >= 2;
+  }
+
+  private buildRepeatedAttemptPauseReason(
+    attempt: Attempt,
+    evaluation: AttemptEvaluation
+  ): string {
+    const repeatedPauseMessage = `Loop paused after repeated ${attempt.attempt_type} attempts without fresh progress.`;
+
+    return [evaluation.missing_evidence.join(" "), repeatedPauseMessage]
+      .filter((value) => value.length > 0)
+      .join(" ");
   }
 
   private countTrailingCompletedAttemptsOfType(
@@ -1723,6 +1812,16 @@ export class Orchestrator {
     const latestAttempt = this.getLatestAttempt(input.current, input.attempts);
     if (!latestAttempt) {
       return null;
+    }
+
+    const restartRequiredMessage = this.getAttemptJournalMessage(input.journal, latestAttempt.id, [
+      "attempt.restart_required"
+    ]);
+    if (restartRequiredMessage) {
+      return {
+        reason: "runtime_source_drift",
+        message: restartRequiredMessage
+      };
     }
 
     if (latestAttempt.status !== "failed") {
