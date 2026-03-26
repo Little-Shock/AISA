@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -54,7 +54,39 @@ class NoopAdapter {
   }
 }
 
+const REQUIRED_ROOT_SCRIPT_COMMANDS = {
+  "verify:drive-run": "node --import tsx scripts/verify-drive-run.ts",
+  "verify:run-api": "node --import tsx scripts/verify-run-detail-api.ts",
+  "verify:self-bootstrap": "node --import tsx scripts/verify-self-bootstrap.ts",
+  "bootstrap:self": "node --import tsx scripts/bootstrap-self-run.ts",
+  "drive:run": "node --import tsx scripts/drive-run.ts"
+} as const;
+
+async function assertRootEntrypointsUseNodeImportTsx(): Promise<void> {
+  const packageJsonPath = join(process.cwd(), "package.json");
+  const packageJson = JSON.parse(
+    await readFile(packageJsonPath, "utf8")
+  ) as {
+    scripts?: Record<string, string>;
+  };
+
+  for (const [scriptName, expectedCommand] of Object.entries(REQUIRED_ROOT_SCRIPT_COMMANDS)) {
+    const actualCommand = packageJson.scripts?.[scriptName];
+    assert.equal(
+      actualCommand,
+      expectedCommand,
+      `${scriptName} should stay on node --import tsx`
+    );
+    assert.ok(
+      !actualCommand.startsWith("tsx "),
+      `${scriptName} should not regress to direct tsx`
+    );
+  }
+}
+
 async function main(): Promise<void> {
+  await assertRootEntrypointsUseNodeImportTsx();
+
   const rootDir = await mkdtemp(join(tmpdir(), "aisa-self-bootstrap-"));
   const workspacePaths = resolveWorkspacePaths(rootDir);
   await ensureWorkspace(workspacePaths);

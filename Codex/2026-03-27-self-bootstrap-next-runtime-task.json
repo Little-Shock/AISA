@@ -1,0 +1,51 @@
+{
+  "title": "锁住 settled attempt 现场一致性",
+  "summary": "当前最小且该优先做的运行时任务，是修正 settled attempt 的 contract 和 review packet 持久化一致性。runtime 一旦把 attempt 视为已停下，`meta.json`、`attempt_contract.json`、`review_packet.json` 就必须完整存在，而且目标不能互相漂移。",
+  "why_now": [
+    "`pnpm verify:run-loop` 现在从仓库根目录直接失败，红点是 `research-command-failure-surfaces-blocking-state` 缺少 `review_packet.json`。",
+    "本地 `runs/run_3374dc3f` 至少有三个 execution attempt 的 `meta.json.objective` 和 `attempt_contract.json.objective` 不一致，包括当前的 `att_90103f12`。",
+    "`packages/orchestrator/src/index.ts` 在 `retry_attempt`、`continue_execution`、`apply_steer` 路径会复用上一轮 execution contract 的 `objective` 和 `success_criteria`，而新 attempt 的 `meta.json` 已经写成新的目标。",
+    "`pnpm verify:run-autonomy` 仍然通过，说明现有自动续跑回归还没把这类现场漂移拦住。"
+  ],
+  "next_attempt_contract": {
+    "attempt_type": "execution",
+    "objective": "修正 settled attempt 的现场一致性。失败或续跑产生的新 attempt 一旦离开 running，必须保证 `attempt_contract.json` 与 `meta.json` 目标一致，`research-command-failure` 也能稳定写出 `review_packet.json`。",
+    "success_criteria": [
+      "`pnpm verify:run-loop` 从仓库根目录回放通过。",
+      "`verify-run-loop` 明确断言 `research-command-failure-surfaces-blocking-state` 会持久化 `review_packet.json`，而不是只停在 `attempt.failed`。",
+      "`verify-run-loop` 或直接相关的最小回归也显式断言 retry 或 resume 后新 execution attempt 的 `meta.json.objective` 与 `attempt_contract.json.objective` 保持一致，不再继承旧 contract 目标。",
+      "`pnpm verify:run-autonomy` 和 `pnpm verify:drive-run` 继续从仓库根目录回放通过。"
+    ],
+    "required_evidence": [
+      "git 可见改动只触达 `packages/orchestrator/src/index.ts` 和直接相关的最小回归脚本或夹具。",
+      "说明为什么 settled attempt 现在不会再先暴露缺包现场，再晚一点才补 `review_packet.json`。",
+      "给出 `pnpm verify:drive-run`、`pnpm verify:run-loop`、`pnpm verify:run-autonomy` 的根目录回放输出。"
+    ],
+    "forbidden_shortcuts": [
+      "不要把 `verify-run-loop` 的 review packet 断言放宽成可缺省或只检查 journal。",
+      "不要继续复用上一轮 execution contract 的 `objective` 和 `success_criteria` 去覆盖新 attempt 的目标。",
+      "不要用 fallback 空包或事后异步补写来掩盖 settled attempt 缺少 `review_packet.json` 的问题。"
+    ],
+    "expected_artifacts": [
+      "packages/orchestrator/src/index.ts",
+      "scripts/verify-run-loop.ts",
+      "scripts/verify-run-autonomy.ts"
+    ],
+    "verification_plan": {
+      "commands": [
+        {
+          "purpose": "确认 research 提供 execution contract 的主链没有被顺手改坏",
+          "command": "pnpm verify:drive-run"
+        },
+        {
+          "purpose": "验证 settled attempt 的 contract 和 review packet 现在可稳定回放",
+          "command": "pnpm verify:run-loop"
+        },
+        {
+          "purpose": "确认自动续跑和 retry execution 的语义仍然成立",
+          "command": "pnpm verify:run-autonomy"
+        }
+      ]
+    }
+  }
+}

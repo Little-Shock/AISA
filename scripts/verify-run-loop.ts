@@ -92,6 +92,8 @@ type ScenarioObservation = {
     schema_error: string | null;
     matches_run_id: boolean;
     matches_attempt_id: boolean;
+    contract_objective_matches_attempt: boolean;
+    contract_success_criteria_match_attempt: boolean;
     has_generated_at: boolean;
     has_attempt_contract: boolean;
     has_current_decision_snapshot: boolean;
@@ -121,6 +123,44 @@ type ScenarioObservation = {
     restart_required_message: string | null;
     restart_required_affected_files: string[];
   }>;
+};
+
+type PersistedPromptChainEvidence = {
+  id: string;
+  path: string;
+  check: "must_include" | "must_not_include";
+  value: string;
+};
+
+type PersistedPromptChainReport = {
+  report_version: number;
+  run_id: string;
+  attempt_id: string;
+  legacy_execution_attempt_id: string;
+  post_restart_execution_attempt_id: string;
+  guard_strings: {
+    findings_guard: string;
+    artifacts_guard: string;
+    artifact_example: string;
+    plain_string_guard: string;
+  };
+  restart_transition: {
+    manual_recovery_event_id: string;
+    run_launch_event_id: string;
+    new_attempt_started_at: string;
+  };
+  evidence_chain: PersistedPromptChainEvidence[];
+  replay_commands: Array<{
+    purpose: string;
+    command: string;
+  }>;
+};
+
+type JournalEntryLite = {
+  id: string;
+  attempt_id: string | null;
+  ts: string;
+  type: string;
 };
 
 type JsonSchemaLite = {
@@ -1298,6 +1338,11 @@ async function collectObservation(
           matches_run_id: reviewPacket?.run_id === runId,
           matches_attempt_id:
             reviewPacket?.attempt_id === attempt.id && reviewPacket?.attempt.id === attempt.id,
+          contract_objective_matches_attempt:
+            reviewPacket?.attempt_contract?.objective === attempt.objective,
+          contract_success_criteria_match_attempt:
+            JSON.stringify(reviewPacket?.attempt_contract?.success_criteria ?? null) ===
+            JSON.stringify(attempt.success_criteria),
           has_generated_at:
             typeof reviewPacket?.generated_at === "string" && reviewPacket.generated_at.length > 0,
           has_attempt_contract: reviewPacket?.attempt_contract !== null,
@@ -1426,6 +1471,14 @@ function assertCase(scenario: ScenarioCase, observation: ScenarioObservation): v
     assert.ok(
       reviewPacket.matches_attempt_id,
       `${scenario.id}: review packet attempt metadata mismatch for ${reviewPacket.attempt_id}`
+    );
+    assert.ok(
+      reviewPacket.contract_objective_matches_attempt,
+      `${scenario.id}: attempt_contract objective drift for ${reviewPacket.attempt_id}`
+    );
+    assert.ok(
+      reviewPacket.contract_success_criteria_match_attempt,
+      `${scenario.id}: attempt_contract success_criteria drift for ${reviewPacket.attempt_id}`
     );
     assert.ok(
       reviewPacket.has_generated_at,
@@ -1606,6 +1659,137 @@ function assertCase(scenario: ScenarioCase, observation: ScenarioObservation): v
   }
 }
 
+function parseNdjson<T>(text: string): T[] {
+  return text
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0)
+    .map((line) => JSON.parse(line) as T);
+}
+
+async function assertPersistedPostRestartPromptChain(): Promise<void> {
+  const rootDir = process.cwd();
+  const reportPath = join(
+    rootDir,
+    "runs",
+    "run_3374dc3f",
+    "attempts",
+    "att_cccd2297",
+    "artifacts",
+    "post-restart-prompt-chain.json"
+  );
+  const report = JSON.parse(
+    await readFile(reportPath, "utf8")
+  ) as PersistedPromptChainReport;
+
+  assert.equal(report.report_version, 1, "post_restart_prompt_chain: report version must stay stable");
+  assert.equal(report.run_id, "run_3374dc3f");
+  assert.equal(report.attempt_id, "att_cccd2297");
+  assert.equal(report.legacy_execution_attempt_id, "att_d62b75b4");
+  assert.equal(report.post_restart_execution_attempt_id, "att_cccd2297");
+  assert.deepEqual(
+    report.replay_commands.map((command) => command.command),
+    ["pnpm verify:worker-adapter", "pnpm verify:run-loop", "pnpm verify:run-autonomy"],
+    "post_restart_prompt_chain: replay commands must stay aligned with the locked attempt contract"
+  );
+
+  for (const evidence of report.evidence_chain) {
+    const text = await readFile(join(rootDir, evidence.path), "utf8");
+
+    if (evidence.check === "must_include") {
+      assert.ok(
+        text.includes(evidence.value),
+        `${evidence.id}: expected ${evidence.path} to include the recorded evidence`
+      );
+      continue;
+    }
+
+    assert.ok(
+      !text.includes(evidence.value),
+      `${evidence.id}: expected ${evidence.path} to stay free of the new guard text`
+    );
+  }
+
+  const legacyPromptPath = join(
+    rootDir,
+    "runs",
+    report.run_id,
+    "attempts",
+    report.legacy_execution_attempt_id,
+    "worker-prompt.md"
+  );
+  const currentPromptPath = join(
+    rootDir,
+    "runs",
+    report.run_id,
+    "attempts",
+    report.post_restart_execution_attempt_id,
+    "worker-prompt.md"
+  );
+  const legacyPrompt = await readFile(legacyPromptPath, "utf8");
+  const currentPrompt = await readFile(currentPromptPath, "utf8");
+  const {
+    findings_guard: findingsGuard,
+    artifacts_guard: artifactsGuard,
+    artifact_example: artifactExample,
+    plain_string_guard: plainStringGuard
+  } = report.guard_strings;
+
+  assert.ok(
+    !legacyPrompt.includes(findingsGuard) &&
+      !legacyPrompt.includes(artifactsGuard) &&
+      !legacyPrompt.includes(artifactExample) &&
+      !legacyPrompt.includes(plainStringGuard),
+    "post_restart_prompt_chain: legacy execution prompt should still show the missing guardrail state"
+  );
+  assert.ok(
+    currentPrompt.includes(findingsGuard) &&
+      currentPrompt.includes(artifactsGuard) &&
+      currentPrompt.includes(artifactExample) &&
+      currentPrompt.includes(plainStringGuard),
+    "post_restart_prompt_chain: restarted execution prompt should include all artifact guardrails"
+  );
+
+  const currentMeta = JSON.parse(
+    await readFile(
+      join(rootDir, "runs", report.run_id, "attempts", report.attempt_id, "meta.json"),
+      "utf8"
+    )
+  ) as {
+    started_at: string | null;
+  };
+  assert.equal(
+    currentMeta.started_at,
+    report.restart_transition.new_attempt_started_at,
+    "post_restart_prompt_chain: persisted meta should pin the restarted execution start time"
+  );
+
+  const journal = parseNdjson<JournalEntryLite>(
+    await readFile(join(rootDir, "runs", report.run_id, "journal.ndjson"), "utf8")
+  );
+  const manualRecoveryIndex = journal.findIndex(
+    (entry) => entry.id === report.restart_transition.manual_recovery_event_id
+  );
+  const runLaunchIndex = journal.findIndex(
+    (entry) => entry.id === report.restart_transition.run_launch_event_id
+  );
+  const restartedAttemptStartIndex = journal.findIndex(
+    (entry) => entry.attempt_id === report.attempt_id && entry.type === "attempt.started"
+  );
+
+  assert.ok(manualRecoveryIndex >= 0, "post_restart_prompt_chain: manual recovery event missing");
+  assert.ok(runLaunchIndex > manualRecoveryIndex, "post_restart_prompt_chain: run launch must follow manual recovery");
+  assert.ok(
+    restartedAttemptStartIndex > runLaunchIndex,
+    "post_restart_prompt_chain: restarted execution must start after the relaunch event"
+  );
+  assert.ok(
+    new Date(journal[runLaunchIndex]!.ts).getTime() <=
+      new Date(report.restart_transition.new_attempt_started_at).getTime(),
+    "post_restart_prompt_chain: prompt evidence must come from the relaunched runtime"
+  );
+}
+
 async function main(): Promise<void> {
   const scenarios = await loadSmokeCases();
   const results: Array<{
@@ -1632,6 +1816,20 @@ async function main(): Promise<void> {
         error: error instanceof Error ? error.message : String(error)
       });
     }
+  }
+
+  try {
+    await assertPersistedPostRestartPromptChain();
+    results.push({
+      id: "post_restart_prompt_chain",
+      status: "pass"
+    });
+  } catch (error) {
+    results.push({
+      id: "post_restart_prompt_chain",
+      status: "fail",
+      error: error instanceof Error ? error.message : String(error)
+    });
   }
 
   const failed = results.filter((result) => result.status === "fail");

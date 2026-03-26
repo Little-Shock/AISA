@@ -20,18 +20,36 @@ async function proxyRequest(
   context: { params: Promise<{ path: string[] }> }
 ): Promise<NextResponse> {
   const { path } = await context.params;
-  const upstreamResponse = await fetch(buildUpstreamUrl(request, path), {
-    method: request.method,
-    headers: {
-      accept: request.headers.get("accept") ?? "*/*",
-      "content-type": request.headers.get("content-type") ?? "application/json"
-    },
-    body:
-      request.method === "GET" || request.method === "HEAD"
-        ? undefined
-        : await request.text(),
-    cache: "no-store"
-  });
+  let upstreamResponse: Response;
+  try {
+    upstreamResponse = await fetch(buildUpstreamUrl(request, path), {
+      method: request.method,
+      headers: {
+        accept: request.headers.get("accept") ?? "*/*",
+        "content-type": request.headers.get("content-type") ?? "application/json"
+      },
+      body:
+        request.method === "GET" || request.method === "HEAD"
+          ? undefined
+          : await request.text(),
+      cache: "no-store"
+    });
+  } catch (error) {
+    return NextResponse.json(
+      {
+        message:
+          error instanceof Error
+            ? `控制 API 当前不可用：${error.message}`
+            : "控制 API 当前不可用。"
+      },
+      {
+        status: 502,
+        headers: {
+          "cache-control": "no-store"
+        }
+      }
+    );
+  }
 
   const body = await upstreamResponse.arrayBuffer();
   const response = new NextResponse(body, {

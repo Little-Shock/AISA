@@ -10,12 +10,14 @@
     "build": "pnpm -r --if-present build",
     "smoke": "tsx scripts/smoke-plan.ts",
     "verify:runtime": "node --import tsx scripts/verify-run-loop.ts",
-    "verify:drive-run": "tsx scripts/verify-drive-run.ts",
-    "verify:run-api": "tsx scripts/verify-run-detail-api.ts",
-    "verify:worker-adapter": "tsx scripts/verify-worker-adapter.ts",
-    "verify:self-bootstrap": "tsx scripts/verify-self-bootstrap.ts",
-    "bootstrap:self": "tsx scripts/bootstrap-self-run.ts",
-    "drive:run": "tsx scripts/drive-run.ts"
+    "verify:drive-run": "node --import tsx scripts/verify-drive-run.ts",
+    "verify:run-api": "node --import tsx scripts/verify-run-detail-api.ts",
+    "verify:run-loop": "node --import tsx scripts/verify-run-loop.ts",
+    "verify:run-autonomy": "node --import tsx scripts/verify-run-autonomy.ts",
+    "verify:worker-adapter": "node --import tsx scripts/verify-worker-adapter.ts",
+    "verify:self-bootstrap": "node --import tsx scripts/verify-self-bootstrap.ts",
+    "bootstrap:self": "node --import tsx scripts/bootstrap-self-run.ts",
+    "drive:run": "node --import tsx scripts/drive-run.ts"
   },
   "dependencies": {
     "@autoresearch/domain": "workspace:*",

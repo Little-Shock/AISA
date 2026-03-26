@@ -250,6 +250,10 @@ reports/
 
 ### 6.4 Worker writeback
 
+`findings[].type` 只允许 `fact`、`hypothesis`、`risk`。
+
+`artifacts` 必须是对象数组，不能直接写成字符串路径。最小对象形状是 `{ "type": "patch", "path": "..." }`，`type` 使用 `patch`、`command_result`、`test_result`、`report`、`log`、`screenshot` 之一。
+
 ```json
 {
   "branch_id": "branch_001",

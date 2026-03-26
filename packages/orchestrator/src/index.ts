@@ -539,8 +539,6 @@ export class Orchestrator {
       }
     );
 
-    await saveAttempt(this.workspacePaths, stoppedAttempt);
-    await saveCurrentDecision(this.workspacePaths, nextCurrent);
     await appendRunJournal(
       this.workspacePaths,
         createRunJournalEntry({
@@ -553,7 +551,11 @@ export class Orchestrator {
           }
         })
       );
-    await this.persistAttemptReviewPacket(runId, attempt.id, nextCurrent);
+    await this.saveSettledAttemptState({
+      runId,
+      attempt: stoppedAttempt,
+      currentSnapshot: nextCurrent
+    });
   }
 
   private async planNextAttempt(
@@ -673,8 +675,6 @@ export class Orchestrator {
     const steers = await listRunSteers(this.workspacePaths, runId);
     const attempts = await listAttempts(this.workspacePaths, runId);
     const current = await getCurrentDecision(this.workspacePaths, runId);
-    let finalCurrentDecision = current;
-
     const previousAttempts = (
       await Promise.all(
         attempts
@@ -802,7 +802,6 @@ export class Orchestrator {
       attempt = updateAttempt(completedAttemptForEvaluation, {
         evaluation_ref: `runs/${runId}/attempts/${attempt.id}/evaluation.json`
       });
-      await saveAttempt(this.workspacePaths, attempt);
 
       const completedAttempts = [...attempts.filter((item) => item.id !== attempt.id), attempt];
       let nextCurrent = this.buildNextCurrentDecision({
@@ -833,8 +832,6 @@ export class Orchestrator {
         attempt,
         runtimeSourceDriftFiles
       );
-      finalCurrentDecision = nextCurrent;
-      await saveCurrentDecision(this.workspacePaths, nextCurrent);
       await saveRunReport(
         this.workspacePaths,
         runId,
@@ -878,15 +875,19 @@ export class Orchestrator {
         runtimeSourceDriftFiles,
         runtimeVerification.artifact_path
       );
+      await this.saveSettledAttemptState({
+        runId,
+        attempt,
+        currentSnapshot: nextCurrent
+      });
     } catch (error) {
       attempt = updateAttempt(attempt, {
         status: "failed",
         ended_at: new Date().toISOString()
       });
-      await saveAttempt(this.workspacePaths, attempt);
-      await saveCurrentDecision(
-        this.workspacePaths,
-        updateCurrentDecision(current ?? createCurrentDecision({ run_id: runId }), {
+      const failedCurrentDecision = updateCurrentDecision(
+        current ?? createCurrentDecision({ run_id: runId }),
+        {
           run_status: "waiting_steer",
           latest_attempt_id: attempt.id,
           recommended_next_action: "wait_for_human",
@@ -894,9 +895,8 @@ export class Orchestrator {
           summary: error instanceof Error ? error.message : String(error),
           blocking_reason: error instanceof Error ? error.message : String(error),
           waiting_for_human: true
-        })
+        }
       );
-      finalCurrentDecision = await getCurrentDecision(this.workspacePaths, runId);
       await appendRunJournal(
         this.workspacePaths,
         createRunJournalEntry({
@@ -908,6 +908,11 @@ export class Orchestrator {
           }
         })
       );
+      await this.saveSettledAttemptState({
+        runId,
+        attempt,
+        currentSnapshot: failedCurrentDecision
+      });
     } finally {
       clearInterval(heartbeatTimer);
       await this.writeAttemptHeartbeat({
@@ -916,9 +921,45 @@ export class Orchestrator {
         startedAt: attempt.started_at ?? new Date().toISOString(),
         status: "released"
       });
-      if (["completed", "failed", "stopped"].includes(attempt.status)) {
-        await this.persistAttemptReviewPacket(runId, attempt.id, finalCurrentDecision);
-      }
+    }
+  }
+
+  private async saveSettledAttemptState(input: {
+    runId: string;
+    attempt: Attempt;
+    currentSnapshot: CurrentDecision | null;
+  }): Promise<void> {
+    const [
+      attemptContract,
+      context,
+      result,
+      evaluation,
+      runtimeVerification,
+      journal
+    ] = await Promise.all([
+      getAttemptContract(this.workspacePaths, input.runId, input.attempt.id),
+      getAttemptContext(this.workspacePaths, input.runId, input.attempt.id),
+      getAttemptResult(this.workspacePaths, input.runId, input.attempt.id),
+      getAttemptEvaluation(this.workspacePaths, input.runId, input.attempt.id),
+      getAttemptRuntimeVerification(this.workspacePaths, input.runId, input.attempt.id),
+      listRunJournal(this.workspacePaths, input.runId)
+    ]);
+    const reviewPacket = await this.buildAttemptReviewPacket({
+      runId: input.runId,
+      attempt: input.attempt,
+      attemptContract,
+      currentSnapshot: input.currentSnapshot,
+      context,
+      result,
+      evaluation,
+      runtimeVerification,
+      journal
+    });
+
+    await saveAttemptReviewPacket(this.workspacePaths, reviewPacket);
+    await saveAttempt(this.workspacePaths, input.attempt);
+    if (input.currentSnapshot) {
+      await saveCurrentDecision(this.workspacePaths, input.currentSnapshot);
     }
   }
 
@@ -1612,14 +1653,8 @@ export class Orchestrator {
         attempt_id: attempt.id,
         run_id: run.id,
         attempt_type: attempt.attempt_type,
-        objective:
-          draft?.objective ??
-          reusableExecutionContract?.objective ??
-          attempt.objective,
-        success_criteria:
-          draft?.success_criteria ??
-          reusableExecutionContract?.success_criteria ??
-          attempt.success_criteria,
+        objective: attempt.objective,
+        success_criteria: attempt.success_criteria,
         required_evidence:
           draft?.required_evidence ??
           reusableExecutionContract?.required_evidence ?? [

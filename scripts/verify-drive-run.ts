@@ -15,6 +15,8 @@ import {
 import {
   appendRunJournal,
   ensureWorkspace,
+  getAttemptContract,
+  getAttemptResult,
   getCurrentDecision,
   getAttemptRuntimeVerification,
   listAttempts,
@@ -36,6 +38,7 @@ import {
 
 class ProgressingAdapter {
   readonly type = "fake-codex";
+  private researchPassCount = 0;
 
   async runAttemptTask(input: {
     run: Run;
@@ -46,25 +49,83 @@ class ProgressingAdapter {
     exitCode: number;
   }> {
     if (input.attempt.attempt_type === "research") {
-      return {
-        writeback: {
-          summary: "Research found the next concrete backend step.",
-          findings: [
-            {
-              type: "fact",
-              content: "Runtime loop can now be driven locally.",
-              evidence: ["scripts/drive-run.ts"]
-            }
-          ],
-          questions: [],
-          recommended_next_steps: ["Implement the smallest execution change next."],
-          confidence: 0.8,
-          artifacts: []
-        },
-        reportMarkdown: "# research",
-        exitCode: 0
-      };
+      this.researchPassCount += 1;
+
+      if (this.researchPassCount === 1) {
+        return {
+          writeback: {
+            summary:
+              "Research found the next concrete backend step but is still missing a replayable execution contract.",
+            findings: [
+              {
+                type: "fact",
+                content: "Runtime loop can now be driven locally.",
+                evidence: ["scripts/drive-run.ts"]
+              }
+            ],
+            questions: [],
+            recommended_next_steps: ["Implement the smallest execution change next."],
+            confidence: 0.8,
+            artifacts: []
+          },
+          reportMarkdown: "# research",
+          exitCode: 0
+        };
+      }
+
+      if (this.researchPassCount === 2) {
+        return {
+          writeback: {
+            summary:
+              "Research locked the next execution step behind a replayable execution contract.",
+            findings: [
+              {
+                type: "fact",
+                content: "The next execution step is grounded and replayable.",
+                evidence: ["scripts/verify-drive-run.ts", "execution-note.md"]
+              }
+            ],
+            questions: [],
+            recommended_next_steps: ["Implement the smallest execution change next."],
+            confidence: 0.84,
+            next_attempt_contract: {
+              attempt_type: "execution",
+              objective: "Implement the smallest execution change next.",
+              success_criteria: [
+                "Write execution-note.md and leave replayable verification evidence."
+              ],
+              required_evidence: [
+                "Leave git-visible workspace changes tied to the objective.",
+                "Pass a replayable verification command that proves execution-note.md was written."
+              ],
+              forbidden_shortcuts: [
+                "Do not claim execution success without replaying the locked verification command."
+              ],
+              expected_artifacts: ["execution-note.md"],
+              verification_plan: {
+                commands: [
+                  {
+                    purpose: "confirm the execution note was written",
+                    command: 'test -f execution-note.md && rg -n "^checkpointed by att_" execution-note.md'
+                  }
+                ]
+              }
+            },
+            artifacts: []
+          },
+          reportMarkdown: "# research",
+          exitCode: 0
+        };
+      }
+
+      throw new Error("Unexpected extra research pass in verify-drive-run.");
     }
+
+    assert.equal(
+      this.researchPassCount,
+      2,
+      "execution should only start after research leaves a replayable contract"
+    );
 
     await writeFile(
       join(input.run.workspace_root, "execution-note.md"),
@@ -79,20 +140,12 @@ class ProgressingAdapter {
           {
             type: "fact",
             content: "Execution completed and left traceable evidence.",
-            evidence: ["runs/demo/result.json"]
+            evidence: ["execution-note.md"]
           }
         ],
         questions: [],
         recommended_next_steps: [],
         confidence: 0.86,
-        verification_plan: {
-          commands: [
-            {
-              purpose: "confirm the execution note was written",
-              command: `test -f execution-note.md && rg -n "^checkpointed by ${input.attempt.id}$" execution-note.md`
-            }
-          ]
-        },
         artifacts: [
           {
             type: "patch",
@@ -146,10 +199,11 @@ async function main(): Promise<void> {
     })
   );
 
+  const adapter = new ProgressingAdapter();
   const firstStop = await driveRun({
     workspaceRoot: rootDir,
     runId: run.id,
-    adapter: new ProgressingAdapter() as never,
+    adapter: adapter as never,
     pollIntervalMs: 10,
     maxPolls: 200,
     stopAfterCompletedAttempts: 1
@@ -158,18 +212,32 @@ async function main(): Promise<void> {
   assert.equal(firstStop.stopReason, "completed_attempt_limit");
   assert.equal(firstStop.completedAttemptCount, 1);
   assert.equal(firstStop.current?.run_status, "running");
-  assert.ok(
-    ["start_execution", "attempt_running"].includes(
-      firstStop.current?.recommended_next_action ?? ""
-    ),
-    "first stop should either be ready to start execution or already running it"
+  assert.equal(
+    firstStop.current?.recommended_next_action,
+    "continue_research",
+    "research without a replayable contract must keep the loop in research"
+  );
+  assert.equal(
+    firstStop.current?.recommended_attempt_type,
+    "research",
+    "missing execution contract should block execution dispatch"
+  );
+  assert.match(
+    firstStop.current?.blocking_reason ?? "",
+    /Need a replayable execution contract before the loop can start an execution attempt\./,
+    "first stop should explain that execution is blocked on a replayable contract"
+  );
+  assert.deepEqual(
+    firstStop.attempts.map((attempt) => attempt.attempt_type),
+    ["research"],
+    "local drive-run should not create an execution attempt before the contract is ready"
   );
   assert.doesNotThrow(() => assertDriveRunReachedStableStop(firstStop));
 
   const secondStop = await driveRun({
     workspaceRoot: rootDir,
     runId: run.id,
-    adapter: new ProgressingAdapter() as never,
+    adapter: adapter as never,
     pollIntervalMs: 10,
     maxPolls: 200
   });
@@ -177,17 +245,49 @@ async function main(): Promise<void> {
   const checkpointEntry = await waitForCheckpointEntry(workspacePaths, run.id);
   const persistedCurrent = await getCurrentDecision(workspacePaths, run.id);
   const attempts = await listAttempts(workspacePaths, run.id);
+  const orderedAttempts = [...attempts].sort((left, right) =>
+    left.created_at.localeCompare(right.created_at)
+  );
   const executionAttempts = attempts.filter((attempt) => attempt.attempt_type === "execution");
-  const researchAttempts = attempts.filter((attempt) => attempt.attempt_type === "research");
+  const researchAttempts = orderedAttempts.filter((attempt) => attempt.attempt_type === "research");
+  const [firstResearchAttempt, secondResearchAttempt] = researchAttempts;
+  assert.ok(firstResearchAttempt, "first research attempt should be persisted");
+  assert.ok(secondResearchAttempt, "second research attempt should persist the execution contract");
   const executionAttempt = attempts.find((attempt) => attempt.id === checkpointEntry.attempt_id);
   assert.ok(executionAttempt, "checkpoint entry should point to a persisted attempt");
   assert.equal(executionAttempt.attempt_type, "execution");
+  const [firstResearchResult, secondResearchResult, executionAttemptContract] = await Promise.all([
+    getAttemptResult(workspacePaths, run.id, firstResearchAttempt.id),
+    getAttemptResult(workspacePaths, run.id, secondResearchAttempt.id),
+    getAttemptContract(workspacePaths, run.id, executionAttempt.id)
+  ]);
   const runtimeVerification = await getAttemptRuntimeVerification(
     workspacePaths,
     run.id,
     executionAttempt.id
   );
   assert.ok(runtimeVerification, "execution attempt should persist runtime verification evidence");
+  assert.equal(
+    firstResearchResult?.next_attempt_contract,
+    undefined,
+    "first research attempt should not leave an execution contract"
+  );
+  assert.ok(
+    secondResearchResult?.next_attempt_contract,
+    "second research attempt should leave a replayable execution contract"
+  );
+  assert.equal(secondResearchResult?.next_attempt_contract?.attempt_type, "execution");
+  assert.ok(executionAttemptContract, "execution attempt should persist the promoted contract");
+  assert.equal(
+    executionAttempt.objective,
+    secondResearchResult?.next_attempt_contract?.objective,
+    "execution should consume the research-provided contract objective"
+  );
+  assert.deepEqual(
+    executionAttemptContract?.verification_plan,
+    secondResearchResult?.next_attempt_contract?.verification_plan,
+    "execution should keep the replayable verification plan from research"
+  );
   const checkpointArtifact = String(checkpointEntry.payload.artifact_path);
   await waitForFile(checkpointArtifact);
   const checkpoint = JSON.parse(await readFile(checkpointArtifact, "utf8")) as {
@@ -215,10 +315,7 @@ async function main(): Promise<void> {
   assert.doesNotThrow(() => assertDriveRunReachedStableStop(secondStop));
   assert.equal(persistedCurrent?.run_status, "completed");
   assert.equal(executionAttempts.length, 1);
-  assert.ok(
-    researchAttempts.length >= 1,
-    "drive-run should complete at least one research attempt before execution"
-  );
+  assert.equal(researchAttempts.length, 2);
   assert.ok(
     attempts.every((attempt) => attempt.status === "completed"),
     "all recorded attempts should be completed by the settled stop"
@@ -256,8 +353,10 @@ async function main(): Promise<void> {
     "research mode should forbid heavy script execution"
   );
   assert.ok(
-    researchRules.some((line) => line.includes("recommend it as the next execution attempt")),
-    "research mode should hand command-based verification to execution"
+    researchRules.some((line) =>
+      line.includes("next_attempt_contract with replayable verification commands")
+    ),
+    "research mode should require a replayable contract before execution"
   );
   assert.ok(
     executionRules.some((line) => line.includes("You may modify files")),
@@ -285,8 +384,12 @@ async function main(): Promise<void> {
     JSON.stringify(
       {
         run_id: run.id,
+        first_stop_next_action: firstStop.current?.recommended_next_action ?? null,
+        first_stop_blocking_reason: firstStop.current?.blocking_reason ?? null,
         stop_reason: secondStop.stopReason,
         attempt_types: attempts.map((attempt) => attempt.attempt_type),
+        research_attempt_count: researchAttempts.length,
+        execution_attempt_count: executionAttempts.length,
         run_status: persistedCurrent?.run_status ?? null
       },
       null,

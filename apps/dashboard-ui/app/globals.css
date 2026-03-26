@@ -227,12 +227,113 @@ textarea {
   color: var(--rose);
 }
 
+.live-strip {
+  margin-top: 18px;
+  padding: 18px 22px;
+  border-radius: 26px;
+  border: 1px solid rgba(32, 27, 21, 0.08);
+  background: var(--paper);
+  box-shadow: var(--shadow);
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr);
+  gap: 16px;
+  align-items: center;
+}
+
+.live-strip-live {
+  background: linear-gradient(180deg, rgba(15, 92, 79, 0.08), rgba(255, 251, 245, 0.9));
+}
+
+.live-strip-stale {
+  background: linear-gradient(180deg, rgba(159, 97, 35, 0.12), rgba(255, 251, 245, 0.9));
+}
+
+.live-strip-offline {
+  background: linear-gradient(180deg, rgba(158, 67, 56, 0.12), rgba(255, 251, 245, 0.9));
+}
+
+.live-strip-status {
+  display: flex;
+  gap: 14px;
+  align-items: flex-start;
+}
+
+.live-strip-status strong {
+  display: block;
+  font-size: 1.05rem;
+}
+
+.live-strip-status p {
+  margin: 6px 0 0;
+  color: var(--muted);
+  line-height: 1.7;
+}
+
+.live-dot {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--emerald);
+  box-shadow: 0 0 0 6px rgba(15, 92, 79, 0.12);
+  flex: none;
+  margin-top: 6px;
+}
+
+.live-strip-stale .live-dot {
+  background: var(--amber);
+  box-shadow: 0 0 0 6px rgba(159, 97, 35, 0.12);
+}
+
+.live-strip-offline .live-dot {
+  background: var(--rose);
+  box-shadow: 0 0 0 6px rgba(158, 67, 56, 0.12);
+}
+
+.live-dot.is-refreshing {
+  animation: live-pulse 1.1s ease-in-out infinite;
+}
+
+.live-strip-metrics {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.live-strip-metric {
+  padding: 13px 14px;
+  border-radius: 18px;
+  background: rgba(255, 252, 247, 0.84);
+  border: 1px solid rgba(32, 27, 21, 0.07);
+}
+
+.live-strip-metric span {
+  display: block;
+  color: var(--muted);
+  font-size: 12px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.live-strip-metric strong {
+  display: block;
+  margin-top: 8px;
+  line-height: 1.65;
+}
+
 .content-grid {
   display: grid;
   grid-template-columns: minmax(320px, 390px) minmax(0, 1fr);
   gap: 20px;
   margin-top: 22px;
   min-width: 0;
+}
+
+.content-grid-stale :is(.panel, .goal-card, .run-card, .sub-panel, .attempt-card, .info-card) {
+  box-shadow: inset 0 0 0 1px rgba(159, 97, 35, 0.08);
+}
+
+.content-grid-offline :is(.panel, .goal-card, .run-card, .sub-panel, .attempt-card, .info-card) {
+  box-shadow: inset 0 0 0 1px rgba(158, 67, 56, 0.08);
 }
 
 .left-rail,
@@ -427,6 +528,11 @@ textarea {
   background: rgba(15, 92, 79, 0.08);
 }
 
+.run-card-chip-live {
+  background: rgba(15, 92, 79, 0.16);
+  color: var(--emerald);
+}
+
 .run-card-chip-alert {
   background: var(--amber-soft);
   color: var(--amber);
@@ -526,6 +632,49 @@ textarea {
 .dual-grid {
   grid-template-columns: repeat(2, minmax(0, 1fr));
   margin-top: 16px;
+}
+
+.run-live-banner {
+  margin-bottom: 16px;
+  padding: 16px 18px;
+  border-radius: 22px;
+  border: 1px solid rgba(32, 27, 21, 0.08);
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) minmax(220px, auto);
+  gap: 16px;
+  align-items: center;
+}
+
+.run-live-banner-live {
+  background: linear-gradient(180deg, rgba(15, 92, 79, 0.08), rgba(255, 251, 245, 0.94));
+}
+
+.run-live-banner-stale {
+  background: linear-gradient(180deg, rgba(159, 97, 35, 0.1), rgba(255, 251, 245, 0.94));
+}
+
+.run-live-banner-offline {
+  background: linear-gradient(180deg, rgba(158, 67, 56, 0.1), rgba(255, 251, 245, 0.94));
+}
+
+.run-live-banner-main strong {
+  display: block;
+  font-size: 1.02rem;
+}
+
+.run-live-banner-main p {
+  margin: 6px 0 0;
+  color: var(--muted);
+  line-height: 1.7;
+}
+
+.run-live-banner-side {
+  display: grid;
+  gap: 8px;
+  justify-items: end;
+  color: var(--muted);
+  font-size: 13px;
+  text-align: right;
 }
 
 .info-card {
@@ -806,9 +955,11 @@ textarea {
 }
 
 @media (max-width: 1120px) {
+  .live-strip,
   .content-grid,
   .dual-grid,
-  .attempt-grid {
+  .attempt-grid,
+  .run-live-banner {
     grid-template-columns: 1fr;
   }
 }
@@ -830,7 +981,8 @@ textarea {
 
   .stats-row,
   .hero-meta,
-  .summary-grid {
+  .summary-grid,
+  .live-strip-metrics {
     grid-template-columns: 1fr 1fr;
   }
 
@@ -850,12 +1002,31 @@ textarea {
   .event-row {
     flex-direction: column;
   }
+
+  .run-live-banner-side {
+    justify-items: start;
+    text-align: left;
+  }
 }
 
 @media (max-width: 520px) {
   .stats-row,
   .hero-meta,
-  .summary-grid {
+  .summary-grid,
+  .live-strip-metrics {
     grid-template-columns: 1fr;
+  }
+}
+
+@keyframes live-pulse {
+  0%,
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+
+  50% {
+    transform: scale(1.18);
+    opacity: 0.65;
   }
 }

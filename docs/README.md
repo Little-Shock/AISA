@@ -7,6 +7,7 @@
 - `implementation-blueprint.md`
 - `remote-observability-cloudflare.md`
 - `decisions/0001-mvp-runtime.md`
+- `decisions/0002-runtime-source-drift-requires-restart.md`
 
 约定：
 

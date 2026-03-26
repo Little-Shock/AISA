@@ -1,6 +1,6 @@
 "use client";
 
-import { startTransition, useEffect, useMemo, useState } from "react";
+import { startTransition, useEffect, useMemo, useRef, useState } from "react";
 import {
   activityLabel,
   attemptTypeLabel,
@@ -83,6 +83,7 @@ type RunSummaryItem = {
     summary: string;
     blocking_reason: string | null;
     waiting_for_human: boolean;
+    updated_at: string;
   } | null;
   attempt_count: number;
   latest_attempt: {
@@ -220,9 +221,26 @@ type ViewMode = "runs" | "goals";
 
 const apiBaseUrl = "/api/control";
 const controlApiDisplay = "same-origin /api/control";
+const autoRefreshIntervalMs = 4_000;
+const staleDataThresholdMs = 12_000;
 const defaultWorkspace =
   process.env.NEXT_PUBLIC_DEFAULT_WORKSPACE_ROOT ??
   "E:\\00.Lark_Projects\\36_team_research";
+
+async function readErrorMessage(response: Response, fallback: string): Promise<string> {
+  try {
+    const payload = (await response.json()) as { message?: string };
+    if (payload.message) {
+      return payload.message;
+    }
+  } catch {}
+
+  return fallback;
+}
+
+function formatLoadError(fallback: string, cause: unknown): string {
+  return cause instanceof Error ? cause.message : fallback;
+}
 
 export default function Page() {
   const [viewMode, setViewMode] = useState<ViewMode>("runs");
@@ -234,6 +252,13 @@ export default function Page() {
   const [runDetail, setRunDetail] = useState<RunDetail | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [refreshState, setRefreshState] = useState({
+    isRefreshing: false,
+    lastSuccessAt: null as number | null,
+    lastErrorAt: null as number | null,
+    lastErrorMessage: null as string | null
+  });
+  const [nowTs, setNowTs] = useState(() => Date.now());
   const [goalForm, setGoalForm] = useState({
     title: "把当前仓库收敛成下一步实施计划",
     description:
@@ -246,23 +271,24 @@ export default function Page() {
     workspace_root: defaultWorkspace
   });
   const [steerText, setSteerText] = useState("");
+  const refreshInFlightRef = useRef(false);
 
   useEffect(() => {
-    void loadGoals();
-    void loadRuns();
+    void refreshDashboard();
+  }, []);
+
+  useEffect(() => {
+    const clock = window.setInterval(() => {
+      setNowTs(Date.now());
+    }, 1000);
+
+    return () => window.clearInterval(clock);
   }, []);
 
   useEffect(() => {
     const timer = window.setInterval(() => {
-      void loadGoals();
-      void loadRuns();
-      if (selectedGoalId) {
-        void loadGoalDetail(selectedGoalId);
-      }
-      if (selectedRunId) {
-        void loadRunDetail(selectedRunId);
-      }
-    }, 4000);
+      void refreshDashboard();
+    }, autoRefreshIntervalMs);
 
     return () => window.clearInterval(timer);
   }, [selectedGoalId, selectedRunId]);
@@ -307,46 +333,161 @@ export default function Page() {
     ];
   }, [goals, runs]);
 
-  async function loadGoals() {
-    const response = await fetch(`${apiBaseUrl}/goals`);
-    const payload = (await response.json()) as { goals: GoalSummaryItem[] };
-    setGoals(payload.goals);
+  const latestSyncAgeMs =
+    refreshState.lastSuccessAt !== null ? Math.max(nowTs - refreshState.lastSuccessAt, 0) : null;
+  const dataState =
+    refreshState.lastErrorAt !== null &&
+    (refreshState.lastSuccessAt === null ||
+      refreshState.lastErrorAt >= refreshState.lastSuccessAt)
+      ? "offline"
+      : latestSyncAgeMs !== null && latestSyncAgeMs > staleDataThresholdMs
+        ? "stale"
+        : "live";
+  const selectedRunCurrentUpdatedAt =
+    runDetail?.current?.updated_at ??
+    selectedRun?.current?.updated_at ??
+    selectedRun?.latest_attempt?.ended_at ??
+    selectedRun?.latest_attempt?.started_at ??
+    selectedRun?.run.created_at ??
+    null;
+  const currentAttemptStartedAt =
+    selectedRunAttemptDetail?.attempt.status === "running"
+      ? selectedRunAttemptDetail.attempt.started_at
+      : selectedRun?.latest_attempt?.status === "running"
+        ? selectedRun.latest_attempt.started_at
+        : null;
+  const liveStatusText =
+    dataState === "offline"
+      ? "数据已失联"
+      : refreshState.isRefreshing
+        ? "正在自动刷新"
+        : dataState === "stale"
+          ? "数据偏陈旧"
+          : "自动刷新正常";
+  const liveStatusDetail =
+    dataState === "offline"
+      ? refreshState.lastErrorAt
+        ? `失联 ${formatElapsed(refreshState.lastErrorAt, nowTs)}`
+        : "控制 API 当前不可用"
+      : refreshState.lastSuccessAt
+        ? `上次同步 ${formatClockTime(refreshState.lastSuccessAt)}`
+        : "正在建立首轮同步";
+  const liveAttemptText = currentAttemptStartedAt
+    ? `当前尝试已运行 ${formatElapsed(currentAttemptStartedAt, nowTs)}`
+    : "当前没有进行中的尝试";
 
-    if (!selectedGoalId && payload.goals.length > 0) {
-      startTransition(() => {
-        setSelectedGoalId(payload.goals[0].goal.id);
-      });
-    }
-  }
-
-  async function loadRuns() {
-    const response = await fetch(`${apiBaseUrl}/runs`);
-    const payload = (await response.json()) as { runs: RunSummaryItem[] };
-    setRuns(payload.runs);
-
-    if (!selectedRunId && payload.runs.length > 0) {
-      startTransition(() => {
-        setSelectedRunId(payload.runs[0].run.id);
-      });
-    }
-  }
-
-  async function loadGoalDetail(goalId: string) {
-    const response = await fetch(`${apiBaseUrl}/goals/${goalId}`);
+  async function fetchControlJson<T>(path: string, fallback: string): Promise<T> {
+    const response = await fetch(`${apiBaseUrl}${path}`, {
+      cache: "no-store"
+    });
     if (!response.ok) {
+      throw new Error(await readErrorMessage(response, fallback));
+    }
+
+    return (await response.json()) as T;
+  }
+
+  async function selectGoal(goalId: string) {
+    setSelectedGoalId(goalId);
+
+    try {
+      const payload = await fetchControlJson<GoalDetail>(
+        `/goals/${goalId}`,
+        "加载目标详情失败"
+      );
+      setDetail(payload);
+      setError(null);
+    } catch (cause) {
+      setError(formatLoadError("加载目标详情失败", cause));
+    }
+  }
+
+  async function selectRun(runId: string) {
+    setSelectedRunId(runId);
+
+    try {
+      const payload = await fetchControlJson<RunDetail>(
+        `/runs/${runId}`,
+        "加载运行详情失败"
+      );
+      setRunDetail(payload);
+      setError(null);
+    } catch (cause) {
+      setError(formatLoadError("加载运行详情失败", cause));
+    }
+  }
+
+  async function refreshDashboard(options?: {
+    goalId?: string | null;
+    runId?: string | null;
+  }) {
+    if (refreshInFlightRef.current) {
       return;
     }
-    const payload = (await response.json()) as GoalDetail;
-    setDetail(payload);
-  }
 
-  async function loadRunDetail(runId: string) {
-    const response = await fetch(`${apiBaseUrl}/runs/${runId}`);
-    if (!response.ok) {
-      return;
+    refreshInFlightRef.current = true;
+    setRefreshState((current) => ({
+      ...current,
+      isRefreshing: true
+    }));
+
+    try {
+      const [goalPayload, runPayload] = await Promise.all([
+        fetchControlJson<{ goals: GoalSummaryItem[] }>("/goals", "加载目标失败"),
+        fetchControlJson<{ runs: RunSummaryItem[] }>("/runs", "加载运行任务失败")
+      ]);
+
+      const nextGoalId = pickSelectedId(
+        goalPayload.goals,
+        options?.goalId ?? selectedGoalId,
+        (item) => item.goal.id
+      );
+      const nextRunId = pickSelectedId(
+        runPayload.runs,
+        options?.runId ?? selectedRunId,
+        (item) => item.run.id
+      );
+
+      startTransition(() => {
+        setGoals(goalPayload.goals);
+        setRuns(runPayload.runs);
+        setSelectedGoalId(nextGoalId);
+        setSelectedRunId(nextRunId);
+      });
+
+      const [goalDetailPayload, runDetailPayload] = await Promise.all([
+        nextGoalId
+          ? fetchControlJson<GoalDetail>(`/goals/${nextGoalId}`, "加载目标详情失败")
+          : Promise.resolve(null),
+        nextRunId
+          ? fetchControlJson<RunDetail>(`/runs/${nextRunId}`, "加载运行详情失败")
+          : Promise.resolve(null)
+      ]);
+
+      startTransition(() => {
+        setDetail(goalDetailPayload);
+        setRunDetail(runDetailPayload);
+      });
+
+      setError(null);
+      setRefreshState({
+        isRefreshing: false,
+        lastSuccessAt: Date.now(),
+        lastErrorAt: null,
+        lastErrorMessage: null
+      });
+    } catch (cause) {
+      const message = formatLoadError("加载运行台失败", cause);
+      setError(message);
+      setRefreshState((current) => ({
+        ...current,
+        isRefreshing: false,
+        lastErrorAt: Date.now(),
+        lastErrorMessage: message
+      }));
+    } finally {
+      refreshInFlightRef.current = false;
     }
-    const payload = (await response.json()) as RunDetail;
-    setRunDetail(payload);
   }
 
   async function createGoal() {
@@ -372,9 +513,10 @@ export default function Page() {
       }
 
       const payload = (await response.json()) as { goal: { id: string } };
-      await loadGoals();
-      setSelectedGoalId(payload.goal.id);
-      await loadGoalDetail(payload.goal.id);
+      await refreshDashboard({
+        goalId: payload.goal.id,
+        runId: selectedRunId
+      });
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
@@ -395,8 +537,10 @@ export default function Page() {
         throw new Error("启动目标失败");
       }
 
-      await loadGoals();
-      await loadGoalDetail(goalId);
+      await refreshDashboard({
+        goalId,
+        runId: selectedRunId
+      });
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
@@ -417,7 +561,10 @@ export default function Page() {
         throw new Error("重跑分支失败");
       }
 
-      await loadGoalDetail(goalId);
+      await refreshDashboard({
+        goalId,
+        runId: selectedRunId
+      });
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
@@ -448,7 +595,10 @@ export default function Page() {
       }
 
       setSteerText("");
-      await loadGoalDetail(goalId);
+      await refreshDashboard({
+        goalId,
+        runId: selectedRunId
+      });
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
@@ -512,12 +662,47 @@ export default function Page() {
 
         {error ? <section className="error-banner">{error}</section> : null}
 
-        <div className="content-grid">
+        <section className={`live-strip live-strip-${dataState}`}>
+          <div className="live-strip-status">
+            <span
+              className={`live-dot${refreshState.isRefreshing ? " is-refreshing" : ""}`}
+              aria-hidden="true"
+            />
+            <div>
+              <strong>{liveStatusText}</strong>
+              <p>
+                {liveStatusDetail}
+                {refreshState.lastErrorMessage && dataState === "offline"
+                  ? ` · ${refreshState.lastErrorMessage}`
+                  : ""}
+              </p>
+            </div>
+          </div>
+
+          <div className="live-strip-metrics">
+            <div className="live-strip-metric">
+              <span>刷新节奏</span>
+              <strong>每 4 秒</strong>
+            </div>
+            <div className="live-strip-metric">
+              <span>数据年龄</span>
+              <strong>
+                {latestSyncAgeMs !== null ? formatDuration(latestSyncAgeMs) : "未同步"}
+              </strong>
+            </div>
+            <div className="live-strip-metric">
+              <span>当前运行</span>
+              <strong>{liveAttemptText}</strong>
+            </div>
+          </div>
+        </section>
+
+        <div className={`content-grid content-grid-${dataState}`}>
           <aside className="left-rail">
             {viewMode === "runs" ? (
               <Panel
                 title={`运行池 · ${runs.length}`}
-                subtitle="这里展示所有运行任务，包括当前自举任务。"
+                subtitle="这里展示所有运行任务，包括当前自举任务。卡片会显示最近同步和尝试活性。"
               >
                 <div className="run-list">
                   {runs.length === 0 ? (
@@ -538,14 +723,22 @@ export default function Page() {
                         110
                       );
                       const workspaceLabel = abbreviateWorkspace(item.run.workspace_root);
+                      const latestRunSignalAt =
+                        item.current?.updated_at ??
+                        item.latest_attempt?.ended_at ??
+                        item.latest_attempt?.started_at ??
+                        item.run.created_at;
+                      const runningSince =
+                        item.latest_attempt?.status === "running"
+                          ? item.latest_attempt.started_at
+                          : null;
                       return (
                         <button
                           key={item.run.id}
                           type="button"
                           className={`goal-card run-card${selected ? " is-selected" : ""}`}
                           onClick={() => {
-                            setSelectedRunId(item.run.id);
-                            void loadRunDetail(item.run.id);
+                            void selectRun(item.run.id);
                           }}
                         >
                           <div className="goal-card-head">
@@ -574,6 +767,11 @@ export default function Page() {
                                 {item.latest_attempt.id}
                               </span>
                             ) : null}
+                            {runningSince ? (
+                              <span className="run-card-chip run-card-chip-live">
+                                已运行 {formatElapsed(runningSince, nowTs)}
+                              </span>
+                            ) : null}
                             {item.verification_command_count > 0 ? (
                               <span className="run-card-chip">
                                 回放 {item.verification_command_count}
@@ -587,7 +785,7 @@ export default function Page() {
                           </div>
                           <p className="run-card-summary">{taskSummary}</p>
                           <div className="goal-card-meta">
-                            {workspaceLabel}
+                            {workspaceLabel} · 最近变化 {formatRelativeTime(latestRunSignalAt, nowTs)}
                             {item.latest_attempt?.started_at
                               ? ` · 开始 ${formatDateTime(item.latest_attempt.started_at)}`
                               : ""}
@@ -672,8 +870,7 @@ export default function Page() {
                             type="button"
                             className={`goal-card${selected ? " is-selected" : ""}`}
                             onClick={() => {
-                              setSelectedGoalId(item.goal.id);
-                              void loadGoalDetail(item.goal.id);
+                              void selectGoal(item.goal.id);
                             }}
                           >
                             <div className="goal-card-head">
@@ -707,18 +904,43 @@ export default function Page() {
                         <button
                           type="button"
                           className="button button-secondary"
+                          disabled={refreshState.isRefreshing}
                           onClick={() => {
-                            void loadRuns();
-                            void loadRunDetail(runDetail.run.id);
+                            void refreshDashboard({
+                              goalId: selectedGoalId,
+                              runId: runDetail.run.id
+                            });
                           }}
                         >
-                          刷新
+                          {refreshState.isRefreshing ? "同步中..." : "刷新"}
                         </button>
                       </div>
                     }
                   >
+                    <div className={`run-live-banner run-live-banner-${dataState}`}>
+                      <div className="run-live-banner-main">
+                        <strong>{liveStatusText}</strong>
+                        <p>
+                          最近同步 {formatTimeOrFallback(refreshState.lastSuccessAt)}
+                          {selectedRunCurrentUpdatedAt
+                            ? ` · 当前状态更新于 ${formatDateTime(selectedRunCurrentUpdatedAt)}`
+                            : ""}
+                        </p>
+                      </div>
+                      <div className="run-live-banner-side">
+                        <span>{liveAttemptText}</span>
+                        <span>
+                          最近变化{" "}
+                          {formatRelativeTime(selectedRunCurrentUpdatedAt, nowTs)}
+                        </span>
+                      </div>
+                    </div>
+
                     <div className="summary-grid">
-                      <InfoCard label="运行状态" value={statusLabel(runDetail.current?.run_status ?? "draft")} />
+                      <InfoCard
+                        label="运行状态"
+                        value={statusLabel(runDetail.current?.run_status ?? "draft")}
+                      />
                       <InfoCard
                         label="下一动作"
                         value={nextActionLabel(runDetail.current?.recommended_next_action)}
@@ -730,6 +952,10 @@ export default function Page() {
                       <InfoCard
                         label="尝试数量"
                         value={String(runDetail.attempts.length)}
+                      />
+                      <InfoCard
+                        label="状态更新时间"
+                        value={formatDateTime(selectedRunCurrentUpdatedAt)}
                       />
                       <InfoCard label="负责人" value={runDetail.run.owner_id} />
                       <InfoCard label="工作区" value={runDetail.run.workspace_root} />
@@ -871,12 +1097,15 @@ export default function Page() {
                       <button
                         type="button"
                         className="button button-secondary"
+                        disabled={refreshState.isRefreshing}
                         onClick={() => {
-                          void loadGoals();
-                          void loadGoalDetail(detail.goal.id);
+                          void refreshDashboard({
+                            goalId: detail.goal.id,
+                            runId: selectedRunId
+                          });
                         }}
                       >
-                        刷新
+                        {refreshState.isRefreshing ? "同步中..." : "刷新"}
                       </button>
                     </div>
                   }
@@ -1047,6 +1276,10 @@ function AttemptCard({
         <MiniMetric label="开始" value={formatDateTime(detail.attempt.started_at)} />
         <MiniMetric label="结束" value={formatDateTime(detail.attempt.ended_at)} />
         <MiniMetric
+          label="耗时"
+          value={formatAttemptElapsed(detail.attempt.started_at, detail.attempt.ended_at)}
+        />
+        <MiniMetric
           label="判断"
           value={statusLabel(detail.evaluation?.recommendation ?? "未判断")}
         />
@@ -1145,6 +1378,18 @@ function AttemptCard({
   );
 }
 
+function pickSelectedId<T>(
+  items: T[],
+  currentId: string | null,
+  readId: (item: T) => string
+): string | null {
+  if (currentId && items.some((item) => readId(item) === currentId)) {
+    return currentId;
+  }
+
+  return items[0] ? readId(items[0]) : null;
+}
+
 function splitLines(value: string): string[] {
   return value
     .split("\n")
@@ -1176,7 +1421,100 @@ function formatDateTime(value: string | null | undefined): string {
     return "未记录";
   }
 
-  return new Date(value).toLocaleString("zh-CN");
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    return "未记录";
+  }
+
+  return parsed.toLocaleString("zh-CN");
+}
+
+function toTimestamp(value: string | number | null | undefined): number | null {
+  if (value === null || value === undefined) {
+    return null;
+  }
+
+  const timestamp = typeof value === "number" ? value : new Date(value).getTime();
+  return Number.isFinite(timestamp) ? timestamp : null;
+}
+
+function formatClockTime(value: number | null): string {
+  if (value === null) {
+    return "未同步";
+  }
+
+  return new Date(value).toLocaleTimeString("zh-CN", {
+    hour12: false
+  });
+}
+
+function formatTimeOrFallback(value: number | null): string {
+  return value === null ? "未同步" : formatClockTime(value);
+}
+
+function formatDuration(durationMs: number): string {
+  const safeDuration = Math.max(0, durationMs);
+  const totalSeconds = Math.floor(safeDuration / 1000);
+  const days = Math.floor(totalSeconds / 86400);
+  const hours = Math.floor((totalSeconds % 86400) / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+
+  if (days > 0) {
+    return `${days} 天 ${hours} 小时`;
+  }
+
+  if (hours > 0) {
+    return `${hours} 小时 ${minutes} 分`;
+  }
+
+  if (minutes > 0) {
+    return `${minutes} 分 ${seconds} 秒`;
+  }
+
+  return `${seconds} 秒`;
+}
+
+function formatElapsed(
+  value: string | number | null | undefined,
+  nowTs: number
+): string {
+  const timestamp = toTimestamp(value);
+  if (timestamp === null) {
+    return "未开始";
+  }
+
+  return formatDuration(nowTs - timestamp);
+}
+
+function formatRelativeTime(
+  value: string | number | null | undefined,
+  nowTs: number
+): string {
+  const timestamp = toTimestamp(value);
+  if (timestamp === null) {
+    return "未记录";
+  }
+
+  const elapsed = Math.max(0, nowTs - timestamp);
+  if (elapsed < 3000) {
+    return "刚刚";
+  }
+
+  return `${formatDuration(elapsed)}前`;
+}
+
+function formatAttemptElapsed(
+  startedAt: string | null | undefined,
+  endedAt: string | null | undefined
+): string {
+  const start = toTimestamp(startedAt);
+  if (start === null) {
+    return "未开始";
+  }
+
+  const end = toTimestamp(endedAt) ?? Date.now();
+  return formatDuration(end - start);
 }
 
 function Panel({
