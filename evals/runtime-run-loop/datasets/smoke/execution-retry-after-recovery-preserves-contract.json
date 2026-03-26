@@ -1,0 +1,29 @@
+{
+  "id": "execution-retry-after-recovery-preserves-contract",
+  "description": "A steered execution retry after recovery must keep the last replayable execution contract instead of dropping verification commands.",
+  "driver": "execution_retry_after_recovery_preserves_contract",
+  "max_ticks": 12,
+  "expected": {
+    "run_status": "completed",
+    "waiting_for_human": false,
+    "recommended_next_action": null,
+    "attempt_types": ["research", "execution", "execution"],
+    "attempt_statuses": ["completed", "stopped", "completed"],
+    "verification_statuses": ["passed"],
+    "required_journal_types": [
+      "run.steer.queued",
+      "attempt.started",
+      "attempt.completed",
+      "attempt.verification.passed",
+      "attempt.checkpoint.created"
+    ],
+    "required_journal_counts": {
+      "run.steer.queued": 1,
+      "attempt.started": 1,
+      "attempt.completed": 1,
+      "attempt.failed": 0,
+      "attempt.verification.passed": 1,
+      "attempt.checkpoint.created": 1
+    }
+  }
+}

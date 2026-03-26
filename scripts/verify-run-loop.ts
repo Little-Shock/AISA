@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   createAttempt,
+  createRunSteer,
   createCurrentDecision,
   createRun,
   createRunJournalEntry,
@@ -24,8 +25,10 @@ import {
   listRunJournal,
   resolveWorkspacePaths,
   saveAttempt,
+  saveAttemptResult,
   saveCurrentDecision,
-  saveRun
+  saveRun,
+  saveRunSteer
 } from "../packages/state-store/src/index.js";
 
 type ScenarioDriver =
@@ -36,7 +39,8 @@ type ScenarioDriver =
   | "execution_checkpoint_blocked_dirty_workspace"
   | "execution_missing_verification_plan"
   | "execution_parse_failure"
-  | "orphaned_running_attempt";
+  | "orphaned_running_attempt"
+  | "execution_retry_after_recovery_preserves_contract";
 
 type ScenarioExpectation = {
   run_status: string;
@@ -114,7 +118,8 @@ class ScenarioAdapter {
       [
         "happy_path",
         "execution_checkpoint_blocked_dirty_workspace",
-        "execution_missing_verification_plan"
+        "execution_missing_verification_plan",
+        "execution_retry_after_recovery_preserves_contract"
       ].includes(this.driver) &&
       input.attempt.attempt_type === "execution"
     ) {
@@ -130,7 +135,8 @@ class ScenarioAdapter {
       this.driver === "running_attempt_owned_elsewhere" ||
       this.driver === "execution_parse_failure" ||
       this.driver === "execution_checkpoint_blocked_dirty_workspace" ||
-      this.driver === "execution_missing_verification_plan"
+      this.driver === "execution_missing_verification_plan" ||
+      this.driver === "execution_retry_after_recovery_preserves_contract"
         ? this.buildHappyPathWriteback(input.attempt)
         : this.buildStuckWriteback(nextCount);
 
@@ -333,6 +339,94 @@ async function seedOrphanedRunningAttempt(input: {
   );
 }
 
+async function seedExecutionRetryAfterRecoveryCase(input: {
+  run: Run;
+  workspacePaths: ReturnType<typeof resolveWorkspacePaths>;
+  driver: ScenarioDriver;
+}): Promise<void> {
+  const researchAttempt = updateAttempt(
+    createAttempt({
+      run_id: input.run.id,
+      attempt_type: "research",
+      worker: "fake-codex",
+      objective: "Find the next execution step and leave a replayable contract.",
+      success_criteria: input.run.success_criteria,
+      workspace_root: input.run.workspace_root
+    }),
+    {
+      status: "completed",
+      started_at: new Date().toISOString(),
+      ended_at: new Date().toISOString()
+    }
+  );
+
+  await saveAttempt(input.workspacePaths, researchAttempt);
+  const researchWriteback = (
+    await new ScenarioAdapter(input.driver).runAttemptTask({
+      run: input.run,
+      attempt: researchAttempt
+    })
+  ).writeback;
+  await saveAttemptResult(
+    input.workspacePaths,
+    input.run.id,
+    researchAttempt.id,
+    researchWriteback
+  );
+
+  const stoppedExecutionAttempt = updateAttempt(
+    createAttempt({
+      run_id: input.run.id,
+      attempt_type: "execution",
+      worker: "fake-codex",
+      objective:
+        researchWriteback.next_attempt_contract?.objective ??
+        "Retry the previously planned execution step.",
+      success_criteria:
+        researchWriteback.next_attempt_contract?.success_criteria ??
+        input.run.success_criteria,
+      workspace_root: input.run.workspace_root
+    }),
+    {
+      status: "stopped",
+      started_at: new Date().toISOString(),
+      ended_at: new Date().toISOString()
+    }
+  );
+
+  await saveAttempt(input.workspacePaths, stoppedExecutionAttempt);
+
+  const runSteer = createRunSteer({
+    run_id: input.run.id,
+    content:
+      "Retry the same execution step after recovery. Keep the original replayable verification contract."
+  });
+  await saveRunSteer(input.workspacePaths, runSteer);
+
+  await saveCurrentDecision(
+    input.workspacePaths,
+    createCurrentDecision({
+      run_id: input.run.id,
+      run_status: "running",
+      latest_attempt_id: stoppedExecutionAttempt.id,
+      recommended_next_action: "apply_steer",
+      recommended_attempt_type: "execution",
+      summary: "Steer queued. Loop will use it in the next attempt.",
+      waiting_for_human: false
+    })
+  );
+  await appendRunJournal(
+    input.workspacePaths,
+    createRunJournalEntry({
+      run_id: input.run.id,
+      type: "run.steer.queued",
+      payload: {
+        content: runSteer.content
+      }
+    })
+  );
+}
+
 async function loadSmokeCases(): Promise<ScenarioCase[]> {
   const smokeDir = join(process.cwd(), "evals", "runtime-run-loop", "datasets", "smoke");
   const entries = await readdir(smokeDir);
@@ -361,13 +455,22 @@ async function runCase(scenario: ScenarioCase): Promise<ScenarioObservation> {
 
   if (
     scenario.driver === "happy_path" ||
-    scenario.driver === "execution_missing_verification_plan"
+    scenario.driver === "execution_missing_verification_plan" ||
+    scenario.driver === "execution_retry_after_recovery_preserves_contract"
   ) {
     await initializeGitRepo(rootDir, false);
   }
 
   if (scenario.driver === "orphaned_running_attempt") {
     await seedOrphanedRunningAttempt({ run, workspacePaths });
+  }
+
+  if (scenario.driver === "execution_retry_after_recovery_preserves_contract") {
+    await seedExecutionRetryAfterRecoveryCase({
+      run,
+      workspacePaths,
+      driver: scenario.driver
+    });
   }
 
   const orchestrator = new Orchestrator(

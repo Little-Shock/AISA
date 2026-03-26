@@ -445,6 +445,10 @@ export class Orchestrator {
         continue;
       }
 
+      if (this.hasActiveAttemptForRun(run.id)) {
+        continue;
+      }
+
       const nextAttempt = await this.planNextAttempt(run.id, current, attempts);
       if (!nextAttempt) {
         continue;
@@ -525,7 +529,9 @@ export class Orchestrator {
       latestResult?.next_attempt_contract
     )
       ? latestResult.next_attempt_contract
-      : null;
+      : latestResult
+        ? null
+        : await this.findLatestExecutionContractDraft(run.id, attempts);
 
     if (attempts.length === 0) {
       if (queuedSteers.length > 0) {
@@ -1169,6 +1175,24 @@ export class Orchestrator {
     return latestAttempt ?? null;
   }
 
+  private async findLatestExecutionContractDraft(
+    runId: string,
+    attempts: Attempt[]
+  ): Promise<AttemptContractDraft | null> {
+    const orderedAttempts = [...attempts].sort((left, right) =>
+      right.created_at.localeCompare(left.created_at)
+    );
+
+    for (const attempt of orderedAttempts) {
+      const result = await getAttemptResult(this.workspacePaths, runId, attempt.id);
+      if (isExecutionContractDraftReady(result?.next_attempt_contract)) {
+        return result.next_attempt_contract;
+      }
+    }
+
+    return null;
+  }
+
   private buildAttemptContract(
     run: Run,
     attempt: Attempt,
@@ -1238,6 +1262,17 @@ export class Orchestrator {
 
   private getActiveAttemptKey(runId: string, attemptId: string): string {
     return `${runId}:${attemptId}`;
+  }
+
+  private hasActiveAttemptForRun(runId: string): boolean {
+    const prefix = `${runId}:`;
+    for (const activeKey of this.activeAttempts) {
+      if (activeKey.startsWith(prefix)) {
+        return true;
+      }
+    }
+
+    return false;
   }
 
   private async isAttemptHeartbeatFresh(
