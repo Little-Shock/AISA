@@ -169,9 +169,12 @@ export function evaluateAttempt(input: {
   );
   const goalProgress =
     verificationStatus === "passed" ? rawGoalProgress : Math.min(rawGoalProgress, 0.34);
+  const hasConcreteNextStep = result.recommended_next_steps.length > 0;
   const recommendation =
     verificationStatus === "passed"
-      ? goalProgress >= 0.75 && result.questions.length === 0
+      ? hasConcreteNextStep
+        ? "continue"
+        : goalProgress >= 0.75 && result.questions.length === 0
         ? "complete"
         : goalProgress >= 0.45
           ? "wait_human"

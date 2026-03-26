@@ -76,17 +76,28 @@ export async function buildServer(
   const app = Fastify({
     logger: true
   });
+  let orchestratorStarted = false;
 
   await ensureWorkspace(workspacePaths);
-  if (options.startOrchestrator !== false) {
-    orchestrator.start();
-  }
   await app.register(cors, {
     origin: true
   });
 
+  if (options.startOrchestrator !== false) {
+    app.addHook("onListen", async () => {
+      if (orchestratorStarted) {
+        return;
+      }
+      orchestrator.start();
+      orchestratorStarted = true;
+    });
+  }
+
   app.addHook("onClose", async () => {
-    orchestrator.stop();
+    if (orchestratorStarted) {
+      orchestrator.stop();
+      orchestratorStarted = false;
+    }
   });
 
   app.get("/health", async () => ({

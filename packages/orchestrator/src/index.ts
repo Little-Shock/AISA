@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { stat } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
 import { relative, resolve } from "node:path";
 import {
   createAttempt,
@@ -25,6 +25,7 @@ import {
   type AttemptRuntimeVerification,
   type Branch,
   type CurrentDecision,
+  type ExecutionVerificationPlan,
   type EvalSpec,
   type Goal,
   type ReviewPacketArtifact,
@@ -583,7 +584,7 @@ export class Orchestrator {
         });
         return {
           attempt,
-          contract: this.buildAttemptContract(run, attempt, null)
+          contract: await this.buildAttemptContract(run, attempt, null, "start_first_attempt", null)
         };
       }
 
@@ -597,7 +598,7 @@ export class Orchestrator {
       });
       return {
         attempt,
-        contract: this.buildAttemptContract(run, attempt, null)
+        contract: await this.buildAttemptContract(run, attempt, null, "start_first_attempt", null)
       };
     }
 
@@ -616,9 +617,11 @@ export class Orchestrator {
             latestResult,
             queuedSteers.map((runSteer) => runSteer.content)
           )
-        : attemptType === "execution" && nextExecutionDraft?.objective
-          ? nextExecutionDraft.objective
-          : this.buildPlannedAttemptObjective(run, current, attemptType, latestResult);
+          : attemptType === "execution" && nextExecutionDraft?.objective
+            ? nextExecutionDraft.objective
+            : attemptType === "execution" && latestResult?.recommended_next_steps[0]
+              ? latestResult.recommended_next_steps[0]
+              : this.buildPlannedAttemptObjective(run, current, attemptType, latestResult);
 
     if (!objective) {
       return null;
@@ -637,7 +640,13 @@ export class Orchestrator {
     });
     return {
       attempt,
-      contract: this.buildAttemptContract(run, attempt, nextExecutionDraft)
+      contract: await this.buildAttemptContract(
+        run,
+        attempt,
+        nextExecutionDraft,
+        current.recommended_next_action,
+        latestAttempt
+      )
     };
   }
 
@@ -1479,35 +1488,56 @@ export class Orchestrator {
     return null;
   }
 
-  private buildAttemptContract(
+  private async buildAttemptContract(
     run: Run,
     attempt: Attempt,
-    nextExecutionDraft: AttemptContractDraft | null
-  ): AttemptContract {
+    nextExecutionDraft: AttemptContractDraft | null,
+    recommendedNextAction: string | null,
+    latestAttempt: Attempt | null
+  ): Promise<AttemptContract> {
     if (attempt.attempt_type === "execution") {
+      const reusableExecutionContract =
+        latestAttempt?.attempt_type === "execution" &&
+        ["retry_attempt", "continue_execution", "apply_steer"].includes(
+          recommendedNextAction ?? ""
+        )
+          ? await getAttemptContract(this.workspacePaths, run.id, latestAttempt.id)
+          : null;
       const draft = isExecutionContractDraftReady(nextExecutionDraft)
         ? nextExecutionDraft
         : null;
+      const inferredVerificationPlan =
+        reusableExecutionContract?.verification_plan ??
+        (await this.inferDefaultExecutionVerificationPlan(run.workspace_root));
       return createAttemptContract({
         attempt_id: attempt.id,
         run_id: run.id,
         attempt_type: attempt.attempt_type,
-        objective: draft?.objective ?? attempt.objective,
-        success_criteria: draft?.success_criteria ?? attempt.success_criteria,
+        objective:
+          draft?.objective ??
+          reusableExecutionContract?.objective ??
+          attempt.objective,
+        success_criteria:
+          draft?.success_criteria ??
+          reusableExecutionContract?.success_criteria ??
+          attempt.success_criteria,
         required_evidence:
-          draft?.required_evidence ?? [
+          draft?.required_evidence ??
+          reusableExecutionContract?.required_evidence ?? [
             "Leave git-visible workspace changes tied to the objective.",
             "Leave artifacts that show what changed.",
             "Pass the replayable verification commands locked into this contract."
           ],
         forbidden_shortcuts:
-          draft?.forbidden_shortcuts ?? [
+          draft?.forbidden_shortcuts ??
+          reusableExecutionContract?.forbidden_shortcuts ?? [
             "Do not claim success without replayable verification commands.",
             "Do not treat unchanged workspace state as a completed execution step."
           ],
         expected_artifacts:
-          draft?.expected_artifacts ?? ["changed files visible in git status"],
-        verification_plan: draft?.verification_plan
+          draft?.expected_artifacts ??
+          reusableExecutionContract?.expected_artifacts ?? ["changed files visible in git status"],
+        verification_plan: draft?.verification_plan ?? inferredVerificationPlan
       });
     }
 
@@ -1527,6 +1557,52 @@ export class Orchestrator {
       ],
       expected_artifacts: ["grounded findings or notes"]
     });
+  }
+
+  private async inferDefaultExecutionVerificationPlan(
+    workspaceRoot: string
+  ): Promise<ExecutionVerificationPlan | undefined> {
+    const packageJsonPath = resolve(workspaceRoot, "package.json");
+    let packageJson: {
+      scripts?: Record<string, string>;
+    } | null = null;
+
+    try {
+      packageJson = JSON.parse(await readFile(packageJsonPath, "utf8")) as {
+        scripts?: Record<string, string>;
+      };
+    } catch {
+      return undefined;
+    }
+
+    const scripts = packageJson?.scripts ?? {};
+    const commands: ExecutionVerificationPlan["commands"] = [];
+
+    if (typeof scripts.typecheck === "string" && scripts.typecheck.length > 0) {
+      commands.push({
+        purpose: "typecheck the workspace after the change",
+        command: "pnpm typecheck"
+      });
+    }
+
+    if (typeof scripts["verify:runtime"] === "string" && scripts["verify:runtime"].length > 0) {
+      commands.push({
+        purpose: "replay the runtime regression suite after the change",
+        command: "pnpm verify:runtime"
+      });
+    } else if (typeof scripts.test === "string" && scripts.test.length > 0) {
+      commands.push({
+        purpose: "run the workspace test suite after the change",
+        command: "pnpm test"
+      });
+    } else if (typeof scripts.build === "string" && scripts.build.length > 0) {
+      commands.push({
+        purpose: "build the workspace after the change",
+        command: "pnpm build"
+      });
+    }
+
+    return commands.length > 0 ? { commands } : undefined;
   }
 
   private assertDispatchableAttemptContract(
@@ -1691,12 +1767,12 @@ export class Orchestrator {
         "Execution auto-checkpoint was blocked and needs workspace diagnosis.";
 
       return {
-        next_action: "continue_research",
-        attempt_type: "research",
+        next_action: "retry_attempt",
+        attempt_type: "execution",
         summary:
-          "人工窗口超时，系统自动转入工作区归因研究，先解决提交现场，再决定如何继续推进。",
+          "人工窗口超时，系统直接继续执行，先把提交现场和工作区阻塞处理掉。",
         blocking_reason: checkpointMessage,
-        reason: "checkpoint_blocked_needs_workspace_research"
+        reason: "checkpoint_blocked_retries_execution"
       };
     }
 
@@ -1715,14 +1791,14 @@ export class Orchestrator {
     if (latestAttempt.status === "failed") {
       if (latestAttempt.attempt_type === "execution") {
         return {
-          next_action: "continue_research",
-          attempt_type: "research",
+          next_action: "retry_attempt",
+          attempt_type: "execution",
           summary:
-            "人工窗口超时，系统自动进入怀疑式研究，先解释上一轮执行为什么失败，再决定下一步。",
+            "人工窗口超时，系统自动继续执行并直接处理上一轮执行卡点。",
           blocking_reason:
             input.current.blocking_reason ??
-            "上一轮执行失败，先审查失败原因和约束是否冲突。",
-          reason: "failed_execution_needs_skeptical_research"
+            "上一轮执行失败，继续执行并直接修掉当前阻塞。",
+          reason: "failed_execution_retries_directly"
         };
       }
 
@@ -1738,6 +1814,27 @@ export class Orchestrator {
     }
 
     if (latestAttempt.status === "completed") {
+      const nextAttemptType =
+        input.current.recommended_attempt_type ?? latestAttempt.attempt_type;
+      if (nextAttemptType === "execution") {
+        return {
+          next_action:
+            latestAttempt.attempt_type === "research" ? "start_execution" : "continue_execution",
+          attempt_type: "execution",
+          summary:
+            latestAttempt.attempt_type === "research"
+              ? "人工窗口超时，系统直接进入下一轮执行，不再重复方案研究。"
+              : "人工窗口超时，系统继续执行当前已收敛的下一步。",
+          blocking_reason:
+            input.current.blocking_reason ??
+            "已有明确的下一步执行方向，直接进入 execution。",
+          reason:
+            latestAttempt.attempt_type === "research"
+              ? "completed_research_starts_execution"
+              : "completed_execution_continues_execution"
+        };
+      }
+
       return {
         next_action: "continue_research",
         attempt_type: "research",

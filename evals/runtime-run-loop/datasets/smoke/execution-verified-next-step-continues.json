@@ -1,0 +1,25 @@
+{
+  "id": "execution-verified-next-step-continues",
+  "description": "A verified execution result with a concrete next step must keep the loop in execution and reuse the replayable contract on the next attempt.",
+  "driver": "execution_verified_next_step_continues",
+  "max_ticks": 18,
+  "expected": {
+    "run_status": "completed",
+    "waiting_for_human": false,
+    "recommended_next_action": null,
+    "attempt_types": ["research", "execution", "execution"],
+    "attempt_statuses": ["completed", "completed", "completed"],
+    "verification_statuses": ["not_applicable", "passed", "passed"],
+    "required_journal_types": [
+      "attempt.completed",
+      "attempt.verification.passed",
+      "attempt.checkpoint.created"
+    ],
+    "required_journal_counts": {
+      "attempt.started": 3,
+      "attempt.completed": 3,
+      "attempt.verification.passed": 2,
+      "attempt.checkpoint.created": 2
+    }
+  }
+}

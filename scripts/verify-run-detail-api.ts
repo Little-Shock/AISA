@@ -13,6 +13,7 @@ import {
 import {
   appendRunJournal,
   ensureWorkspace,
+  listAttempts,
   resolveAttemptPaths,
   resolveWorkspacePaths,
   saveAttempt,
@@ -305,6 +306,45 @@ async function main(): Promise<void> {
     );
   } finally {
     await app.close();
+  }
+
+  const idleRootDir = await mkdtemp(join(tmpdir(), "aisa-run-detail-api-idle-"));
+  const idleWorkspacePaths = resolveWorkspacePaths(idleRootDir);
+  await ensureWorkspace(idleWorkspacePaths);
+  const idleRun = createRun({
+    title: "Control API listen gate verification",
+    description: "Ensure orchestrator stays idle until the HTTP server is actually listening.",
+    success_criteria: ["Do not dispatch attempts before listen succeeds."],
+    constraints: [],
+    owner_id: "test-owner",
+    workspace_root: idleRootDir
+  });
+  await saveRun(idleWorkspacePaths, idleRun);
+  await saveCurrentDecision(
+    idleWorkspacePaths,
+    createCurrentDecision({
+      run_id: idleRun.id,
+      run_status: "running",
+      recommended_next_action: "start_first_attempt",
+      recommended_attempt_type: "research",
+      summary: "Prepared to verify the listen gate."
+    })
+  );
+
+  const idleApp = await buildServer({
+    workspaceRoot: idleRootDir
+  });
+
+  try {
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    const idleAttempts = await listAttempts(idleWorkspacePaths, idleRun.id);
+    assert.equal(
+      idleAttempts.length,
+      0,
+      "orchestrator should stay idle until app.listen succeeds"
+    );
+  } finally {
+    await idleApp.close();
   }
 }
 

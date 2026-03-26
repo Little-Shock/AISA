@@ -42,6 +42,7 @@ type ScenarioDriver =
   | "running_attempt_owned_elsewhere"
   | "research_stall"
   | "research_command_failure"
+  | "execution_verified_next_step_continues"
   | "execution_checkpoint_blocked_dirty_workspace"
   | "execution_missing_verification_plan"
   | "execution_parse_failure"
@@ -337,6 +338,7 @@ class ScenarioAdapter {
     if (
       [
         "happy_path",
+        "execution_verified_next_step_continues",
         "execution_checkpoint_blocked_dirty_workspace",
         "execution_missing_verification_plan",
         "execution_retry_after_recovery_preserves_contract"
@@ -353,11 +355,12 @@ class ScenarioAdapter {
     const writeback =
       this.driver === "happy_path" ||
       this.driver === "running_attempt_owned_elsewhere" ||
+      this.driver === "execution_verified_next_step_continues" ||
       this.driver === "execution_parse_failure" ||
       this.driver === "execution_checkpoint_blocked_dirty_workspace" ||
       this.driver === "execution_missing_verification_plan" ||
       this.driver === "execution_retry_after_recovery_preserves_contract"
-        ? this.buildHappyPathWriteback(input.attempt)
+        ? this.buildHappyPathWriteback(input.attempt, nextCount)
         : this.buildStuckWriteback(nextCount);
 
     return {
@@ -367,7 +370,7 @@ class ScenarioAdapter {
     };
   }
 
-  private buildHappyPathWriteback(attempt: Attempt): WorkerWriteback {
+  private buildHappyPathWriteback(attempt: Attempt, passNumber: number): WorkerWriteback {
     if (attempt.attempt_type === "research") {
       return {
         summary: "Repository understanding is strong enough to start execution.",
@@ -403,6 +406,23 @@ class ScenarioAdapter {
           }
         },
         artifacts: []
+      };
+    }
+
+    if (this.driver === "execution_verified_next_step_continues" && passNumber === 2) {
+      return {
+        summary: "Executed the current step and surfaced the next concrete execution move.",
+        findings: [
+          {
+            type: "fact",
+            content: "Patched the target code path",
+            evidence: ["src/app.ts", "npm test"]
+          }
+        ],
+        questions: [],
+        recommended_next_steps: ["Apply the next concrete execution step without reopening research."],
+        confidence: 0.88,
+        artifacts: [{ type: "patch", path: "artifacts/diff.patch" }]
       };
     }
 
@@ -961,6 +981,7 @@ async function runCase(scenario: ScenarioCase): Promise<ScenarioObservation> {
 
   if (
     scenario.driver === "happy_path" ||
+    scenario.driver === "execution_verified_next_step_continues" ||
     scenario.driver === "execution_missing_verification_plan" ||
     scenario.driver === "execution_retry_after_recovery_preserves_contract"
   ) {

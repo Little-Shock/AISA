@@ -35,6 +35,48 @@ type CaseResult = {
   error?: string;
 };
 
+class AutoResumeExecutionAdapter {
+  readonly type = "fake-codex";
+
+  async runAttemptTask(input: {
+    run: Run;
+    attempt: Attempt;
+  }): Promise<{
+    writeback: WorkerWriteback;
+    reportMarkdown: string;
+    exitCode: number;
+  }> {
+    if (input.attempt.attempt_type !== "execution") {
+      throw new Error("Failed execution should auto-resume through execution.");
+    }
+
+    await writeFile(
+      join(input.run.workspace_root, "execution-change.md"),
+      `execution change from ${input.attempt.id}\n`,
+      "utf8"
+    );
+
+    return {
+      writeback: {
+        summary: "Execution retry fixed the blocker and left replayable verification evidence.",
+        findings: [
+          {
+            type: "fact",
+            content: "The execution retry wrote the intended workspace artifact.",
+            evidence: ["execution-change.md"]
+          }
+        ],
+        questions: [],
+        recommended_next_steps: [],
+        confidence: 0.88,
+        artifacts: [{ type: "patch", path: "artifacts/diff.patch" }]
+      },
+      reportMarkdown: "# fake",
+      exitCode: 0
+    };
+  }
+}
+
 class LowSignalResearchAdapter {
   readonly type = "fake-codex";
 
@@ -68,37 +110,46 @@ class LowSignalResearchAdapter {
   }
 }
 
-class CheckpointResearchAdapter {
+class CheckpointExecutionAdapter {
   readonly type = "fake-codex";
 
-  async runAttemptTask(input: { attempt: Attempt }): Promise<{
+  async runAttemptTask(input: {
+    run: Run;
+    attempt: Attempt;
+  }): Promise<{
     writeback: WorkerWriteback;
     reportMarkdown: string;
     exitCode: number;
   }> {
-    if (input.attempt.attempt_type !== "research") {
-      throw new Error("Checkpoint auto-resume should dispatch research first.");
+    if (input.attempt.attempt_type !== "execution") {
+      throw new Error("Checkpoint auto-resume should keep going through execution.");
     }
 
     assert.match(
       input.attempt.objective,
-      /clean git workspace|提交现场|区分哪些改动属于这轮目标/u
+      /clean git workspace|提交现场|checkpoint/u
+    );
+
+    await writeFile(
+      join(input.run.workspace_root, "execution-change.md"),
+      `execution change from ${input.attempt.id}\n`,
+      "utf8"
     );
 
     return {
       writeback: {
-        summary: "Dirty workspace blocker was diagnosed and needs a stronger execution contract.",
+        summary: "Checkpoint blocker was handled inside execution and the run can keep moving.",
         findings: [
           {
             type: "fact",
-            content: "Checkpoint blocker came from preexisting workspace changes.",
-            evidence: ["attempt.checkpoint.blocked"]
+            content: "The resumed execution left a replayable workspace change.",
+            evidence: ["attempt.checkpoint.blocked", "execution-change.md"]
           }
         ],
         questions: [],
-        recommended_next_steps: ["Prepare a replayable execution contract that isolates the dirty workspace."],
-        confidence: 0.72,
-        artifacts: []
+        recommended_next_steps: [],
+        confidence: 0.8,
+        artifacts: [{ type: "patch", path: "artifacts/diff.patch" }]
       },
       reportMarkdown: "# fake",
       exitCode: 0
@@ -159,6 +210,32 @@ async function settle(orchestrator: Orchestrator, iterations: number, delayMs = 
   }
 }
 
+async function settleUntil(
+  orchestrator: Orchestrator,
+  input: {
+    workspacePaths: ReturnType<typeof resolveWorkspacePaths>;
+    runId: string;
+    predicate: (runStatus: string | null, waitingForHuman: boolean) => boolean;
+    timeoutMs?: number;
+    delayMs?: number;
+  }
+): Promise<void> {
+  const timeoutMs = input.timeoutMs ?? 10_000;
+  const delayMs = input.delayMs ?? 80;
+  const deadline = Date.now() + timeoutMs;
+
+  while (Date.now() < deadline) {
+    await orchestrator.tick();
+    const current = await getCurrentDecision(input.workspacePaths, input.runId);
+    if (input.predicate(current?.run_status ?? null, current?.waiting_for_human ?? false)) {
+      return;
+    }
+    await wait(delayMs);
+  }
+
+  throw new Error(`Timed out while waiting for run ${input.runId} to reach the expected state.`);
+}
+
 async function bootstrapRun(title: string): Promise<{
   run: Run;
   workspacePaths: ReturnType<typeof resolveWorkspacePaths>;
@@ -210,6 +287,26 @@ async function initializeGitRepo(rootDir: string): Promise<void> {
   await runCommand(rootDir, ["git", "-C", rootDir, "commit", "-m", "test: seed autonomy repo"]);
 }
 
+async function writeExecutionWorkspacePackage(rootDir: string): Promise<void> {
+  await writeFile(
+    join(rootDir, "package.json"),
+    JSON.stringify(
+      {
+        name: "aisa-autonomy-temp",
+        private: true,
+        packageManager: "pnpm@10.27.0",
+        scripts: {
+          typecheck: 'node -e "process.exit(0)"',
+          test: 'node -e "process.exit(0)"'
+        }
+      },
+      null,
+      2
+    ) + "\n",
+    "utf8"
+  );
+}
+
 async function runCommand(rootDir: string, args: string[]): Promise<void> {
   await new Promise<void>((resolve, reject) => {
     const [command, ...commandArgs] = args;
@@ -236,7 +333,9 @@ async function runCommand(rootDir: string, args: string[]): Promise<void> {
 }
 
 async function verifyFailedExecutionAutoResumes(): Promise<void> {
-  const { run, workspacePaths } = await bootstrapRun("failed-execution-auto-resume");
+  const { run, workspacePaths, rootDir } = await bootstrapRun("failed-execution-auto-resume");
+  await writeExecutionWorkspacePackage(rootDir);
+  await initializeGitRepo(rootDir);
   const failedExecution = updateAttempt(
     createAttempt({
       run_id: run.id,
@@ -281,7 +380,7 @@ async function verifyFailedExecutionAutoResumes(): Promise<void> {
 
   const orchestrator = new Orchestrator(
     workspacePaths,
-    new LowSignalResearchAdapter() as never,
+    new AutoResumeExecutionAdapter() as never,
     undefined,
     60_000,
     {
@@ -291,7 +390,13 @@ async function verifyFailedExecutionAutoResumes(): Promise<void> {
   );
 
   await wait(40);
-  await settle(orchestrator, 3);
+  await settleUntil(orchestrator, {
+    workspacePaths,
+    runId: run.id,
+    predicate: (runStatus) => runStatus === "completed",
+    timeoutMs: 15_000,
+    delayMs: 120
+  });
 
   const current = await getCurrentDecision(workspacePaths, run.id);
   const attempts = await listAttempts(workspacePaths, run.id);
@@ -299,15 +404,11 @@ async function verifyFailedExecutionAutoResumes(): Promise<void> {
 
   assert.ok(current, "current decision must exist");
   assert.equal(current.waiting_for_human, false, "run should auto resume");
-  assert.equal(current.run_status, "running", "run should be back in running state");
-  assert.equal(
-    current.recommended_next_action,
-    "retry_attempt",
-    "failed execution should resume through skeptical research"
-  );
+  assert.equal(current.run_status, "completed", "run should finish after the resumed execution");
+  assert.equal(current.recommended_next_action, null);
   assert.deepEqual(
     attempts.map((attempt) => attempt.attempt_type),
-    ["execution", "research"]
+    ["execution", "execution"]
   );
   assert.deepEqual(
     attempts.map((attempt) => attempt.status),
@@ -316,6 +417,10 @@ async function verifyFailedExecutionAutoResumes(): Promise<void> {
   assert.ok(
     journal.some((entry) => entry.type === "run.auto_resume.scheduled"),
     "expected an automatic resume event"
+  );
+  assert.ok(
+    journal.some((entry) => entry.type === "attempt.verification.passed"),
+    "resumed execution should pass runtime verification with the inferred contract"
   );
 }
 
@@ -374,8 +479,9 @@ async function verifyRepeatedAutoResumeExhausts(): Promise<void> {
   );
 }
 
-async function verifyCheckpointBlockerAutoResumesIntoResearch(): Promise<void> {
-  const { run, workspacePaths } = await bootstrapRun("checkpoint-blocker-auto-resume");
+async function verifyCheckpointBlockerAutoResumesIntoExecution(): Promise<void> {
+  const { run, workspacePaths, rootDir } = await bootstrapRun("checkpoint-blocker-auto-resume");
+  await initializeGitRepo(rootDir);
   const completedExecution = updateAttempt(
     createAttempt({
       run_id: run.id,
@@ -393,6 +499,30 @@ async function verifyCheckpointBlockerAutoResumesIntoResearch(): Promise<void> {
   );
 
   await saveAttempt(workspacePaths, completedExecution);
+  await saveAttemptContract(
+    workspacePaths,
+    createAttemptContract({
+      attempt_id: completedExecution.id,
+      run_id: run.id,
+      attempt_type: "execution",
+      objective: completedExecution.objective,
+      success_criteria: completedExecution.success_criteria,
+      required_evidence: [
+        "git-visible workspace changes",
+        "a replayable verification command that checks the execution change"
+      ],
+      expected_artifacts: ["execution-change.md"],
+      verification_plan: {
+        commands: [
+          {
+            purpose: "confirm the execution change was written",
+            command:
+              "test -f execution-change.md && rg -n '^execution change from' execution-change.md"
+          }
+        ]
+      }
+    })
+  );
   await saveCurrentDecision(
     workspacePaths,
     createCurrentDecision({
@@ -423,7 +553,7 @@ async function verifyCheckpointBlockerAutoResumesIntoResearch(): Promise<void> {
 
   const orchestrator = new Orchestrator(
     workspacePaths,
-    new CheckpointResearchAdapter() as never,
+    new CheckpointExecutionAdapter() as never,
     undefined,
     60_000,
     {
@@ -433,24 +563,25 @@ async function verifyCheckpointBlockerAutoResumesIntoResearch(): Promise<void> {
   );
 
   await wait(40);
-  await orchestrator.tick();
-  await wait(30);
-  await orchestrator.tick();
-  await wait(80);
-  await orchestrator.tick();
-  await wait(40);
+  await settleUntil(orchestrator, {
+    workspacePaths,
+    runId: run.id,
+    predicate: (runStatus) => runStatus === "completed",
+    timeoutMs: 10_000,
+    delayMs: 80
+  });
 
   const current = await getCurrentDecision(workspacePaths, run.id);
   const attempts = await listAttempts(workspacePaths, run.id);
   const journal = await listRunJournal(workspacePaths, run.id);
 
   assert.ok(current, "current decision must exist");
-  assert.equal(current.waiting_for_human, false, "checkpoint blocker should auto-resume into research");
-  assert.equal(current.run_status, "running");
-  assert.equal(current.recommended_next_action, "continue_research");
+  assert.equal(current.waiting_for_human, false, "checkpoint blocker should auto-resume into execution");
+  assert.equal(current.run_status, "completed");
+  assert.equal(current.recommended_next_action, null);
   assert.deepEqual(
     attempts.map((attempt) => attempt.attempt_type),
-    ["execution", "research"]
+    ["execution", "execution"]
   );
   assert.deepEqual(
     attempts.map((attempt) => attempt.status),
@@ -677,8 +808,8 @@ async function main(): Promise<void> {
       run: verifyRepeatedAutoResumeExhausts
     },
     {
-      id: "checkpoint_blocker_auto_resumes_into_research",
-      run: verifyCheckpointBlockerAutoResumesIntoResearch
+      id: "checkpoint_blocker_auto_resumes_execution",
+      run: verifyCheckpointBlockerAutoResumesIntoExecution
     },
     {
       id: "recovery_auto_resumes_execution",
