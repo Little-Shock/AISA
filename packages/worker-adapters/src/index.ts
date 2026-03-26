@@ -26,7 +26,6 @@ export interface CodexCliConfig {
   profile?: string;
   sandbox: "read-only" | "workspace-write" | "danger-full-access";
   skipGitRepoCheck: boolean;
-  timeoutMs: number;
 }
 
 export interface BranchExecutionResult {
@@ -257,10 +256,6 @@ export class CodexCliWorkerAdapter {
         shell: false
       });
 
-      const timer = setTimeout(() => {
-        child.kill("SIGTERM");
-      }, this.config.timeoutMs);
-
       child.stdout.on("data", (chunk) => {
         stdoutStream.write(chunk);
       });
@@ -270,12 +265,10 @@ export class CodexCliWorkerAdapter {
       });
 
       child.on("error", (error) => {
-        clearTimeout(timer);
         reject(error);
       });
 
       child.on("close", (code) => {
-        clearTimeout(timer);
         resolve(code ?? 1);
       });
 
@@ -388,10 +381,6 @@ export class CodexCliWorkerAdapter {
         shell: false
       });
 
-      const timer = setTimeout(() => {
-        child.kill("SIGTERM");
-      }, this.config.timeoutMs);
-
       child.stdout.on("data", (chunk) => {
         stdoutStream.write(chunk);
       });
@@ -401,12 +390,10 @@ export class CodexCliWorkerAdapter {
       });
 
       child.on("error", (error) => {
-        clearTimeout(timer);
         reject(error);
       });
 
       child.on("close", (code) => {
-        clearTimeout(timer);
         resolve(code ?? 1);
       });
 
@@ -449,8 +436,7 @@ export function loadCodexCliConfig(env: NodeJS.ProcessEnv): CodexCliConfig {
     profile: env.CODEX_PROFILE,
     sandbox:
       (env.CODEX_SANDBOX as CodexCliConfig["sandbox"] | undefined) ?? "read-only",
-    skipGitRepoCheck: env.CODEX_SKIP_GIT_REPO_CHECK !== "false",
-    timeoutMs: Number(env.CODEX_TIMEOUT_MS ?? "900000")
+    skipGitRepoCheck: env.CODEX_SKIP_GIT_REPO_CHECK !== "false"
   };
 }
 

@@ -8,7 +8,10 @@ import {
   resolveAttemptPaths,
   resolveWorkspacePaths
 } from "../packages/state-store/src/index.ts";
-import { CodexCliWorkerAdapter } from "../packages/worker-adapters/src/index.ts";
+import {
+  CodexCliWorkerAdapter,
+  loadCodexCliConfig
+} from "../packages/worker-adapters/src/index.ts";
 
 async function main(): Promise<void> {
   const rootDir = await mkdtemp(join(tmpdir(), "aisa-worker-adapter-"));
@@ -47,8 +50,7 @@ async function main(): Promise<void> {
   const adapter = new CodexCliWorkerAdapter({
     command: fakeCodex,
     sandbox: "read-only",
-    skipGitRepoCheck: true,
-    timeoutMs: 5_000
+    skipGitRepoCheck: true
   });
 
   await assert.rejects(
@@ -82,6 +84,21 @@ async function main(): Promise<void> {
     prompt,
     /Keep JSON keys, enum-like machine values, file paths, shell commands, and evidence strings stable/
   );
+
+  const loadedConfig = loadCodexCliConfig({
+    CODEX_CLI_COMMAND: "codex-test",
+    CODEX_SANDBOX: "workspace-write",
+    CODEX_MODEL: "gpt-5.4",
+    CODEX_SKIP_GIT_REPO_CHECK: "false",
+    CODEX_TIMEOUT_MS: "1"
+  });
+  assert.deepEqual(loadedConfig, {
+    command: "codex-test",
+    model: "gpt-5.4",
+    profile: undefined,
+    sandbox: "workspace-write",
+    skipGitRepoCheck: false
+  });
 
   console.log(
     JSON.stringify(
