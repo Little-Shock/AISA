@@ -1,5 +1,14 @@
 import { createWriteStream, constants as fsConstants } from "node:fs";
-import { access, chmod, mkdir, readFile, symlink, writeFile } from "node:fs/promises";
+import {
+  access,
+  chmod,
+  lstat,
+  mkdir,
+  readFile,
+  readlink,
+  symlink,
+  writeFile
+} from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { join } from "node:path";
 import type {
@@ -135,7 +144,7 @@ export async function prepareResearchShellGuard(input: {
       continue;
     }
 
-    await symlink(commandPath, join(binDir, command));
+    await ensureResearchShellCommandLink(join(binDir, command), commandPath);
     allowedCommands.push(command);
   }
 
@@ -183,6 +192,43 @@ export async function prepareResearchShellGuard(input: {
     allowedCommands,
     blockedCommands: [...RESEARCH_BLOCKED_COMMANDS]
   };
+}
+
+async function ensureResearchShellCommandLink(
+  linkPath: string,
+  targetPath: string
+): Promise<void> {
+  try {
+    await symlink(targetPath, linkPath);
+    return;
+  } catch (error) {
+    if (!hasErrorCode(error, "EEXIST")) {
+      throw error;
+    }
+  }
+
+  const existingEntry = await lstat(linkPath);
+  if (!existingEntry.isSymbolicLink()) {
+    throw new Error(
+      `Research shell guard expected ${linkPath} to stay a symlink. Remove the unexpected file before retrying.`
+    );
+  }
+
+  const existingTarget = await readlink(linkPath);
+  if (existingTarget !== targetPath) {
+    throw new Error(
+      `Research shell guard expected ${linkPath} to target ${targetPath}, found ${existingTarget}.`
+    );
+  }
+}
+
+function hasErrorCode(error: unknown, code: string): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    (error as NodeJS.ErrnoException).code === code
+  );
 }
 
 export class CodexCliWorkerAdapter {
