@@ -1,0 +1,25 @@
+{
+  "id": "execution-writeback-missing-plan-still-completes",
+  "description": "An execution attempt may omit verification details in writeback when the replayable verification plan was already locked into the attempt contract before dispatch.",
+  "driver": "execution_missing_verification_plan",
+  "max_ticks": 12,
+  "expected": {
+    "run_status": "completed",
+    "waiting_for_human": false,
+    "recommended_next_action": null,
+    "attempt_types": ["research", "execution"],
+    "attempt_statuses": ["completed", "completed"],
+    "verification_statuses": ["not_applicable", "passed"],
+    "required_journal_types": [
+      "attempt.completed",
+      "attempt.verification.passed",
+      "attempt.checkpoint.created"
+    ],
+    "required_journal_counts": {
+      "attempt.started": 2,
+      "attempt.completed": 2,
+      "attempt.verification.passed": 1,
+      "attempt.checkpoint.created": 1
+    }
+  }
+}

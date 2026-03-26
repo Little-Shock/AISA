@@ -264,7 +264,32 @@ export const ExecutionVerificationPlanSchema = z.object({
   commands: z.array(VerificationCommandSchema).min(1)
 });
 
+export const AttemptContractDraftSchema = z.object({
+  attempt_type: AttemptTypeSchema,
+  objective: z.string().min(1).optional(),
+  success_criteria: z.array(z.string().min(1)).min(1).optional(),
+  required_evidence: z.array(z.string().min(1)).min(1),
+  forbidden_shortcuts: z.array(z.string().min(1)).default([]),
+  expected_artifacts: z.array(z.string().min(1)).default([]),
+  verification_plan: ExecutionVerificationPlanSchema.optional()
+});
+
+export const AttemptContractSchema = z.object({
+  attempt_id: z.string(),
+  run_id: z.string(),
+  attempt_type: AttemptTypeSchema,
+  objective: z.string().min(1),
+  success_criteria: z.array(z.string().min(1)).min(1),
+  required_evidence: z.array(z.string().min(1)).min(1),
+  forbidden_shortcuts: z.array(z.string().min(1)).default([]),
+  expected_artifacts: z.array(z.string().min(1)).default([]),
+  verification_plan: ExecutionVerificationPlanSchema.optional(),
+  created_at: z.string().datetime()
+});
+
 export const RuntimeVerificationFailureCodeSchema = z.enum([
+  "missing_attempt_contract",
+  "missing_contract_verification_plan",
   "missing_verification_plan",
   "invalid_verification_plan",
   "workspace_not_git_repo",
@@ -305,6 +330,7 @@ export const WorkerWritebackSchema = z.object({
   recommended_next_steps: z.array(z.string().min(1)).default([]),
   confidence: z.number().min(0).max(1),
   verification_plan: ExecutionVerificationPlanSchema.optional(),
+  next_attempt_contract: AttemptContractDraftSchema.optional(),
   artifacts: z
     .array(
       z.object({
@@ -387,6 +413,8 @@ export type BranchSpec = z.infer<typeof BranchSpecSchema>;
 export type EvalSpec = z.infer<typeof EvalSpecSchema>;
 export type VerificationCommand = z.infer<typeof VerificationCommandSchema>;
 export type ExecutionVerificationPlan = z.infer<typeof ExecutionVerificationPlanSchema>;
+export type AttemptContractDraft = z.infer<typeof AttemptContractDraftSchema>;
+export type AttemptContract = z.infer<typeof AttemptContractSchema>;
 export type RuntimeVerificationFailureCode = z.infer<
   typeof RuntimeVerificationFailureCodeSchema
 >;
@@ -543,6 +571,31 @@ export function createAttempt(input: {
   });
 }
 
+export function createAttemptContract(input: {
+  attempt_id: string;
+  run_id: string;
+  attempt_type: AttemptType;
+  objective: string;
+  success_criteria: string[];
+  required_evidence: string[];
+  forbidden_shortcuts?: string[];
+  expected_artifacts?: string[];
+  verification_plan?: ExecutionVerificationPlan;
+}): AttemptContract {
+  return AttemptContractSchema.parse({
+    attempt_id: input.attempt_id,
+    run_id: input.run_id,
+    attempt_type: input.attempt_type,
+    objective: input.objective,
+    success_criteria: input.success_criteria,
+    required_evidence: input.required_evidence,
+    forbidden_shortcuts: input.forbidden_shortcuts ?? [],
+    expected_artifacts: input.expected_artifacts ?? [],
+    verification_plan: input.verification_plan,
+    created_at: new Date().toISOString()
+  });
+}
+
 export function updateAttempt(attempt: Attempt, patch: Partial<Attempt>): Attempt {
   return AttemptSchema.parse({
     ...attempt,
@@ -574,6 +627,26 @@ export function createCurrentDecision(input: {
     waiting_for_human: input.waiting_for_human ?? false,
     updated_at: new Date().toISOString()
   });
+}
+
+export function isExecutionContractDraftReady(
+  contract: AttemptContractDraft | null | undefined
+): contract is AttemptContractDraft {
+  return (
+    contract?.attempt_type === "execution" &&
+    (contract.verification_plan?.commands.length ?? 0) > 0 &&
+    contract.required_evidence.length > 0
+  );
+}
+
+export function isExecutionAttemptContractReady(
+  contract: AttemptContract | null | undefined
+): contract is AttemptContract {
+  return (
+    contract?.attempt_type === "execution" &&
+    (contract.verification_plan?.commands.length ?? 0) > 0 &&
+    contract.required_evidence.length > 0
+  );
 }
 
 export function updateCurrentDecision(

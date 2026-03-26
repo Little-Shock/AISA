@@ -146,6 +146,27 @@ class ScenarioAdapter {
         questions: [],
         recommended_next_steps: ["Make the smallest useful change in the target file."],
         confidence: 0.82,
+        next_attempt_contract: {
+          attempt_type: "execution",
+          objective: "Make the smallest useful change in the target file.",
+          success_criteria: ["Leave a verified implementation step in the workspace."],
+          required_evidence: [
+            "git-visible workspace changes",
+            "a replayable verification command that checks the execution change"
+          ],
+          forbidden_shortcuts: [
+            "do not claim success without replayable verification"
+          ],
+          expected_artifacts: ["execution-change.md"],
+          verification_plan: {
+            commands: [
+              {
+                purpose: "confirm the execution change was written",
+                command: `test -f execution-change.md && rg -n "^execution change from" execution-change.md`
+              }
+            ]
+          }
+        },
         artifacts: []
       };
     }

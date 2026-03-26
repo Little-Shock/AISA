@@ -3,6 +3,8 @@ import { mkdir } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { join, relative, resolve } from "node:path";
 import {
+  isExecutionAttemptContractReady,
+  type AttemptContract,
   AttemptRuntimeVerificationSchema,
   type Attempt,
   type AttemptRuntimeVerification,
@@ -23,6 +25,7 @@ export interface AttemptRuntimeVerificationOutcome {
 export async function runAttemptRuntimeVerification(input: {
   run: Run;
   attempt: Attempt;
+  attemptContract: AttemptContract | null;
   result: WorkerWriteback;
   attemptPaths: AttemptPaths;
   timeoutMs?: number;
@@ -44,14 +47,37 @@ export async function runAttemptRuntimeVerification(input: {
     });
   }
 
-  if (!input.result.verification_plan) {
+  if (!input.attemptContract) {
     return await buildFailedVerificationArtifact({
       run: input.run,
       attempt: input.attempt,
       attemptPaths: input.attemptPaths,
-      failureCode: "missing_verification_plan",
+      failureCode: "missing_attempt_contract",
       failureReason:
-        "Execution result did not include a verification plan. Runtime verification only trusts commands it can replay itself."
+        "Execution verification requires attempt_contract.json so the runtime can replay the planned acceptance steps."
+    });
+  }
+
+  const attemptContract = input.attemptContract;
+  if (!isExecutionAttemptContractReady(attemptContract)) {
+    return await buildFailedVerificationArtifact({
+      run: input.run,
+      attempt: input.attempt,
+      attemptPaths: input.attemptPaths,
+      failureCode: "missing_contract_verification_plan",
+      failureReason:
+        "Execution attempt contract is missing replayable verification commands. Runtime verification only trusts commands locked in before dispatch."
+    });
+  }
+  const verificationPlan = attemptContract.verification_plan;
+  if (!verificationPlan) {
+    return await buildFailedVerificationArtifact({
+      run: input.run,
+      attempt: input.attempt,
+      attemptPaths: input.attemptPaths,
+      failureCode: "missing_contract_verification_plan",
+      failureReason:
+        "Execution attempt contract lost its replayable verification commands before runtime verification started."
     });
   }
 
@@ -94,7 +120,7 @@ export async function runAttemptRuntimeVerification(input: {
   await mkdir(verificationDir, { recursive: true });
 
   const commandResults: VerificationCommandResult[] = [];
-  const commands = input.result.verification_plan.commands;
+  const commands = verificationPlan.commands;
 
   for (let index = 0; index < commands.length; index += 1) {
     const command = commands[index]!;

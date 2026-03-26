@@ -2,6 +2,7 @@ import { appendFile, mkdir, readFile, readdir, writeFile } from "node:fs/promise
 import { dirname, join } from "node:path";
 import type {
   Attempt,
+  AttemptContract,
   AttemptEvaluation,
   AttemptRuntimeVerification,
   Branch,
@@ -21,6 +22,7 @@ import type {
 } from "@autoresearch/domain";
 import {
   AttemptSchema,
+  AttemptContractSchema,
   AttemptEvaluationSchema,
   AttemptRuntimeVerificationSchema,
   BranchSchema,
@@ -79,6 +81,7 @@ export interface RunPaths {
 export interface AttemptPaths {
   attemptDir: string;
   metaFile: string;
+  contractFile: string;
   contextFile: string;
   resultFile: string;
   evaluationFile: string;
@@ -124,6 +127,7 @@ export function resolveAttemptPaths(
   return {
     attemptDir,
     metaFile: join(attemptDir, "meta.json"),
+    contractFile: join(attemptDir, "attempt_contract.json"),
     contextFile: join(attemptDir, "context.json"),
     resultFile: join(attemptDir, "result.json"),
     evaluationFile: join(attemptDir, "evaluation.json"),
@@ -398,6 +402,18 @@ export async function saveAttempt(
   await writeJsonFile(attemptPaths.metaFile, attempt);
 }
 
+export async function saveAttemptContract(
+  paths: WorkspacePaths,
+  contract: AttemptContract
+): Promise<void> {
+  const attemptPaths = await ensureAttemptDirectories(
+    paths,
+    contract.run_id,
+    contract.attempt_id
+  );
+  await writeJsonFile(attemptPaths.contractFile, contract);
+}
+
 export async function getAttempt(
   paths: WorkspacePaths,
   runId: string,
@@ -405,6 +421,21 @@ export async function getAttempt(
 ): Promise<Attempt> {
   const attempt = await readJsonFile<Attempt>(resolveAttemptPaths(paths, runId, attemptId).metaFile);
   return AttemptSchema.parse(attempt);
+}
+
+export async function getAttemptContract(
+  paths: WorkspacePaths,
+  runId: string,
+  attemptId: string
+): Promise<AttemptContract | null> {
+  try {
+    const contract = await readJsonFile<AttemptContract>(
+      resolveAttemptPaths(paths, runId, attemptId).contractFile
+    );
+    return AttemptContractSchema.parse(contract);
+  } catch {
+    return null;
+  }
 }
 
 export async function listAttempts(

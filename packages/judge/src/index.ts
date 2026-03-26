@@ -1,6 +1,7 @@
 import {
   AttemptEvaluationSchema,
   EvalResultSchema,
+  isExecutionContractDraftReady,
   type Attempt,
   type AttemptEvaluation,
   type AttemptRuntimeVerification,
@@ -86,6 +87,9 @@ export function evaluateAttempt(input: {
   const runtimeVerification = input.runtimeVerification ?? null;
 
   if (input.attempt.attempt_type === "research") {
+    const hasExecutionContract = isExecutionContractDraftReady(
+      input.result.next_attempt_contract
+    );
     const goalProgress = Math.max(
       0,
       Math.min(
@@ -98,9 +102,12 @@ export function evaluateAttempt(input: {
       )
     );
 
-    const hasExecutionLead = nextStepScore > 0 && evidenceQuality >= 0.45 && confidenceScore >= 0.45;
-    const recommendation =
-      goalProgress < 0.35 ? "retry" : hasExecutionLead || evidenceQuality < 0.45 ? "continue" : "wait_human";
+    const hasExecutionLead =
+      nextStepScore > 0 &&
+      evidenceQuality >= 0.45 &&
+      confidenceScore >= 0.45 &&
+      hasExecutionContract;
+    const recommendation = goalProgress < 0.35 ? "retry" : "continue";
 
     return AttemptEvaluationSchema.parse({
       attempt_id: input.attempt.id,
@@ -117,12 +124,13 @@ export function evaluateAttempt(input: {
             : "research",
       rationale: `goal_progress=${goalProgress.toFixed(2)}, evidence_quality=${evidenceQuality.toFixed(
         2
-      )}, confidence=${confidenceScore.toFixed(2)}, next_steps=${input.result.recommended_next_steps.length}`,
+      )}, confidence=${confidenceScore.toFixed(2)}, next_steps=${input.result.recommended_next_steps.length}, execution_contract=${hasExecutionContract ? "ready" : "missing"}`,
       missing_evidence: buildMissingEvidence({
         attemptType: "research",
         evidenceQuality,
         nextStepScore,
-        artifactScore
+        artifactScore,
+        hasExecutionContract
       }),
       created_at: new Date().toISOString()
     });
@@ -202,6 +210,7 @@ function buildMissingEvidence(input: {
   evidenceQuality: number;
   nextStepScore: number;
   artifactScore: number;
+  hasExecutionContract?: boolean;
   runtimeVerification?: AttemptRuntimeVerification | null;
 }): string[] {
   const missing: string[] = [];
@@ -212,6 +221,16 @@ function buildMissingEvidence(input: {
 
   if (input.attemptType === "research" && input.nextStepScore === 0) {
     missing.push("Need a clearer next step that the loop can act on.");
+  }
+
+  if (
+    input.attemptType === "research" &&
+    input.nextStepScore > 0 &&
+    input.hasExecutionContract === false
+  ) {
+    missing.push(
+      "Need a replayable execution contract before the loop can start an execution attempt."
+    );
   }
 
   if (

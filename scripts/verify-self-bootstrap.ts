@@ -17,6 +17,7 @@ import { buildSelfBootstrapRunTemplate } from "../packages/planner/src/index.ts"
 import {
   appendRunJournal,
   ensureWorkspace,
+  getAttemptContract,
   getCurrentDecision,
   listAttempts,
   listRunJournal,
@@ -146,6 +147,18 @@ async function main(): Promise<void> {
   assert.ok(
     attempts[0]?.objective.includes("runtime evidence"),
     "first attempt should keep the self-bootstrap focus"
+  );
+  const attemptContract = attempts[0]
+    ? await getAttemptContract(workspacePaths, run.id, attempts[0].id)
+    : null;
+  assert.ok(attemptContract, "first attempt should persist attempt_contract.json");
+  assert.deepEqual(
+    attemptContract?.required_evidence ?? [],
+    [
+      "Ground findings in concrete files, commands, or artifacts.",
+      "If execution is recommended, leave a replayable execution contract for the next attempt."
+    ],
+    "research attempt contract should enforce grounded evidence and execution readiness"
   );
   assert.ok(
     journal.some((entry) => entry.type === "run.steer.queued"),

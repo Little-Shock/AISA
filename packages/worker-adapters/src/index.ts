@@ -4,6 +4,7 @@ import { spawn } from "node:child_process";
 import { join } from "node:path";
 import type {
   Attempt,
+  AttemptContract,
   Branch,
   ContextSnapshot,
   Goal,
@@ -101,8 +102,8 @@ export function buildAttemptModeRules(
     return [
       "- You may modify files only within the provided workspace to complete the task.",
       "- Keep the change as small as possible and leave clear verification evidence.",
-      "- Include a verification_plan with concrete non-interactive commands the runtime can replay itself.",
-      "- Do not claim tests or verification passed unless the verification_plan lists the exact commands to replay."
+      "- Follow the replayable verification commands already locked into the attempt contract.",
+      "- Do not claim tests or verification passed unless those contract commands would pass when the runtime replays them."
     ];
   }
 
@@ -111,7 +112,7 @@ export function buildAttemptModeRules(
     "- Prefer file inspection and simple read-only shell commands over build or package-script execution.",
     "- Do not run package scripts, tsx, dev servers, or long-running processes during research.",
     "- The runtime exposes only a restricted read-only shell path during research, so package managers and script runners are blocked.",
-    "- If command-based verification is needed, recommend it as the next execution attempt instead of doing it now."
+    "- If you recommend execution next, include next_attempt_contract with replayable verification commands instead of vague advice."
   ];
 }
 
@@ -312,10 +313,11 @@ export class CodexCliWorkerAdapter {
   async runAttemptTask(input: {
     run: Run;
     attempt: Attempt;
+    attemptContract: AttemptContract;
     context: unknown;
     workspacePaths: WorkspacePaths;
   }): Promise<BranchExecutionResult> {
-    const { run, attempt, context, workspacePaths } = input;
+    const { run, attempt, attemptContract, context, workspacePaths } = input;
     const attemptPaths = resolveAttemptPaths(workspacePaths, run.id, attempt.id);
     const outputFile = join(attemptPaths.attemptDir, "codex-output.json");
     const promptFile = join(attemptPaths.attemptDir, "worker-prompt.md");
@@ -326,7 +328,7 @@ export class CodexCliWorkerAdapter {
 
     await mkdir(attemptPaths.artifactsDir, { recursive: true });
 
-    const prompt = buildCodexAttemptPrompt(run, attempt, context);
+    const prompt = buildCodexAttemptPrompt(run, attempt, attemptContract, context);
     await Promise.all([
       writeJsonFile(attemptPaths.contextFile, context),
       writeJsonFile(join(attemptPaths.attemptDir, "task-spec.json"), {
@@ -335,7 +337,8 @@ export class CodexCliWorkerAdapter {
         attempt_type: attempt.attempt_type,
         workspace_root: attempt.workspace_root,
         objective: attempt.objective,
-        success_criteria: attempt.success_criteria
+        success_criteria: attempt.success_criteria,
+        attempt_contract: attemptContract
       }),
       writeTextFile(promptFile, prompt)
     ]);
@@ -509,6 +512,7 @@ function buildCodexWorkerPrompt(
 function buildCodexAttemptPrompt(
   run: Run,
   attempt: Attempt,
+  attemptContract: AttemptContract,
   context: unknown
 ): string {
   return [
@@ -530,6 +534,9 @@ function buildCodexAttemptPrompt(
     `- Type: ${attempt.attempt_type}`,
     `- Objective: ${attempt.objective}`,
     "",
+    "Attempt Contract:",
+    JSON.stringify(attemptContract, null, 2),
+    "",
     "Success Criteria:",
     ...attempt.success_criteria.map((criterion) => `- ${criterion}`),
     "",
@@ -537,10 +544,13 @@ function buildCodexAttemptPrompt(
     JSON.stringify(context, null, 2),
     "",
     attempt.attempt_type === "execution"
-      ? "The runtime will replay verification_plan.commands itself and only trust those observed results."
+      ? "The runtime will replay the commands already locked in the attempt contract and only trust those observed results."
       : null,
     attempt.attempt_type === "execution"
-      ? "If you changed code, include at least one verification command that checks the changed behavior."
+      ? "Do not replace the contract verification plan with a different one after execution starts."
+      : null,
+    attempt.attempt_type === "research"
+      ? "If you recommend execution next, include next_attempt_contract with replayable verification commands."
       : null,
     "",
     "Return JSON in this shape:",
@@ -557,6 +567,30 @@ function buildCodexAttemptPrompt(
         questions: ["remaining open question"],
         recommended_next_steps: ["best next step"],
         confidence: 0.72,
+        next_attempt_contract:
+          attempt.attempt_type === "research"
+            ? {
+                attempt_type: "execution",
+                objective: "make the smallest useful change",
+                success_criteria: ["leave a working implementation step"],
+                required_evidence: [
+                  "git-visible workspace changes",
+                  "a replayable verification command that checks the changed behavior"
+                ],
+                forbidden_shortcuts: [
+                  "do not claim success without runnable verification"
+                ],
+                expected_artifacts: ["changed files visible in git"],
+                verification_plan: {
+                  commands: [
+                    {
+                      purpose: "verify the changed behavior",
+                      command: "pnpm verify:runtime"
+                    }
+                  ]
+                }
+              }
+            : undefined,
         verification_plan:
           attempt.attempt_type === "execution"
             ? {

@@ -25,7 +25,7 @@ export function buildSelfBootstrapRunTemplate(
   const successCriteria = [
     "Identify one concrete backend/runtime task that should be done next.",
     "Ground the recommendation in local repository evidence and current runtime regressions.",
-    "Leave an execution-ready next step instead of a vague roadmap.",
+    "Leave an execution-ready next step with a replayable attempt contract instead of a vague roadmap.",
     "Preserve or extend automated regression coverage for any runtime change."
   ];
   const constraints = [
@@ -49,6 +49,7 @@ export function buildSelfBootstrapRunTemplate(
     "Read evals/runtime-run-loop/ and start from backend/runtime gaps, not GUI work.",
     "Use the current regression suite to choose the next smallest self-bootstrap improvement.",
     "Treat execution as passed only when the runtime can replay the verification commands itself.",
+    "If you recommend execution next, include the replayable attempt contract the runtime should enforce.",
     focus,
     "If you change runtime behavior, update or add a regression case in the same pass."
   ].join("\n");

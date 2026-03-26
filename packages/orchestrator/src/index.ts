@@ -1,10 +1,13 @@
 import {
   createAttempt,
+  createAttemptContract,
   createCurrentDecision,
   createEvent,
   createRunJournalEntry,
   createWorkerRun,
   finishWorkerRun,
+  isExecutionAttemptContractReady,
+  isExecutionContractDraftReady,
   updateAttempt,
   updateBranch,
   updateCurrentDecision,
@@ -12,6 +15,8 @@ import {
   updateRunSteer,
   updateSteer,
   type Attempt,
+  type AttemptContract,
+  type AttemptContractDraft,
   type AttemptEvaluation,
   type Branch,
   type CurrentDecision,
@@ -26,6 +31,7 @@ import { buildGoalReport } from "@autoresearch/report-builder";
 import {
   appendRunJournal,
   getAttempt,
+  getAttemptContract,
   getAttemptResult,
   getCurrentDecision,
   getBranch,
@@ -44,6 +50,7 @@ import {
   resolveAttemptPaths,
   resolveBranchArtifactPaths,
   saveAttempt,
+  saveAttemptContract,
   saveAttemptContext,
   saveAttemptEvaluation,
   saveAttemptResult,
@@ -424,16 +431,17 @@ export class Orchestrator {
         continue;
       }
 
-      await saveAttempt(this.workspacePaths, nextAttempt);
+      await saveAttempt(this.workspacePaths, nextAttempt.attempt);
+      await saveAttemptContract(this.workspacePaths, nextAttempt.contract);
       await appendRunJournal(
         this.workspacePaths,
         createRunJournalEntry({
           run_id: run.id,
-          attempt_id: nextAttempt.id,
+          attempt_id: nextAttempt.attempt.id,
           type: "attempt.created",
           payload: {
-            attempt_type: nextAttempt.attempt_type,
-            objective: nextAttempt.objective
+            attempt_type: nextAttempt.attempt.attempt_type,
+            objective: nextAttempt.attempt.objective
           }
         })
       );
@@ -485,7 +493,7 @@ export class Orchestrator {
     runId: string,
     current: CurrentDecision,
     attempts: Attempt[]
-  ): Promise<Attempt | null> {
+  ): Promise<{ attempt: Attempt; contract: AttemptContract } | null> {
     const run = await getRun(this.workspacePaths, runId);
     const queuedSteers = (await listRunSteers(this.workspacePaths, runId)).filter(
       (runSteer) => runSteer.status === "queued"
@@ -494,10 +502,15 @@ export class Orchestrator {
     const latestResult = latestAttempt
       ? await getAttemptResult(this.workspacePaths, run.id, latestAttempt.id)
       : null;
+    const nextExecutionDraft = isExecutionContractDraftReady(
+      latestResult?.next_attempt_contract
+    )
+      ? latestResult.next_attempt_contract
+      : null;
 
     if (attempts.length === 0) {
       if (queuedSteers.length > 0) {
-        return createAttempt({
+        const attempt = createAttempt({
           run_id: run.id,
           attempt_type: "research",
           worker: this.adapter.type,
@@ -511,9 +524,13 @@ export class Orchestrator {
           success_criteria: run.success_criteria,
           workspace_root: run.workspace_root
         });
+        return {
+          attempt,
+          contract: this.buildAttemptContract(run, attempt, null)
+        };
       }
 
-      return createAttempt({
+      const attempt = createAttempt({
         run_id: run.id,
         attempt_type: "research",
         worker: this.adapter.type,
@@ -521,6 +538,10 @@ export class Orchestrator {
         success_criteria: run.success_criteria,
         workspace_root: run.workspace_root
       });
+      return {
+        attempt,
+        contract: this.buildAttemptContract(run, attempt, null)
+      };
     }
 
     if (current.waiting_for_human || current.run_status !== "running") {
@@ -538,25 +559,39 @@ export class Orchestrator {
             latestResult,
             queuedSteers.map((runSteer) => runSteer.content)
           )
-        : this.buildPlannedAttemptObjective(run, current, attemptType, latestResult);
+        : attemptType === "execution" && nextExecutionDraft?.objective
+          ? nextExecutionDraft.objective
+          : this.buildPlannedAttemptObjective(run, current, attemptType, latestResult);
 
     if (!objective) {
       return null;
     }
 
-    return createAttempt({
+    const attempt = createAttempt({
       run_id: run.id,
       attempt_type: attemptType,
       worker: this.adapter.type,
       objective,
-      success_criteria: run.success_criteria,
+      success_criteria:
+        attemptType === "execution" && nextExecutionDraft?.success_criteria
+          ? nextExecutionDraft.success_criteria
+          : run.success_criteria,
       workspace_root: run.workspace_root
     });
+    return {
+      attempt,
+      contract: this.buildAttemptContract(run, attempt, nextExecutionDraft)
+    };
   }
 
   private async executeAttempt(runId: string, attemptId: string): Promise<void> {
     const run = await getRun(this.workspacePaths, runId);
     let attempt = await getAttempt(this.workspacePaths, runId, attemptId);
+    const attemptContract = await getAttemptContract(
+      this.workspacePaths,
+      runId,
+      attemptId
+    );
     const attemptPaths = resolveAttemptPaths(this.workspacePaths, runId, attemptId);
     const steers = await listRunSteers(this.workspacePaths, runId);
     const attempts = await listAttempts(this.workspacePaths, runId);
@@ -632,9 +667,11 @@ export class Orchestrator {
     );
 
     try {
+      this.assertDispatchableAttemptContract(attempt, attemptContract);
       const execution = await this.adapter.runAttemptTask({
         run,
         attempt,
+        attemptContract,
         context,
         workspacePaths: this.workspacePaths
       });
@@ -643,6 +680,7 @@ export class Orchestrator {
       const runtimeVerification = await runAttemptRuntimeVerification({
         run,
         attempt,
+        attemptContract,
         result: execution.writeback,
         attemptPaths
       });
@@ -1087,6 +1125,73 @@ export class Orchestrator {
         : null) ?? attempts.at(-1);
 
     return latestAttempt ?? null;
+  }
+
+  private buildAttemptContract(
+    run: Run,
+    attempt: Attempt,
+    nextExecutionDraft: AttemptContractDraft | null
+  ): AttemptContract {
+    if (attempt.attempt_type === "execution") {
+      const draft = isExecutionContractDraftReady(nextExecutionDraft)
+        ? nextExecutionDraft
+        : null;
+      return createAttemptContract({
+        attempt_id: attempt.id,
+        run_id: run.id,
+        attempt_type: attempt.attempt_type,
+        objective: draft?.objective ?? attempt.objective,
+        success_criteria: draft?.success_criteria ?? attempt.success_criteria,
+        required_evidence:
+          draft?.required_evidence ?? [
+            "Leave git-visible workspace changes tied to the objective.",
+            "Leave artifacts that show what changed.",
+            "Pass the replayable verification commands locked into this contract."
+          ],
+        forbidden_shortcuts:
+          draft?.forbidden_shortcuts ?? [
+            "Do not claim success without replayable verification commands.",
+            "Do not treat unchanged workspace state as a completed execution step."
+          ],
+        expected_artifacts:
+          draft?.expected_artifacts ?? ["changed files visible in git status"],
+        verification_plan: draft?.verification_plan
+      });
+    }
+
+    return createAttemptContract({
+      attempt_id: attempt.id,
+      run_id: run.id,
+      attempt_type: attempt.attempt_type,
+      objective: attempt.objective,
+      success_criteria: attempt.success_criteria,
+      required_evidence: [
+        "Ground findings in concrete files, commands, or artifacts.",
+        "If execution is recommended, leave a replayable execution contract for the next attempt."
+      ],
+      forbidden_shortcuts: [
+        "Do not claim repository facts without evidence.",
+        "Do not recommend execution without replayable verification steps."
+      ],
+      expected_artifacts: ["grounded findings or notes"]
+    });
+  }
+
+  private assertDispatchableAttemptContract(
+    attempt: Attempt,
+    attemptContract: AttemptContract | null
+  ): asserts attemptContract is AttemptContract {
+    if (!attemptContract) {
+      throw new Error(
+        `Attempt ${attempt.id} is missing attempt_contract.json. Dispatch is blocked until the contract is recreated.`
+      );
+    }
+
+    if (attempt.attempt_type === "execution" && !isExecutionAttemptContractReady(attemptContract)) {
+      throw new Error(
+        `Execution attempt ${attempt.id} is missing replayable verification commands in attempt_contract.json.`
+      );
+    }
   }
 
   private getActiveAttemptKey(runId: string, attemptId: string): string {
