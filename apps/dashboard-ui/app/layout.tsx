@@ -2,8 +2,8 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "AutoResearch Swarm Dashboard",
-  description: "Orchestration control plane for multi-agent research runs."
+  title: "AISA 运行台",
+  description: "面向多 Agent 研究任务的编排与观测控制台。"
 };
 
 export default function RootLayout({
@@ -12,7 +12,7 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en">
+    <html lang="zh-CN">
       <body>{children}</body>
     </html>
   );

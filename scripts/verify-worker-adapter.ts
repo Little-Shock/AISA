@@ -1,9 +1,13 @@
 import assert from "node:assert/strict";
-import { mkdtemp, chmod, writeFile } from "node:fs/promises";
+import { mkdtemp, chmod, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createAttempt, createRun } from "../packages/domain/src/index.ts";
-import { ensureWorkspace, resolveWorkspacePaths } from "../packages/state-store/src/index.ts";
+import {
+  ensureWorkspace,
+  resolveAttemptPaths,
+  resolveWorkspacePaths
+} from "../packages/state-store/src/index.ts";
 import { CodexCliWorkerAdapter } from "../packages/worker-adapters/src/index.ts";
 
 async function main(): Promise<void> {
@@ -62,10 +66,21 @@ async function main(): Promise<void> {
       );
       assert.match(
         error instanceof Error ? error.message : String(error),
-        /Worker stderr:/
+        /执行器错误输出：/
       );
       return true;
     }
+  );
+
+  const attemptPaths = resolveAttemptPaths(workspacePaths, run.id, attempt.id);
+  const prompt = await readFile(join(attemptPaths.attemptDir, "worker-prompt.md"), "utf8");
+  assert.match(
+    prompt,
+    /Write all user-facing natural language fields in concise Chinese\./
+  );
+  assert.match(
+    prompt,
+    /Keep JSON keys, enum-like machine values, file paths, shell commands, and evidence strings stable/
   );
 
   console.log(

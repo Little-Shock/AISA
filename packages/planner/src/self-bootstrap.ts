@@ -20,20 +20,20 @@ export function buildSelfBootstrapRunTemplate(
   const ownerId = options.ownerId ?? "atou";
   const focus =
     options.focus ??
-    "Pick the smallest next backend/runtime improvement that moves AISA toward self-bootstrap development.";
+    "选出能推动 AISA 继续自举开发的下一项最小后端或运行时改进。";
 
   const successCriteria = [
-    "Identify one concrete backend/runtime task that should be done next.",
-    "Ground the recommendation in local repository evidence and current runtime regressions.",
-    "Leave an execution-ready next step with a replayable attempt contract instead of a vague roadmap.",
-    "Preserve or extend automated regression coverage for any runtime change."
+    "确定下一项该做的具体后端或运行时任务。",
+    "建议必须建立在本地仓库证据和当前运行时回归之上。",
+    "不要给模糊路线图，要留下可直接执行、可回放验证的下一步尝试约定。",
+    "任何运行时改动都要保留或补上自动回归覆盖。"
   ];
   const constraints = [
-    "Focus on the run-centered backend/runtime path, not GUI polish.",
-    "Use local repository evidence, handoff notes, and eval assets before making claims.",
-    "Do not mask failures or adapt implementation only to the current smoke cases.",
-    "Any execution attempt must leave a verification plan the runtime can replay itself.",
-    "Prefer the smallest change that improves AISA's ability to use itself for the next step."
+    "优先关注以运行任务为中心的后端与运行时链路，不先做界面润色。",
+    "先看本地仓库证据、handoff 说明和评估资产，再下结论。",
+    "不要掩盖故障，也不要只为了过眼前 smoke 用例去迎合实现。",
+    "任何执行尝试都必须留下运行时自己可回放的验证计划。",
+    "优先选择能提升 AISA 自举能力的最小改动。"
   ];
 
   if (options.extraSuccessCriteria) {
@@ -45,21 +45,21 @@ export function buildSelfBootstrapRunTemplate(
   }
 
   const initialSteer = [
-    "Read Codex/2026-03-25-development-handoff.md first.",
-    "Read evals/runtime-run-loop/ and start from backend/runtime gaps, not GUI work.",
-    "Use the current regression suite to choose the next smallest self-bootstrap improvement.",
-    "Treat execution as passed only when the runtime can replay the verification commands itself.",
-    "If you recommend execution next, include the replayable attempt contract the runtime should enforce.",
+    "先读 Codex/2026-03-25-development-handoff.md。",
+    "先读 evals/runtime-run-loop/，从后端和运行时缺口开始，不先做 GUI。",
+    "用当前回归用例选出下一项最小的自举改进。",
+    "只有运行时能亲自回放验证命令时，执行才算通过。",
+    "如果建议下一步执行，就把运行时该强制执行的可回放尝试约定一并给出。",
     focus,
-    "If you change runtime behavior, update or add a regression case in the same pass."
+    "如果改了运行时行为，就在同一轮补上或更新回归用例。"
   ].join("\n");
 
   return {
     runInput: {
-      title: "AISA self-bootstrap next-step planning",
+      title: "AISA 自举下一步规划",
       description: [
-        "Inspect the current AISA repository and determine the next smallest backend/runtime task",
-        "that should be developed so the system can keep improving itself safely."
+        "检查当前 AISA 仓库，找出下一项最小且值得优先推进的后端或运行时任务，",
+        "让系统能继续安全地自举开发。"
       ].join(" "),
       success_criteria: successCriteria,
       constraints,

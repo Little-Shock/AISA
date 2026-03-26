@@ -1,6 +1,14 @@
 "use client";
 
 import { startTransition, useEffect, useMemo, useState } from "react";
+import {
+  activityLabel,
+  attemptTypeLabel,
+  localizeUiText,
+  nextActionLabel,
+  statusLabel,
+  workerLabel
+} from "./copy";
 
 type GoalSummaryItem = {
   goal: {
@@ -265,12 +273,12 @@ export default function Page() {
     const waitingRuns = runs.filter((item) => item.current?.waiting_for_human).length;
 
     return [
-      { label: "Run 总数", value: String(runs.length).padStart(2, "0") },
-      { label: "运行中 Run", value: String(runningRuns).padStart(2, "0") },
-      { label: "Attempt 总数", value: String(runAttempts).padStart(2, "0") },
+      { label: "运行任务数", value: String(runs.length).padStart(2, "0") },
+      { label: "运行中任务", value: String(runningRuns).padStart(2, "0") },
+      { label: "尝试数", value: String(runAttempts).padStart(2, "0") },
       { label: "等待人工", value: String(waitingRuns).padStart(2, "0") },
-      { label: "Goal 总数", value: String(goals.length).padStart(2, "0") },
-      { label: "运行中 Goal", value: String(runningGoals).padStart(2, "0") }
+      { label: "目标数", value: String(goals.length).padStart(2, "0") },
+      { label: "运行中目标", value: String(runningGoals).padStart(2, "0") }
     ];
   }, [goals, runs]);
 
@@ -428,14 +436,14 @@ export default function Page() {
       <div className="dashboard-frame">
         <section className="hero-panel">
           <div className="hero-copy">
-            <div className="hero-eyebrow">AISA / Run Console</div>
+            <div className="hero-eyebrow">AISA / 运行台</div>
             <h1 className="hero-title">
               运行台与研究台
-              <span>先看 run 的真实状态，再回头看旧的 goal 和 branch 面板。</span>
+              <span>先看运行任务的真实状态，再回头看旧的目标和分支面板。</span>
             </h1>
             <p className="hero-description">
-              这里把 run-centered 的运行事实拉到前台。能看 current decision、attempt 契约、
-              写回结果、运行时回放、steer 和日志尾部，方便盯自举任务的真实状态。
+              这里把运行任务的真实事实拉到前台。能直接看到当前判断、尝试约定、写回结果、
+              回放验证、人工指令和日志尾部，方便盯住自举任务的真实状态。
             </p>
           </div>
 
@@ -459,20 +467,20 @@ export default function Page() {
             ))}
           </div>
 
-          <div className="mode-switch" aria-label="console mode">
+          <div className="mode-switch" aria-label="控制台模式">
             <button
               type="button"
               className={`mode-switch-button${viewMode === "runs" ? " is-active" : ""}`}
               onClick={() => setViewMode("runs")}
             >
-              Run Console
+              运行台
             </button>
             <button
               type="button"
               className={`mode-switch-button${viewMode === "goals" ? " is-active" : ""}`}
               onClick={() => setViewMode("goals")}
             >
-              Goal Console
+              目标台
             </button>
           </div>
         </section>
@@ -484,11 +492,11 @@ export default function Page() {
             {viewMode === "runs" ? (
               <Panel
                 title={`运行池 · ${runs.length}`}
-                subtitle="这里展示所有 run-centered 任务，包括自举 run。"
+                subtitle="这里展示所有运行任务，包括当前自举任务。"
               >
                 <div className="run-list">
                   {runs.length === 0 ? (
-                    <EmptyState text="还没有 run。先用 self-bootstrap 或 API 启动一条。" />
+                    <EmptyState text="还没有运行任务。先用自举模板或接口新建一条。" />
                   ) : (
                     runs.map((item) => {
                       const selected = item.run.id === selectedRunId;
@@ -503,7 +511,7 @@ export default function Page() {
                           }}
                         >
                           <div className="goal-card-head">
-                            <strong>{item.run.title}</strong>
+                            <strong>{localizeUiText(item.run.title)}</strong>
                             <StatusPill value={item.current?.run_status ?? "draft"} />
                           </div>
                           <div className="goal-card-body">
@@ -512,12 +520,12 @@ export default function Page() {
                             {item.run.workspace_root}
                           </div>
                           <div className="goal-card-meta">
-                            attempt {item.attempt_count} ·{" "}
-                            {item.current?.recommended_next_action ?? "暂无动作"}
+                            尝试 {item.attempt_count} ·{" "}
+                            {nextActionLabel(item.current?.recommended_next_action)}
                           </div>
                           <p className="run-card-summary">
                             {truncateText(
-                              item.current?.summary || item.run.description,
+                              localizeUiText(item.current?.summary || item.run.description),
                               140
                             )}
                           </p>
@@ -561,7 +569,7 @@ export default function Page() {
                       }
                     />
                     <Field
-                      label="Owner"
+                      label="负责人"
                       value={goalForm.owner_id}
                       onChange={(value) =>
                         setGoalForm((current) => ({ ...current, owner_id: value }))
@@ -587,7 +595,7 @@ export default function Page() {
 
                 <Panel
                   title={`目标池 · ${goals.length}`}
-                  subtitle="这里展示所有 goal 的整体推进状态。"
+                  subtitle="这里展示所有目标的整体推进状态。"
                 >
                   <div className="goal-list">
                     {goals.length === 0 ? (
@@ -606,7 +614,7 @@ export default function Page() {
                             }}
                           >
                             <div className="goal-card-head">
-                              <strong>{item.goal.title}</strong>
+                              <strong>{localizeUiText(item.goal.title)}</strong>
                               <StatusPill value={item.goal.status} />
                             </div>
                             <div className="goal-card-body">{item.goal.workspace_root}</div>
@@ -630,7 +638,7 @@ export default function Page() {
                 <>
                   <Panel
                     title={runDetail.run.title}
-                    subtitle="只读运行台。看 current decision、attempt 契约、写回、回放验证和日志，不在这里介入。"
+                    subtitle="只读运行台。看当前判断、尝试约定、写回、回放验证和日志，不在这里介入。"
                     actions={
                       <div className="action-row">
                         <button
@@ -647,53 +655,53 @@ export default function Page() {
                     }
                   >
                     <div className="summary-grid">
-                      <InfoCard label="Run 状态" value={statusLabel(runDetail.current?.run_status ?? "draft")} />
+                      <InfoCard label="运行状态" value={statusLabel(runDetail.current?.run_status ?? "draft")} />
                       <InfoCard
-                        label="最新动作"
-                        value={runDetail.current?.recommended_next_action ?? "暂无"}
+                        label="下一动作"
+                        value={nextActionLabel(runDetail.current?.recommended_next_action)}
                       />
                       <InfoCard
-                        label="最新 Attempt"
+                        label="最新尝试"
                         value={runDetail.current?.latest_attempt_id ?? "暂无"}
                       />
                       <InfoCard
-                        label="Attempt 数量"
+                        label="尝试数量"
                         value={String(runDetail.attempts.length)}
                       />
-                      <InfoCard label="Owner" value={runDetail.run.owner_id} />
+                      <InfoCard label="负责人" value={runDetail.run.owner_id} />
                       <InfoCard label="工作区" value={runDetail.run.workspace_root} />
                     </div>
 
                     <div className="dual-grid">
-                      <SubPanel title="Run Contract" accent="emerald">
-                        <p className="body-copy">{runDetail.run.description}</p>
+                      <SubPanel title="运行约定" accent="emerald">
+                        <p className="body-copy">{localizeUiText(runDetail.run.description)}</p>
                         <SectionList title="成功标准" items={runDetail.run.success_criteria} />
                         <SectionList title="约束条件" items={runDetail.run.constraints} />
                         <SectionList
                           title="运行元信息"
                           items={[
-                            `Run ID: ${runDetail.run.id}`,
+                            `运行 ID：${runDetail.run.id}`,
                             `创建时间: ${formatDateTime(runDetail.run.created_at)}`,
                             `更新时间: ${formatDateTime(runDetail.run.updated_at)}`
                           ]}
                         />
                       </SubPanel>
 
-                      <SubPanel title="Current Decision" accent="amber">
+                      <SubPanel title="当前判断" accent="amber">
                         <p className="body-copy">
-                          {runDetail.current?.summary ?? "还没有 current decision。"}
+                          {localizeUiText(runDetail.current?.summary ?? "还没有当前判断。")}
                         </p>
                         <SectionList
                           title="当前状态"
                           items={[
-                            `Run 状态: ${statusLabel(runDetail.current?.run_status ?? "draft")}`,
-                            `推荐 attempt 类型: ${runDetail.current?.recommended_attempt_type ?? "暂无"}`,
-                            `等待人工: ${runDetail.current?.waiting_for_human ? "是" : "否"}`,
-                            `最新 attempt: ${runDetail.current?.latest_attempt_id ?? "暂无"}`
+                            `运行状态：${statusLabel(runDetail.current?.run_status ?? "draft")}`,
+                            `建议的尝试类型：${runDetail.current?.recommended_attempt_type ? attemptTypeLabel(runDetail.current.recommended_attempt_type) : "暂无"}`,
+                            `等待人工：${runDetail.current?.waiting_for_human ? "是" : "否"}`,
+                            `最新尝试：${runDetail.current?.latest_attempt_id ?? "暂无"}`
                           ]}
                         />
                         <SectionList
-                          title="排队 / 已应用 Steer"
+                          title="排队中 / 已应用的人工指令"
                           items={runDetail.steers.map((steer) => {
                             const attemptPart = steer.attempt_id ? ` · ${steer.attempt_id}` : "";
                             return `[${statusLabel(steer.status)}]${attemptPart} ${steer.content}`;
@@ -701,7 +709,7 @@ export default function Page() {
                         />
                         {runDetail.current?.blocking_reason ? (
                           <Callout tone="rose" title="当前卡点">
-                            {runDetail.current.blocking_reason}
+                            {localizeUiText(runDetail.current.blocking_reason)}
                           </Callout>
                         ) : null}
                       </SubPanel>
@@ -709,12 +717,12 @@ export default function Page() {
                   </Panel>
 
                   <Panel
-                    title="Attempt 时间线"
-                    subtitle="每条 attempt 都展示契约、结果、判断、回放验证和日志尾部。"
+                    title="尝试时间线"
+                    subtitle="每条尝试都展示约定、结果、判断、回放验证和日志尾部。"
                   >
                     <div className="attempt-list">
                       {runDetail.attempt_details.length === 0 ? (
-                        <EmptyState text="还没有 attempt 细节。" />
+                        <EmptyState text="还没有尝试细节。" />
                       ) : (
                         [...runDetail.attempt_details].reverse().map((detailItem) => (
                           <AttemptCard key={detailItem.attempt.id} detail={detailItem} />
@@ -725,17 +733,17 @@ export default function Page() {
 
                   <div className="dual-grid">
                     <Panel
-                      title="Run 报告"
-                      subtitle="如果 loop 已经生成 run 级报告，这里会直接显示。"
+                      title="运行报告"
+                      subtitle="如果循环已经生成运行级报告，这里会直接显示。"
                     >
                       <pre className="report-block">
-                        {runDetail.report || "还没有 run report。"}
+                        {localizeUiText(runDetail.report || "还没有运行报告。")}
                       </pre>
                     </Panel>
 
                     <Panel
-                      title="Run 日志"
-                      subtitle="这里只看 run-centered 事实时间线。"
+                      title="运行日志"
+                      subtitle="这里只看以运行任务为中心的事实时间线。"
                     >
                       <div className="event-list">
                         {[...runDetail.journal].reverse().slice(0, 24).map((entry) => (
@@ -753,10 +761,10 @@ export default function Page() {
                 </>
               ) : (
                 <Panel
-                  title="还没有选中 Run"
-                  subtitle="先从左侧运行池里选一条 run。"
+                  title="还没有选中运行任务"
+                  subtitle="先从左侧运行池里选一条运行任务。"
                 >
-                  <EmptyState text="这块区域会展示 run 合同、current decision、attempt 证据、运行日志和最终报告。" />
+                  <EmptyState text="这块区域会展示运行约定、当前判断、尝试证据、运行日志和最终报告。" />
                 </Panel>
               )
             ) : detail && selectedGoal ? (
@@ -829,7 +837,7 @@ export default function Page() {
                 <div className="dual-grid">
                   <Panel
                     title="分支看板"
-                    subtitle="每个 branch 都是一个独立的研究假设与工作线程。"
+                    subtitle="每个分支都是一个独立的研究假设与工作线程。"
                   >
                     <div className="branch-list">
                       {detail.branches.map(({ branch, writeback }) => (
@@ -838,15 +846,15 @@ export default function Page() {
                             <div>
                               <div className="branch-id">{branch.id}</div>
                               <div className="branch-meta">
-                                worker {branch.assigned_worker} · 分数{" "}
+                                执行器 {workerLabel(branch.assigned_worker)} · 分数{" "}
                                 {branch.score !== null ? branch.score.toFixed(2) : "--"}
                               </div>
                             </div>
                             <StatusPill value={branch.status} />
                           </div>
-                          <p className="branch-hypothesis">{branch.hypothesis}</p>
+                          <p className="branch-hypothesis">{localizeUiText(branch.hypothesis)}</p>
                           <p className="branch-summary">
-                            {writeback?.summary ?? branch.objective}
+                            {localizeUiText(writeback?.summary ?? branch.objective)}
                           </p>
                           <div className="action-row">
                             <button
@@ -868,7 +876,9 @@ export default function Page() {
                     subtitle="系统会把分支结果压缩成一份持续更新的当前版本。"
                   >
                     <pre className="report-block">
-                      {detail.report || "还没有报告。请先启动目标，让 Codex 分支开始执行。"}
+                      {localizeUiText(
+                        detail.report || "还没有报告。请先启动目标，让 Codex 分支开始执行。"
+                      )}
                     </pre>
                   </Panel>
                 </div>
@@ -937,14 +947,15 @@ function AttemptCard({
         <div>
           <div className="attempt-id">{detail.attempt.id}</div>
           <div className="attempt-meta-line">
-            {detail.attempt.attempt_type} · worker {detail.attempt.worker} · 创建{" "}
+            {attemptTypeLabel(detail.attempt.attempt_type)} · 执行器{" "}
+            {workerLabel(detail.attempt.worker)} · 创建{" "}
             {formatDateTime(detail.attempt.created_at)}
           </div>
         </div>
         <StatusPill value={detail.attempt.status} />
       </div>
 
-      <p className="attempt-objective">{detail.attempt.objective}</p>
+      <p className="attempt-objective">{localizeUiText(detail.attempt.objective)}</p>
 
       <div className="attempt-stats">
         <MiniMetric label="开始" value={formatDateTime(detail.attempt.started_at)} />
@@ -961,7 +972,7 @@ function AttemptCard({
 
       <div className="attempt-grid">
         <div className="attempt-section">
-          <div className="attempt-section-title">Attempt 契约</div>
+          <div className="attempt-section-title">尝试约定</div>
           <SectionList
             title="成功标准"
             items={detail.contract?.success_criteria ?? detail.attempt.success_criteria}
@@ -981,7 +992,7 @@ function AttemptCard({
         <div className="attempt-section">
           <div className="attempt-section-title">结果与判断</div>
           <p className="body-copy">
-            {detail.result?.summary ?? "还没有写回结果。"}
+            {localizeUiText(detail.result?.summary ?? "还没有写回结果。")}
           </p>
           <SectionList
             title="下一步"
@@ -997,7 +1008,7 @@ function AttemptCard({
           />
           {detail.runtime_verification?.failure_reason ? (
             <Callout tone="rose" title="回放失败原因">
-              {detail.runtime_verification.failure_reason}
+              {localizeUiText(detail.runtime_verification.failure_reason)}
             </Callout>
           ) : null}
           <SectionList
@@ -1008,13 +1019,13 @@ function AttemptCard({
             <CodeBlock
               title="判断摘要"
               value={[
-                `推荐动作: ${detail.evaluation.recommendation}`,
-                `建议类型: ${detail.evaluation.suggested_attempt_type ?? "无"}`,
-                `goal_progress: ${detail.evaluation.goal_progress.toFixed(2)}`,
-                `evidence_quality: ${detail.evaluation.evidence_quality.toFixed(2)}`,
-                `verification_status: ${detail.evaluation.verification_status}`,
+                `推荐动作：${statusLabel(detail.evaluation.recommendation)}`,
+                `建议类型：${detail.evaluation.suggested_attempt_type ? attemptTypeLabel(detail.evaluation.suggested_attempt_type) : "无"}`,
+                `目标进度：${detail.evaluation.goal_progress.toFixed(2)}`,
+                `证据质量：${detail.evaluation.evidence_quality.toFixed(2)}`,
+                `验证状态：${statusLabel(detail.evaluation.verification_status)}`,
                 "",
-                detail.evaluation.rationale
+                localizeUiText(detail.evaluation.rationale)
               ].join("\n")}
             />
           ) : null}
@@ -1025,19 +1036,19 @@ function AttemptCard({
         <div className="attempt-section">
           <div className="attempt-section-title">日志尾部</div>
           <CodeBlock
-            title="stderr"
-            value={detail.stderr_excerpt || "暂无 stderr 输出。"}
+            title="错误输出"
+            value={detail.stderr_excerpt || "暂无错误输出。"}
           />
         </div>
 
         <div className="attempt-section">
           <div className="attempt-section-title">辅助输出</div>
           <CodeBlock
-            title="stdout"
-            value={detail.stdout_excerpt || "暂无 stdout 输出。"}
+            title="标准输出"
+            value={detail.stdout_excerpt || "暂无标准输出。"}
           />
           <SectionList
-            title="Attempt 时间线"
+            title="尝试时间线"
             items={detail.journal.map(
               (entry) => `${formatDateTime(entry.ts)} · ${activityLabel(entry.type)}`
             )}
@@ -1072,69 +1083,6 @@ function formatDateTime(value: string | null | undefined): string {
   return new Date(value).toLocaleString("zh-CN");
 }
 
-function statusLabel(value: string) {
-  const labels: Record<string, string> = {
-    draft: "草稿",
-    planned: "已规划",
-    running: "运行中",
-    waiting_steer: "等待 Steer",
-    reviewing: "评审中",
-    completed: "已完成",
-    failed: "失败",
-    cancelled: "已取消",
-    created: "已创建",
-    queued: "排队中",
-    writing_back: "回写中",
-    judging: "评分中",
-    kept: "已保留",
-    discarded: "已丢弃",
-    respawned: "待重启",
-    stopped: "已停止",
-    applied: "已应用",
-    expired: "已过期",
-    continue: "继续",
-    retry: "重试",
-    complete: "完成",
-    wait_human: "等待人工",
-    passed: "通过",
-    not_applicable: "不适用"
-  };
-
-  return labels[value] ?? value;
-}
-
-function activityLabel(type: string) {
-  const labels: Record<string, string> = {
-    "goal.created": "目标已创建",
-    "plan.generated": "计划已生成",
-    "branch.spawned": "分支已生成",
-    "branch.queued": "分支已排队",
-    "worker.started": "Worker 已启动",
-    "worker.finished": "Worker 已完成",
-    "worker.failed": "Worker 执行失败",
-    "judge.completed": "评估已完成",
-    "report.updated": "报告已更新",
-    "steer.queued": "Steer 已排队",
-    "steer.applied": "Steer 已应用",
-    "goal.completed": "目标已结束",
-    "run.created": "Run 已创建",
-    "run.launched": "Run 已启动",
-    "run.steer.queued": "Run steer 已排队",
-    "attempt.created": "Attempt 已创建",
-    "attempt.started": "Attempt 已开始",
-    "attempt.completed": "Attempt 已完成",
-    "attempt.failed": "Attempt 失败",
-    "attempt.recovery_required": "Attempt 需要人工恢复",
-    "attempt.verification.passed": "回放验证通过",
-    "attempt.verification.failed": "回放验证失败",
-    "attempt.checkpoint.created": "检查点已创建",
-    "attempt.checkpoint.blocked": "检查点被阻塞",
-    "attempt.checkpoint.skipped": "检查点已跳过"
-  };
-
-  return labels[type] ?? type;
-}
-
 function Panel({
   title,
   subtitle,
@@ -1150,8 +1098,8 @@ function Panel({
     <section className="panel">
       <div className="panel-head">
         <div>
-          <h2 className="panel-title">{title}</h2>
-          {subtitle ? <p className="panel-subtitle">{subtitle}</p> : null}
+          <h2 className="panel-title">{localizeUiText(title)}</h2>
+          {subtitle ? <p className="panel-subtitle">{localizeUiText(subtitle)}</p> : null}
         </div>
         {actions}
       </div>
@@ -1171,7 +1119,7 @@ function SubPanel({
 }) {
   return (
     <div className={`sub-panel sub-panel-${accent}`}>
-      <h3 className="sub-panel-title">{title}</h3>
+      <h3 className="sub-panel-title">{localizeUiText(title)}</h3>
       {children}
     </div>
   );
@@ -1188,7 +1136,7 @@ function Field({
 }) {
   return (
     <label className="field">
-      <span className="field-label">{label}</span>
+      <span className="field-label">{localizeUiText(label)}</span>
       <input
         value={value}
         onChange={(event) => onChange(event.target.value)}
@@ -1211,10 +1159,10 @@ function TextAreaField({
 }) {
   return (
     <label className="field">
-      <span className="field-label">{label}</span>
+      <span className="field-label">{localizeUiText(label)}</span>
       <textarea
         value={value}
-        placeholder={placeholder}
+        placeholder={placeholder ? localizeUiText(placeholder) : undefined}
         onChange={(event) => onChange(event.target.value)}
         className="field-textarea"
         rows={4}
@@ -1230,7 +1178,7 @@ function StatusPill({ value }: { value: string }) {
 function InfoCard({ label, value }: { label: string; value: string }) {
   return (
     <article className="info-card">
-      <span className="info-label">{label}</span>
+      <span className="info-label">{localizeUiText(label)}</span>
       <strong className="info-value">{value}</strong>
     </article>
   );
@@ -1239,7 +1187,7 @@ function InfoCard({ label, value }: { label: string; value: string }) {
 function MiniMetric({ label, value }: { label: string; value: string }) {
   return (
     <div className="mini-metric">
-      <span>{label}</span>
+      <span>{localizeUiText(label)}</span>
       <strong>{value}</strong>
     </div>
   );
@@ -1248,10 +1196,10 @@ function MiniMetric({ label, value }: { label: string; value: string }) {
 function SectionList({ title, items }: { title: string; items: string[] }) {
   return (
     <section className="section-list">
-      <div className="section-list-title">{title}</div>
+      <div className="section-list-title">{localizeUiText(title)}</div>
       <ul>
         {(items.length > 0 ? items : ["暂无内容"]).map((item) => (
-          <li key={`${title}-${item}`}>{item}</li>
+          <li key={`${title}-${item}`}>{localizeUiText(item)}</li>
         ))}
       </ul>
     </section>
@@ -1267,7 +1215,7 @@ function CodeBlock({
 }) {
   return (
     <section className="section-list">
-      <div className="section-list-title">{title}</div>
+      <div className="section-list-title">{localizeUiText(title)}</div>
       <pre className="mono-block">{value}</pre>
     </section>
   );
@@ -1284,12 +1232,12 @@ function Callout({
 }) {
   return (
     <div className={`callout callout-${tone}`}>
-      <strong>{title}</strong>
+      <strong>{localizeUiText(title)}</strong>
       <p>{children}</p>
     </div>
   );
 }
 
 function EmptyState({ text }: { text: string }) {
-  return <p className="empty-state">{text}</p>;
+  return <p className="empty-state">{localizeUiText(text)}</p>;
 }

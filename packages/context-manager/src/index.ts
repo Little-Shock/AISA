@@ -90,24 +90,24 @@ export class ContextManager {
       [input.branch.id]: [
         `# ${input.branch.id}`,
         "",
-        `Summary: ${input.writeback.summary}`,
+        `摘要：${input.writeback.summary}`,
         "",
-        "## Findings",
+        "## 发现",
         ...(input.writeback.findings.length > 0
           ? input.writeback.findings.map(
               (finding) =>
                 `- [${finding.type}] ${finding.content}${
                   finding.evidence.length > 0
-                    ? ` (evidence: ${finding.evidence.join(", ")})`
+                    ? `（证据：${finding.evidence.join(", ")}）`
                     : ""
                 }`
             )
-          : ["- None"]),
+          : ["- 暂无"]),
         "",
-        "## Next Steps",
+        "## 下一步",
         ...(input.writeback.recommended_next_steps.length > 0
           ? input.writeback.recommended_next_steps.map((step) => `- ${step}`)
-          : ["- None"])
+          : ["- 暂无"])
       ].join("\n")
     };
 

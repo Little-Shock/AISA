@@ -12,61 +12,61 @@ export function buildGoalReport(input: {
   const bestWriteback = bestBranch ? input.writebacks[bestBranch.id] : null;
 
   return [
-    `# Goal Report: ${input.goal.title}`,
+    `# 目标报告：${input.goal.title}`,
     "",
-    `- Goal ID: ${input.goal.id}`,
-    `- Status: ${input.goal.status}`,
-    `- Workspace: ${input.goal.workspace_root}`,
+    `- 目标 ID：${input.goal.id}`,
+    `- 状态：${input.goal.status}`,
+    `- 工作区：${input.goal.workspace_root}`,
     "",
-    "## Executive Summary",
+    "## 执行摘要",
     "",
-    bestWriteback?.summary ?? "No branch has produced a summary yet.",
+    bestWriteback?.summary ?? "还没有分支产出摘要。",
     "",
-    "## Current Best Answer",
+    "## 当前最优结论",
     "",
     bestBranch
-      ? `Best branch is ${bestBranch.id} with score ${(
+      ? `当前最佳分支是 ${bestBranch.id}，分数 ${(
           bestBranch.score ?? 0
-        ).toFixed(2)}. Hypothesis: ${bestBranch.hypothesis}`
-      : "No branch result yet.",
+        ).toFixed(2)}。假设：${bestBranch.hypothesis}`
+      : "还没有分支结果。",
     "",
-    "## Evidence Table",
+    "## 证据表",
     "",
     ...ranked.flatMap((branch) => {
       const writeback = input.writebacks[branch.id];
       if (!writeback) {
-        return [`- ${branch.id}: no writeback yet`];
+        return [`- ${branch.id}：还没有回写结果`];
       }
 
       return writeback.findings.length > 0
         ? writeback.findings.map(
             (finding) =>
-              `- ${branch.id}: ${finding.content}${
+              `- ${branch.id}：${finding.content}${
                 finding.evidence.length > 0 ? ` [${finding.evidence.join(", ")}]` : ""
               }`
           )
-        : [`- ${branch.id}: no findings recorded`];
+        : [`- ${branch.id}：还没有记录发现`];
     }),
     "",
-    "## Competing Branches",
+    "## 候选分支",
     "",
     ...ranked.map((branch) => {
       const evaluation = input.evaluations[branch.id];
-      return `- ${branch.id}: status=${branch.status}, score=${(
+      return `- ${branch.id}：状态=${branch.status}，分数=${(
         branch.score ?? 0
-      ).toFixed(2)}, recommendation=${evaluation?.recommendation ?? "pending"}`;
+      ).toFixed(2)}，建议=${evaluation?.recommendation ?? "pending"}`;
     }),
     "",
-    "## Open Questions",
+    "## 待确认问题",
     "",
     ...(input.contextBoard.open_questions.length > 0
       ? input.contextBoard.open_questions.map((question) => `- ${question}`)
-      : ["- None."]),
+      : ["- 暂无。"]),
     "",
-    "## Recommended Next Steps",
+    "## 建议的下一步",
     "",
     ...(bestWriteback?.recommended_next_steps.length
       ? bestWriteback.recommended_next_steps.map((step) => `- ${step}`)
-      : ["- Wait for more branch results or add steer."])
+      : ["- 等待更多分支结果，或补充人工指令。"])
   ].join("\n");
 }

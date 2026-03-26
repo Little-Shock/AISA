@@ -467,6 +467,8 @@ function buildCodexWorkerPrompt(
     "- Work in read-only analysis mode. Do not modify files in the workspace.",
     "- Use local repository evidence whenever possible.",
     "- If evidence is weak or missing, say so explicitly.",
+    "- Write all user-facing natural language fields in concise Chinese.",
+    "- Keep JSON keys, enum-like machine values, file paths, shell commands, and evidence strings stable when they must stay machine-readable.",
     "- Return only valid JSON with no markdown fences and no extra commentary.",
     "",
     "Goal:",
@@ -490,16 +492,16 @@ function buildCodexWorkerPrompt(
     "- You only need to return structured JSON in this shape:",
     JSON.stringify(
       {
-        summary: "short summary",
+        summary: "简短摘要",
         findings: [
           {
             type: "fact",
-            content: "what you found",
+            content: "你确认的事实",
             evidence: ["relative/path/or/command"]
           }
         ],
-        questions: ["remaining open question"],
-        recommended_next_steps: ["best next step"],
+        questions: ["仍待确认的问题"],
+        recommended_next_steps: ["最值得做的下一步"],
         confidence: 0.72,
         artifacts: []
       },
@@ -522,6 +524,8 @@ function buildCodexAttemptPrompt(
     ...buildAttemptModeRules(attempt.attempt_type),
     "- Use local repository evidence whenever possible.",
     "- If evidence is weak or missing, say so explicitly.",
+    "- Write all user-facing natural language fields in concise Chinese.",
+    "- Keep JSON keys, enum-like machine values, file paths, shell commands, and evidence strings stable when they must stay machine-readable.",
     "- Return only valid JSON with no markdown fences and no extra commentary.",
     "",
     "Run:",
@@ -556,23 +560,23 @@ function buildCodexAttemptPrompt(
     "Return JSON in this shape:",
     JSON.stringify(
       {
-        summary: "short summary",
+        summary: "简短摘要",
         findings: [
           {
             type: "fact",
-            content: "what you found",
+            content: "你确认的事实",
             evidence: ["relative/path/or/command"]
           }
         ],
-        questions: ["remaining open question"],
-        recommended_next_steps: ["best next step"],
+        questions: ["仍待确认的问题"],
+        recommended_next_steps: ["最值得做的下一步"],
         confidence: 0.72,
         next_attempt_contract:
           attempt.attempt_type === "research"
             ? {
                 attempt_type: "execution",
-                objective: "make the smallest useful change",
-                success_criteria: ["leave a working implementation step"],
+                objective: "做出最小且有价值的改动",
+                success_criteria: ["留下可以工作的实现步骤"],
                 required_evidence: [
                   "git-visible workspace changes",
                   "a replayable verification command that checks the changed behavior"
@@ -691,7 +695,7 @@ function summarizeCodexStderr(stderr: string): string | null {
     }
 
     if (preferredPatterns.some((pattern) => pattern.test(line))) {
-      return `Worker stderr: ${line}`;
+      return `执行器错误输出：${line}`;
     }
   }
 
@@ -706,7 +710,7 @@ function summarizeCodexStderr(stderr: string): string | null {
     break;
   }
 
-  return fallback ? `Worker stderr: ${fallback}` : null;
+  return fallback ? `执行器错误输出：${fallback}` : null;
 }
 
 function buildBranchReportMarkdown(
@@ -715,45 +719,45 @@ function buildBranchReportMarkdown(
   writeback: WorkerWriteback
 ): string {
   return [
-    `# Branch Report: ${branch.id}`,
+    `# 分支报告：${branch.id}`,
     "",
-    `- Goal: ${goal.title}`,
-    `- Hypothesis: ${branch.hypothesis}`,
-    `- Objective: ${branch.objective}`,
-    `- Confidence: ${writeback.confidence}`,
+    `- 目标：${goal.title}`,
+    `- 假设：${branch.hypothesis}`,
+    `- 任务：${branch.objective}`,
+    `- 置信度：${writeback.confidence}`,
     "",
-    "## Summary",
+    "## 摘要",
     "",
     writeback.summary,
     "",
-    "## Findings",
+    "## 发现",
     "",
     ...(writeback.findings.length > 0
       ? writeback.findings.flatMap((finding) => [
           `- [${finding.type}] ${finding.content}`,
-          ...finding.evidence.map((evidence) => `  - evidence: ${evidence}`)
+          ...finding.evidence.map((evidence) => `  - 证据：${evidence}`)
         ])
-      : ["- No findings recorded."]),
+      : ["- 还没有记录发现。"]),
     "",
-    "## Open Questions",
+    "## 待确认问题",
     "",
     ...(writeback.questions.length > 0
       ? writeback.questions.map((question) => `- ${question}`)
-      : ["- None."]),
+      : ["- 暂无。"]),
     "",
-    "## Recommended Next Steps",
+    "## 建议的下一步",
     "",
     ...(writeback.recommended_next_steps.length > 0
       ? writeback.recommended_next_steps.map((step) => `- ${step}`)
-      : ["- None."]),
+      : ["- 暂无。"]),
     "",
-    "## Verification Plan",
+    "## 回放验证计划",
     "",
     ...(writeback.verification_plan?.commands.length
       ? writeback.verification_plan.commands.map(
-          (command) => `- ${command.purpose}: ${command.command}`
+          (command) => `- ${command.purpose}：${command.command}`
         )
-      : ["- None."])
+      : ["- 暂无。"])
   ].join("\n");
 }
 
@@ -763,36 +767,36 @@ function buildAttemptReportMarkdown(
   writeback: WorkerWriteback
 ): string {
   return [
-    `# Attempt Report: ${attempt.id}`,
+    `# 尝试报告：${attempt.id}`,
     "",
-    `- Run: ${run.title}`,
-    `- Type: ${attempt.attempt_type}`,
-    `- Objective: ${attempt.objective}`,
-    `- Confidence: ${writeback.confidence}`,
+    `- 运行任务：${run.title}`,
+    `- 类型：${attempt.attempt_type}`,
+    `- 任务：${attempt.objective}`,
+    `- 置信度：${writeback.confidence}`,
     "",
-    "## Summary",
+    "## 摘要",
     "",
     writeback.summary,
     "",
-    "## Findings",
+    "## 发现",
     "",
     ...(writeback.findings.length > 0
       ? writeback.findings.flatMap((finding) => [
           `- [${finding.type}] ${finding.content}`,
-          ...finding.evidence.map((evidence) => `  - evidence: ${evidence}`)
+          ...finding.evidence.map((evidence) => `  - 证据：${evidence}`)
         ])
-      : ["- No findings recorded."]),
+      : ["- 还没有记录发现。"]),
     "",
-    "## Open Questions",
+    "## 待确认问题",
     "",
     ...(writeback.questions.length > 0
       ? writeback.questions.map((question) => `- ${question}`)
-      : ["- None."]),
+      : ["- 暂无。"]),
     "",
-    "## Recommended Next Steps",
+    "## 建议的下一步",
     "",
     ...(writeback.recommended_next_steps.length > 0
       ? writeback.recommended_next_steps.map((step) => `- ${step}`)
-      : ["- None."])
+      : ["- 暂无。"])
   ].join("\n");
 }

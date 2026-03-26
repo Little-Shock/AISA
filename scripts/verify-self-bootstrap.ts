@@ -66,8 +66,11 @@ async function main(): Promise<void> {
   });
   assert.equal(template.runInput.workspace_root, rootDir);
   assert.equal(template.runInput.owner_id, "test-owner");
+  assert.equal(template.runInput.title, "AISA 自举下一步规划");
+  assert.match(template.runInput.description, /自举开发/);
+  assert.equal(template.runInput.success_criteria[0], "确定下一项该做的具体后端或运行时任务。");
   assert.ok(template.initialSteer.includes("runtime"));
-  assert.ok(template.initialSteer.includes("replay"));
+  assert.ok(template.initialSteer.includes("回放"));
 
   const run = createRun(template.runInput);
   let current = createCurrentDecision({
@@ -141,8 +144,8 @@ async function main(): Promise<void> {
   assert.equal(attempts.length, 1);
   assert.equal(attempts[0]?.attempt_type, "research");
   assert.ok(
-    attempts[0]?.objective.includes("Human steer:"),
-    "first attempt should incorporate the seeded steer"
+    attempts[0]?.objective.includes("人工指令："),
+    "first attempt should incorporate the seeded steer in Chinese"
   );
   assert.ok(
     attempts[0]?.objective.includes("runtime evidence"),

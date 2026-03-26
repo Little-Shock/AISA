@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import { stat } from "node:fs/promises";
+import { relative, resolve } from "node:path";
 import {
   createAttempt,
   createAttemptContract,
@@ -19,10 +21,12 @@ import {
   type AttemptContract,
   type AttemptContractDraft,
   type AttemptEvaluation,
+  type AttemptReviewPacket,
   type Branch,
   type CurrentDecision,
   type EvalSpec,
   type Goal,
+  type ReviewPacketArtifact,
   type Run,
   type WorkerWriteback
 } from "@autoresearch/domain";
@@ -33,8 +37,12 @@ import {
   appendRunJournal,
   getAttempt,
   getAttemptContract,
+  getAttemptContext,
   getAttemptHeartbeat,
+  getAttemptEvaluation,
+  getAttemptReviewPacket,
   getAttemptResult,
+  getAttemptRuntimeVerification,
   getCurrentDecision,
   getBranch,
   getContextBoard,
@@ -43,6 +51,7 @@ import {
   getPlanArtifacts,
   getRun,
   listAttempts,
+  listRunJournal,
   getWriteback,
   listBranches,
   listGoals,
@@ -56,6 +65,7 @@ import {
   saveAttemptContext,
   saveAttemptEvaluation,
   saveAttemptHeartbeat,
+  saveAttemptReviewPacket,
   saveAttemptResult,
   saveBranch,
   saveCurrentDecision,
@@ -409,12 +419,13 @@ export class Orchestrator {
 
     for (const run of runs) {
       const current = await getCurrentDecision(this.workspacePaths, run.id);
+      const attempts = await listAttempts(this.workspacePaths, run.id);
+      await this.ensureSettledAttemptReviewPackets(run.id, current, attempts);
 
       if (!current || current.run_status !== "running" || current.waiting_for_human) {
         continue;
       }
 
-      const attempts = await listAttempts(this.workspacePaths, run.id);
       const runningAttempt = attempts.find((attempt) => attempt.status === "running");
 
       if (runningAttempt) {
@@ -477,8 +488,8 @@ export class Orchestrator {
     current: CurrentDecision | null
   ): Promise<void> {
     const message =
-      `Attempt ${attempt.id} was still marked running when the orchestrator resumed. ` +
-      "Recovery requires human review before retry.";
+      `尝试 ${attempt.id} 在编排器恢复时仍被标记为运行中。` +
+      "重试前需要人工确认恢复。";
     const stoppedAttempt = updateAttempt(attempt, {
       status: "stopped",
       ended_at: new Date().toISOString()
@@ -510,6 +521,7 @@ export class Orchestrator {
         }
       })
     );
+    await this.persistAttemptReviewPacket(runId, attempt.id, nextCurrent);
   }
 
   private async planNextAttempt(
@@ -621,6 +633,7 @@ export class Orchestrator {
     const steers = await listRunSteers(this.workspacePaths, runId);
     const attempts = await listAttempts(this.workspacePaths, runId);
     const current = await getCurrentDecision(this.workspacePaths, runId);
+    let finalCurrentDecision = current;
 
     const previousAttempts = (
       await Promise.all(
@@ -761,6 +774,7 @@ export class Orchestrator {
         attempt,
         checkpointOutcome
       );
+      finalCurrentDecision = nextCurrent;
       await saveCurrentDecision(this.workspacePaths, nextCurrent);
       await saveRunReport(
         this.workspacePaths,
@@ -817,6 +831,7 @@ export class Orchestrator {
           waiting_for_human: true
         })
       );
+      finalCurrentDecision = await getCurrentDecision(this.workspacePaths, runId);
       await appendRunJournal(
         this.workspacePaths,
         createRunJournalEntry({
@@ -836,6 +851,9 @@ export class Orchestrator {
         startedAt: attempt.started_at ?? new Date().toISOString(),
         status: "released"
       });
+      if (["completed", "failed", "stopped"].includes(attempt.status)) {
+        await this.persistAttemptReviewPacket(runId, attempt.id, finalCurrentDecision);
+      }
     }
   }
 
@@ -867,6 +885,207 @@ export class Orchestrator {
         }
       })
     );
+  }
+
+  private async ensureSettledAttemptReviewPackets(
+    runId: string,
+    current: CurrentDecision | null,
+    attempts: Attempt[]
+  ): Promise<void> {
+    for (const attempt of attempts) {
+      if (!["completed", "failed", "stopped"].includes(attempt.status)) {
+        continue;
+      }
+
+      const reviewPacket = await getAttemptReviewPacket(
+        this.workspacePaths,
+        runId,
+        attempt.id
+      );
+      if (reviewPacket) {
+        continue;
+      }
+
+      await this.persistAttemptReviewPacket(runId, attempt.id, current);
+    }
+  }
+
+  private async persistAttemptReviewPacket(
+    runId: string,
+    attemptId: string,
+    currentSnapshot: CurrentDecision | null
+  ): Promise<void> {
+    const [
+      attempt,
+      attemptContract,
+      context,
+      result,
+      evaluation,
+      runtimeVerification,
+      journal
+    ] = await Promise.all([
+      getAttempt(this.workspacePaths, runId, attemptId),
+      getAttemptContract(this.workspacePaths, runId, attemptId),
+      getAttemptContext(this.workspacePaths, runId, attemptId),
+      getAttemptResult(this.workspacePaths, runId, attemptId),
+      getAttemptEvaluation(this.workspacePaths, runId, attemptId),
+      getAttemptRuntimeVerification(this.workspacePaths, runId, attemptId),
+      listRunJournal(this.workspacePaths, runId)
+    ]);
+    const attemptPaths = resolveAttemptPaths(this.workspacePaths, runId, attemptId);
+    const attemptJournal = journal.filter((entry) => entry.attempt_id === attemptId);
+    const failureEntry = [...attemptJournal].reverse().find((entry) =>
+      ["attempt.failed", "attempt.recovery_required"].includes(entry.type)
+    );
+    const failureMessage =
+      this.getReviewPacketFailureMessage(failureEntry?.payload) ??
+      runtimeVerification?.failure_reason ??
+      (["failed", "stopped"].includes(attempt.status)
+        ? currentSnapshot?.blocking_reason ?? `Attempt ${attempt.id} ended as ${attempt.status}.`
+        : null);
+
+    const reviewPacket: AttemptReviewPacket = {
+      run_id: runId,
+      attempt_id: attemptId,
+      attempt,
+      attempt_contract: attemptContract,
+      current_decision_snapshot: currentSnapshot,
+      context,
+      journal: attemptJournal,
+      failure_context: failureMessage
+        ? {
+            message: failureMessage,
+            journal_event_id: failureEntry?.id ?? null,
+            journal_event_ts: failureEntry?.ts ?? null
+          }
+        : null,
+      result,
+      evaluation,
+      runtime_verification: runtimeVerification,
+      artifact_manifest: await this.buildAttemptArtifactManifest({
+        attemptPaths,
+        result,
+        runtimeVerification,
+        journal: attemptJournal
+      }),
+      generated_at: new Date().toISOString()
+    };
+
+    await saveAttemptReviewPacket(this.workspacePaths, reviewPacket);
+  }
+
+  private async buildAttemptArtifactManifest(input: {
+    attemptPaths: ReturnType<typeof resolveAttemptPaths>;
+    result: WorkerWriteback | null;
+    runtimeVerification: AttemptRuntimeVerificationOutcome["verification"] | null;
+    journal: Awaited<ReturnType<typeof listRunJournal>>;
+  }): Promise<ReviewPacketArtifact[]> {
+    const candidatePaths = new Map<string, { kind: string; rawPath: string }>();
+    const addPath = (kind: string, rawPath: string | null | undefined): void => {
+      if (!rawPath) {
+        return;
+      }
+
+      const key = `${kind}:${rawPath}`;
+      if (!candidatePaths.has(key)) {
+        candidatePaths.set(key, { kind, rawPath });
+      }
+    };
+
+    addPath("attempt_meta", input.attemptPaths.metaFile);
+    addPath("attempt_contract", input.attemptPaths.contractFile);
+    addPath("attempt_context", input.attemptPaths.contextFile);
+    addPath("attempt_result", input.attemptPaths.resultFile);
+    addPath("attempt_evaluation", input.attemptPaths.evaluationFile);
+    addPath("runtime_verification", input.attemptPaths.runtimeVerificationFile);
+    addPath("heartbeat", input.attemptPaths.heartbeatFile);
+    addPath("stdout", input.attemptPaths.stdoutFile);
+    addPath("stderr", input.attemptPaths.stderrFile);
+
+    for (const artifact of input.result?.artifacts ?? []) {
+      addPath(`worker_${artifact.type}`, artifact.path);
+    }
+
+    for (const commandResult of input.runtimeVerification?.command_results ?? []) {
+      addPath("verification_stdout", commandResult.stdout_file);
+      addPath("verification_stderr", commandResult.stderr_file);
+    }
+
+    for (const entry of input.journal) {
+      const artifactPath =
+        entry.payload && typeof entry.payload === "object" && "artifact_path" in entry.payload
+          ? entry.payload.artifact_path
+          : null;
+      if (typeof artifactPath === "string" && artifactPath.length > 0) {
+        addPath(entry.type, artifactPath);
+      }
+    }
+
+    return await Promise.all(
+      [...candidatePaths.values()].map(async ({ kind, rawPath }) => {
+        const { displayPath, resolvedPath } = this.resolveReviewArtifactPath(
+          input.attemptPaths.attemptDir,
+          rawPath
+        );
+
+        try {
+          const fileStat = await stat(resolvedPath);
+          return {
+            kind,
+            path: displayPath,
+            exists: true,
+            size_bytes: fileStat.isFile() ? fileStat.size : null
+          };
+        } catch {
+          return {
+            kind,
+            path: displayPath,
+            exists: false,
+            size_bytes: null
+          };
+        }
+      })
+    );
+  }
+
+  private resolveReviewArtifactPath(
+    attemptDir: string,
+    rawPath: string
+  ): {
+    displayPath: string;
+    resolvedPath: string;
+  } {
+    const resolvedPath = resolve(attemptDir, rawPath);
+    const relativePath = relative(attemptDir, resolvedPath);
+    const displayPath =
+      relativePath.length > 0 && !relativePath.startsWith("..")
+        ? relativePath
+        : rawPath;
+
+    return {
+      displayPath,
+      resolvedPath
+    };
+  }
+
+  private getReviewPacketFailureMessage(
+    payload: Record<string, unknown> | undefined
+  ): string | null {
+    if (!payload) {
+      return null;
+    }
+
+    const message = payload.message;
+    if (typeof message === "string" && message.length > 0) {
+      return message;
+    }
+
+    const reason = payload.reason;
+    if (typeof reason === "string" && reason.length > 0) {
+      return reason;
+    }
+
+    return null;
   }
 
   private applyCheckpointOutcomeToCurrentDecision(
@@ -941,34 +1160,34 @@ export class Orchestrator {
   ): string | null {
     switch (current.recommended_next_action) {
       case "start_first_attempt":
-        return `Understand the repository and surface the best next step for goal: ${run.title}`;
+        return `理解仓库现状并找出目标的最佳下一步：${run.title}`;
       case "continue_research":
         return [
-          `Continue research for goal: ${run.title}.`,
-          latestResult ? `Latest summary: ${latestResult.summary}` : null,
+          `继续研究目标：${run.title}`,
+          latestResult ? `最新摘要：${latestResult.summary}` : null,
           current.blocking_reason
-            ? `Focus gap: ${current.blocking_reason}`
-            : "Focus on missing evidence and the best next action."
+            ? `关注缺口：${current.blocking_reason}`
+            : "优先补上缺失证据，并收束到最值得做的下一步。"
         ]
           .filter(Boolean)
           .join("\n");
       case "start_execution":
       case "continue_execution":
         return [
-          `Execute the next concrete step for goal: ${run.title}.`,
-          latestResult ? `Latest summary: ${latestResult.summary}` : current.summary || null,
-          current.blocking_reason ? `Focus: ${current.blocking_reason}` : null,
-          "Leave clear artifacts and verification evidence in the workspace."
+          `执行目标的下一项具体动作：${run.title}`,
+          latestResult ? `最新摘要：${latestResult.summary}` : current.summary || null,
+          current.blocking_reason ? `关注点：${current.blocking_reason}` : null,
+          "在工作区留下清晰的产物和验证证据。"
         ]
           .filter(Boolean)
           .join("\n");
       case "retry_attempt":
         return [
-          `Retry the previous ${attemptType} attempt for goal: ${run.title}.`,
+          `重试上一轮${attemptType === "execution" ? "执行" : "研究"}尝试，目标：${run.title}`,
           current.blocking_reason
-            ? `Fix this issue: ${current.blocking_reason}`
-            : "Strengthen the result and make the evidence more concrete.",
-          latestResult ? `Previous summary: ${latestResult.summary}` : null
+            ? `先修这个问题：${current.blocking_reason}`
+            : "补强结果，让证据更具体。",
+          latestResult ? `上一轮摘要：${latestResult.summary}` : null
         ]
           .filter(Boolean)
           .join("\n");
@@ -985,13 +1204,13 @@ export class Orchestrator {
     steerMessages: string[]
   ): string {
     return [
-      `Apply the latest human steer for goal: ${run.title}.`,
-      latestResult ? `Latest summary: ${latestResult.summary}` : current.summary || null,
-      "Human steer:",
+      `应用目标的最新人工指令：${run.title}`,
+      latestResult ? `最新摘要：${latestResult.summary}` : current.summary || null,
+      "人工指令：",
       ...steerMessages.map((message) => `- ${message}`),
       attemptType === "execution"
-        ? "Make the smallest useful change, then leave clear artifacts and verification evidence."
-        : "Use the steer to refine the analysis and return grounded findings."
+        ? "做最小且有价值的改动，并留下清晰的产物和验证证据。"
+        : "按人工指令收束分析，并返回有证据支撑的结论。"
     ]
       .filter(Boolean)
       .join("\n");
@@ -1086,32 +1305,32 @@ export class Orchestrator {
     current: CurrentDecision
   ): string {
     return [
-      `# Run Report: ${run.title}`,
+      `# 运行报告：${run.title}`,
       "",
-      `- Latest attempt: ${attempt.id}`,
-      `- Type: ${attempt.attempt_type}`,
-      `- Run status: ${current.run_status}`,
-      `- Evaluator recommendation: ${evaluation.recommendation}`,
-      `- Suggested next attempt type: ${evaluation.suggested_attempt_type ?? "none"}`,
-      `- Verification status: ${evaluation.verification_status}`,
-      `- Runtime verification: ${runtimeVerification.verification.status}`,
+      `- 最新尝试：${attempt.id}`,
+      `- 类型：${attempt.attempt_type}`,
+      `- 运行状态：${current.run_status}`,
+      `- 评估建议：${evaluation.recommendation}`,
+      `- 建议的下一次类型：${evaluation.suggested_attempt_type ?? "none"}`,
+      `- 验证状态：${evaluation.verification_status}`,
+      `- 运行时回放：${runtimeVerification.verification.status}`,
       "",
-      "## Summary",
+      "## 摘要",
       "",
       result.summary,
       "",
-      "## Evaluator",
+      "## 评估结论",
       "",
       evaluation.rationale,
       "",
-      "## Runtime Verification",
+      "## 运行时回放",
       "",
       runtimeVerification.verification.failure_reason ??
-        `Changed files: ${runtimeVerification.verification.changed_files.join(", ") || "none"}`,
+        `改动文件：${runtimeVerification.verification.changed_files.join(", ") || "none"}`,
       "",
-      "## Next Action",
+      "## 下一动作",
       "",
-      current.recommended_next_action ?? "None."
+      current.recommended_next_action ?? "暂无"
     ].join("\n");
   }
 
