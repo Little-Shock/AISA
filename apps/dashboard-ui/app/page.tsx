@@ -85,6 +85,18 @@ type RunSummaryItem = {
     waiting_for_human: boolean;
   } | null;
   attempt_count: number;
+  latest_attempt: {
+    id: string;
+    attempt_type: string;
+    status: string;
+    worker: string;
+    objective: string;
+    created_at: string;
+    started_at: string | null;
+    ended_at: string | null;
+  } | null;
+  task_focus: string;
+  verification_command_count: number;
 };
 
 type RunDetail = {
@@ -263,6 +275,19 @@ export default function Page() {
     () => runs.find((item) => item.run.id === selectedRunId) ?? null,
     [runs, selectedRunId]
   );
+  const selectedRunAttemptDetail = useMemo(() => {
+    if (!runDetail) {
+      return null;
+    }
+
+    return (
+      runDetail.attempt_details.find(
+        (item) => item.attempt.id === runDetail.current?.latest_attempt_id
+      ) ??
+      runDetail.attempt_details.at(-1) ??
+      null
+    );
+  }, [runDetail]);
 
   const overviewStats = useMemo(() => {
     const runningGoals = goals.filter((item) => item.goal.status === "running").length;
@@ -500,6 +525,19 @@ export default function Page() {
                   ) : (
                     runs.map((item) => {
                       const selected = item.run.id === selectedRunId;
+                      const taskFocus = truncateText(
+                        localizeUiText(item.task_focus || item.run.description),
+                        120
+                      );
+                      const taskSummary = truncateText(
+                        localizeUiText(
+                          item.current?.blocking_reason ??
+                            item.current?.summary ??
+                            item.run.description
+                        ),
+                        110
+                      );
+                      const workspaceLabel = abbreviateWorkspace(item.run.workspace_root);
                       return (
                         <button
                           key={item.run.id}
@@ -514,21 +552,46 @@ export default function Page() {
                             <strong>{localizeUiText(item.run.title)}</strong>
                             <StatusPill value={item.current?.run_status ?? "draft"} />
                           </div>
-                          <div className="goal-card-body">
-                            {item.run.id}
-                            <br />
-                            {item.run.workspace_root}
+                          <div className="run-card-topline">
+                            <span className="run-card-id">{item.run.id}</span>
+                            {item.latest_attempt ? (
+                              <span className="run-card-id">
+                                {attemptTypeLabel(item.latest_attempt.attempt_type)} ·{" "}
+                                {workerLabel(item.latest_attempt.worker)}
+                              </span>
+                            ) : null}
                           </div>
+                          <p className="run-card-focus">{taskFocus}</p>
+                          <div className="run-card-chips">
+                            <span className="run-card-chip">
+                              尝试 {item.attempt_count}
+                            </span>
+                            <span className="run-card-chip">
+                              {nextActionLabel(item.current?.recommended_next_action)}
+                            </span>
+                            {item.latest_attempt ? (
+                              <span className="run-card-chip">
+                                {item.latest_attempt.id}
+                              </span>
+                            ) : null}
+                            {item.verification_command_count > 0 ? (
+                              <span className="run-card-chip">
+                                回放 {item.verification_command_count}
+                              </span>
+                            ) : null}
+                            {item.current?.waiting_for_human ? (
+                              <span className="run-card-chip run-card-chip-alert">
+                                等待人工
+                              </span>
+                            ) : null}
+                          </div>
+                          <p className="run-card-summary">{taskSummary}</p>
                           <div className="goal-card-meta">
-                            尝试 {item.attempt_count} ·{" "}
-                            {nextActionLabel(item.current?.recommended_next_action)}
+                            {workspaceLabel}
+                            {item.latest_attempt?.started_at
+                              ? ` · 开始 ${formatDateTime(item.latest_attempt.started_at)}`
+                              : ""}
                           </div>
-                          <p className="run-card-summary">
-                            {truncateText(
-                              localizeUiText(item.current?.summary || item.run.description),
-                              140
-                            )}
-                          </p>
                         </button>
                       );
                     })
@@ -673,16 +736,39 @@ export default function Page() {
                     </div>
 
                     <div className="dual-grid">
-                      <SubPanel title="运行约定" accent="emerald">
-                        <p className="body-copy">{localizeUiText(runDetail.run.description)}</p>
-                        <SectionList title="成功标准" items={runDetail.run.success_criteria} />
-                        <SectionList title="约束条件" items={runDetail.run.constraints} />
+                      <SubPanel title="当前分配任务" accent="emerald">
+                        <p className="body-copy">
+                          {localizeUiText(
+                            selectedRunAttemptDetail?.contract?.objective ??
+                              selectedRunAttemptDetail?.attempt.objective ??
+                              runDetail.run.description
+                          )}
+                        </p>
                         <SectionList
-                          title="运行元信息"
+                          title="任务上下文"
                           items={[
-                            `运行 ID：${runDetail.run.id}`,
-                            `创建时间: ${formatDateTime(runDetail.run.created_at)}`,
-                            `更新时间: ${formatDateTime(runDetail.run.updated_at)}`
+                            `最新尝试：${selectedRunAttemptDetail?.attempt.id ?? runDetail.current?.latest_attempt_id ?? "暂无"}`,
+                            `尝试类型：${selectedRunAttemptDetail ? attemptTypeLabel(selectedRunAttemptDetail.attempt.attempt_type) : "暂无"}`,
+                            `执行器：${selectedRunAttemptDetail ? workerLabel(selectedRunAttemptDetail.attempt.worker) : "暂无"}`,
+                            `创建时间：${formatDateTime(selectedRunAttemptDetail?.attempt.created_at)}`,
+                            `契约回放命令：${String(selectedRunAttemptDetail?.contract?.verification_plan?.commands.length ?? 0)}`
+                          ]}
+                        />
+                        <SectionList
+                          title="当前成功标准"
+                          items={
+                            selectedRunAttemptDetail?.contract?.success_criteria ??
+                            selectedRunAttemptDetail?.attempt.success_criteria ??
+                            runDetail.run.success_criteria
+                          }
+                        />
+                        <SectionList
+                          title="运行层约定"
+                          items={[
+                            localizeUiText(runDetail.run.description),
+                            ...runDetail.run.constraints.map((constraint) =>
+                              localizeUiText(constraint)
+                            )
                           ]}
                         />
                       </SubPanel>
@@ -1075,6 +1161,16 @@ function truncateText(value: string, maxLength: number): string {
   return `${value.slice(0, maxLength).trimEnd()}...`;
 }
 
+function abbreviateWorkspace(value: string): string {
+  const normalized = value.replace(/\\/g, "/");
+  const segments = normalized.split("/").filter(Boolean);
+  if (segments.length <= 4) {
+    return value;
+  }
+
+  return `.../${segments.slice(-3).join("/")}`;
+}
+
 function formatDateTime(value: string | null | undefined): string {
   if (!value) {
     return "未记录";
@@ -1198,8 +1294,8 @@ function SectionList({ title, items }: { title: string; items: string[] }) {
     <section className="section-list">
       <div className="section-list-title">{localizeUiText(title)}</div>
       <ul>
-        {(items.length > 0 ? items : ["暂无内容"]).map((item) => (
-          <li key={`${title}-${item}`}>{localizeUiText(item)}</li>
+        {(items.length > 0 ? items : ["暂无内容"]).map((item, index) => (
+          <li key={`${title}-${index}-${item}`}>{localizeUiText(item)}</li>
         ))}
       </ul>
     </section>

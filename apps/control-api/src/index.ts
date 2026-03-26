@@ -103,11 +103,33 @@ export async function buildServer(
           getCurrentDecision(workspacePaths, run.id),
           listAttempts(workspacePaths, run.id)
         ]);
+        const latestAttempt =
+          attempts.find((attempt) => attempt.id === current?.latest_attempt_id) ??
+          attempts.at(-1) ??
+          null;
+        const latestContract = latestAttempt
+          ? await getAttemptContract(workspacePaths, run.id, latestAttempt.id)
+          : null;
 
         return {
           run,
           current,
-          attempt_count: attempts.length
+          attempt_count: attempts.length,
+          latest_attempt: latestAttempt
+            ? {
+                id: latestAttempt.id,
+                attempt_type: latestAttempt.attempt_type,
+                status: latestAttempt.status,
+                worker: latestAttempt.worker,
+                objective: latestAttempt.objective,
+                created_at: latestAttempt.created_at,
+                started_at: latestAttempt.started_at,
+                ended_at: latestAttempt.ended_at
+              }
+            : null,
+          task_focus: latestContract?.objective ?? latestAttempt?.objective ?? run.description,
+          verification_command_count:
+            latestContract?.verification_plan?.commands.length ?? 0
         };
       })
     );
