@@ -3,6 +3,7 @@ import { dirname, join } from "node:path";
 import type {
   Attempt,
   AttemptContract,
+  AttemptHeartbeat,
   AttemptEvaluation,
   AttemptRuntimeVerification,
   Branch,
@@ -23,6 +24,7 @@ import type {
 import {
   AttemptSchema,
   AttemptContractSchema,
+  AttemptHeartbeatSchema,
   AttemptEvaluationSchema,
   AttemptRuntimeVerificationSchema,
   BranchSchema,
@@ -86,6 +88,7 @@ export interface AttemptPaths {
   resultFile: string;
   evaluationFile: string;
   runtimeVerificationFile: string;
+  heartbeatFile: string;
   stdoutFile: string;
   stderrFile: string;
   artifactsDir: string;
@@ -132,6 +135,7 @@ export function resolveAttemptPaths(
     resultFile: join(attemptDir, "result.json"),
     evaluationFile: join(attemptDir, "evaluation.json"),
     runtimeVerificationFile: join(attemptDir, "artifacts", "runtime-verification.json"),
+    heartbeatFile: join(attemptDir, "artifacts", "heartbeat.json"),
     stdoutFile: join(attemptDir, "stdout.log"),
     stderrFile: join(attemptDir, "stderr.log"),
     artifactsDir: join(attemptDir, "artifacts")
@@ -483,6 +487,33 @@ export async function getAttemptContext(
 ): Promise<unknown | null> {
   try {
     return await readJsonFile<unknown>(resolveAttemptPaths(paths, runId, attemptId).contextFile);
+  } catch {
+    return null;
+  }
+}
+
+export async function saveAttemptHeartbeat(
+  paths: WorkspacePaths,
+  heartbeat: AttemptHeartbeat
+): Promise<void> {
+  const attemptPaths = await ensureAttemptDirectories(
+    paths,
+    heartbeat.run_id,
+    heartbeat.attempt_id
+  );
+  await writeJsonFile(attemptPaths.heartbeatFile, heartbeat);
+}
+
+export async function getAttemptHeartbeat(
+  paths: WorkspacePaths,
+  runId: string,
+  attemptId: string
+): Promise<AttemptHeartbeat | null> {
+  try {
+    const heartbeat = await readJsonFile<AttemptHeartbeat>(
+      resolveAttemptPaths(paths, runId, attemptId).heartbeatFile
+    );
+    return AttemptHeartbeatSchema.parse(heartbeat);
   } catch {
     return null;
   }

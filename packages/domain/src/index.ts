@@ -323,6 +323,18 @@ export const AttemptRuntimeVerificationSchema = z.object({
   created_at: z.string().datetime()
 });
 
+export const AttemptHeartbeatStatusSchema = z.enum(["active", "released"]);
+
+export const AttemptHeartbeatSchema = z.object({
+  attempt_id: z.string(),
+  run_id: z.string(),
+  owner_id: z.string().min(1),
+  status: AttemptHeartbeatStatusSchema,
+  started_at: z.string().datetime(),
+  heartbeat_at: z.string().datetime(),
+  released_at: z.string().datetime().nullable()
+});
+
 export const WorkerWritebackSchema = z.object({
   summary: z.string().min(1),
   findings: z.array(WorkerFindingSchema).default([]),
@@ -420,6 +432,8 @@ export type RuntimeVerificationFailureCode = z.infer<
 >;
 export type VerificationCommandResult = z.infer<typeof VerificationCommandResultSchema>;
 export type AttemptRuntimeVerification = z.infer<typeof AttemptRuntimeVerificationSchema>;
+export type AttemptHeartbeatStatus = z.infer<typeof AttemptHeartbeatStatusSchema>;
+export type AttemptHeartbeat = z.infer<typeof AttemptHeartbeatSchema>;
 export type WorkerWriteback = z.infer<typeof WorkerWritebackSchema>;
 export type ContextSnapshot = z.infer<typeof ContextSnapshotSchema>;
 export type EvalResult = z.infer<typeof EvalResultSchema>;

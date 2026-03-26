@@ -30,6 +30,7 @@ import {
 
 type ScenarioDriver =
   | "happy_path"
+  | "running_attempt_owned_elsewhere"
   | "research_stall"
   | "research_command_failure"
   | "execution_checkpoint_blocked_dirty_workspace"
@@ -92,6 +93,13 @@ class ScenarioAdapter {
     const nextCount = (this.counts.get(key) ?? 0) + 1;
     this.counts.set(key, nextCount);
 
+    if (
+      this.driver === "running_attempt_owned_elsewhere" &&
+      input.attempt.attempt_type === "research"
+    ) {
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+
     if (this.driver === "execution_parse_failure" && input.attempt.attempt_type === "execution") {
       throw new Error("Expected object, received string at artifacts[0]");
     }
@@ -119,6 +127,7 @@ class ScenarioAdapter {
 
     const writeback =
       this.driver === "happy_path" ||
+      this.driver === "running_attempt_owned_elsewhere" ||
       this.driver === "execution_parse_failure" ||
       this.driver === "execution_checkpoint_blocked_dirty_workspace" ||
       this.driver === "execution_missing_verification_plan"
@@ -342,6 +351,10 @@ async function runCase(scenario: ScenarioCase): Promise<ScenarioObservation> {
   const rootDir = await mkdtemp(join(tmpdir(), `aisa-${scenario.id}-`));
   const { run, workspacePaths } = await bootstrapRun(rootDir, scenario.id);
 
+  if (scenario.driver === "running_attempt_owned_elsewhere") {
+    return runConcurrentOwnerCase({ run, workspacePaths });
+  }
+
   if (scenario.driver === "execution_checkpoint_blocked_dirty_workspace") {
     await initializeGitRepo(rootDir, true);
   }
@@ -369,6 +382,35 @@ async function runCase(scenario: ScenarioCase): Promise<ScenarioObservation> {
   assert.equal(persistedRun.id, run.id, `${scenario.id}: persisted run missing`);
 
   return collectObservation(workspacePaths, run.id);
+}
+
+async function runConcurrentOwnerCase(input: {
+  run: Run;
+  workspacePaths: ReturnType<typeof resolveWorkspacePaths>;
+}): Promise<ScenarioObservation> {
+  const primary = new Orchestrator(
+    input.workspacePaths,
+    new ScenarioAdapter("running_attempt_owned_elsewhere") as never,
+    undefined,
+    60_000
+  );
+  const secondary = new Orchestrator(
+    input.workspacePaths,
+    new ScenarioAdapter("running_attempt_owned_elsewhere") as never,
+    undefined,
+    60_000
+  );
+
+  await primary.tick();
+  await primary.tick();
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  await secondary.tick();
+  await new Promise((resolve) => setTimeout(resolve, 350));
+
+  const persistedRun = await getRun(input.workspacePaths, input.run.id);
+  assert.equal(persistedRun.id, input.run.id, "concurrent owner case: persisted run missing");
+
+  return collectObservation(input.workspacePaths, input.run.id);
 }
 
 async function initializeGitRepo(rootDir: string, leaveDirty: boolean): Promise<void> {

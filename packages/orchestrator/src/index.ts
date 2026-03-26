@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import {
   createAttempt,
   createAttemptContract,
@@ -32,6 +33,7 @@ import {
   appendRunJournal,
   getAttempt,
   getAttemptContract,
+  getAttemptHeartbeat,
   getAttemptResult,
   getCurrentDecision,
   getBranch,
@@ -53,6 +55,7 @@ import {
   saveAttemptContract,
   saveAttemptContext,
   saveAttemptEvaluation,
+  saveAttemptHeartbeat,
   saveAttemptResult,
   saveBranch,
   saveCurrentDecision,
@@ -77,17 +80,29 @@ import {
   type AttemptRuntimeVerificationOutcome
 } from "./runtime-verification.js";
 
+export interface OrchestratorOptions {
+  attemptHeartbeatIntervalMs?: number;
+  attemptHeartbeatStaleMs?: number;
+}
+
 export class Orchestrator {
   private timer: NodeJS.Timeout | null = null;
   private readonly activeBranches = new Set<string>();
   private readonly activeAttempts = new Set<string>();
+  private readonly instanceId = `orch_${randomUUID().slice(0, 8)}`;
+  private readonly attemptHeartbeatIntervalMs: number;
+  private readonly attemptHeartbeatStaleMs: number;
 
   constructor(
     private readonly workspacePaths: WorkspacePaths,
     private readonly adapter: CodexCliWorkerAdapter,
     private readonly contextManager = new ContextManager(),
-    private readonly pollIntervalMs = 1500
-  ) {}
+    private readonly pollIntervalMs = 1500,
+    options: OrchestratorOptions = {}
+  ) {
+    this.attemptHeartbeatIntervalMs = options.attemptHeartbeatIntervalMs ?? 1000;
+    this.attemptHeartbeatStaleMs = options.attemptHeartbeatStaleMs ?? 5000;
+  }
 
   start(): void {
     if (this.timer) {
@@ -406,6 +421,10 @@ export class Orchestrator {
         const activeKey = this.getActiveAttemptKey(run.id, runningAttempt.id);
 
         if (!this.activeAttempts.has(activeKey)) {
+          if (await this.isAttemptHeartbeatFresh(run.id, runningAttempt.id)) {
+            continue;
+          }
+
           await this.recoverRunningAttempt(run.id, runningAttempt, current);
         }
         continue;
@@ -650,6 +669,21 @@ export class Orchestrator {
       })
     );
     await saveAttemptContext(this.workspacePaths, runId, attempt.id, context);
+    await this.writeAttemptHeartbeat({
+      runId,
+      attemptId: attempt.id,
+      startedAt: attempt.started_at ?? new Date().toISOString(),
+      status: "active"
+    });
+    const heartbeatTimer = setInterval(() => {
+      void this.writeAttemptHeartbeat({
+        runId,
+        attemptId: attempt.id,
+        startedAt: attempt.started_at ?? new Date().toISOString(),
+        status: "active"
+      });
+    }, this.attemptHeartbeatIntervalMs);
+    heartbeatTimer.unref?.();
     const checkpointPreflight = await captureAttemptCheckpointPreflight({
       attempt,
       attemptPaths
@@ -788,6 +822,14 @@ export class Orchestrator {
           }
         })
       );
+    } finally {
+      clearInterval(heartbeatTimer);
+      await this.writeAttemptHeartbeat({
+        runId,
+        attemptId: attempt.id,
+        startedAt: attempt.started_at ?? new Date().toISOString(),
+        status: "released"
+      });
     }
   }
 
@@ -1196,5 +1238,40 @@ export class Orchestrator {
 
   private getActiveAttemptKey(runId: string, attemptId: string): string {
     return `${runId}:${attemptId}`;
+  }
+
+  private async isAttemptHeartbeatFresh(
+    runId: string,
+    attemptId: string
+  ): Promise<boolean> {
+    const heartbeat = await getAttemptHeartbeat(this.workspacePaths, runId, attemptId);
+    if (!heartbeat || heartbeat.status !== "active") {
+      return false;
+    }
+
+    const heartbeatAtMs = Date.parse(heartbeat.heartbeat_at);
+    if (Number.isNaN(heartbeatAtMs)) {
+      return false;
+    }
+
+    return Date.now() - heartbeatAtMs <= this.attemptHeartbeatStaleMs;
+  }
+
+  private async writeAttemptHeartbeat(input: {
+    runId: string;
+    attemptId: string;
+    startedAt: string;
+    status: "active" | "released";
+  }): Promise<void> {
+    const now = new Date().toISOString();
+    await saveAttemptHeartbeat(this.workspacePaths, {
+      attempt_id: input.attemptId,
+      run_id: input.runId,
+      owner_id: this.instanceId,
+      status: input.status,
+      started_at: input.startedAt,
+      heartbeat_at: now,
+      released_at: input.status === "released" ? now : null
+    });
   }
 }

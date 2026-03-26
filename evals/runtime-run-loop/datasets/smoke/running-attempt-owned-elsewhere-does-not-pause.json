@@ -1,0 +1,20 @@
+{
+  "id": "running-attempt-owned-elsewhere-does-not-pause",
+  "description": "A second orchestrator instance must not pause a still-running attempt that is actively owned by another live orchestrator.",
+  "driver": "running_attempt_owned_elsewhere",
+  "max_ticks": 1,
+  "expected": {
+    "run_status": "running",
+    "waiting_for_human": false,
+    "recommended_next_action": "start_execution",
+    "attempt_types": ["research"],
+    "attempt_statuses": ["completed"],
+    "verification_statuses": ["not_applicable"],
+    "required_journal_types": ["attempt.started", "attempt.completed"],
+    "required_journal_counts": {
+      "attempt.started": 1,
+      "attempt.completed": 1,
+      "attempt.recovery_required": 0
+    }
+  }
+}
