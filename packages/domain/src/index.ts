@@ -353,6 +353,35 @@ export const WorkerWritebackSchema = z.object({
     .default([])
 });
 
+export const ReviewPacketArtifactSchema = z.object({
+  kind: z.string().min(1),
+  path: z.string().min(1),
+  exists: z.boolean(),
+  size_bytes: z.number().int().nonnegative().nullable()
+});
+
+export const AttemptReviewPacketSchema = z.object({
+  run_id: z.string(),
+  attempt_id: z.string(),
+  attempt: AttemptSchema,
+  attempt_contract: AttemptContractSchema.nullable(),
+  current_decision_snapshot: CurrentDecisionSchema.nullable(),
+  context: z.unknown().nullable(),
+  journal: z.array(RunJournalEntrySchema).default([]),
+  failure_context: z
+    .object({
+      message: z.string().min(1),
+      journal_event_id: z.string().nullable(),
+      journal_event_ts: z.string().datetime().nullable()
+    })
+    .nullable(),
+  result: WorkerWritebackSchema.nullable(),
+  evaluation: AttemptEvaluationSchema.nullable(),
+  runtime_verification: AttemptRuntimeVerificationSchema.nullable(),
+  artifact_manifest: z.array(ReviewPacketArtifactSchema).default([]),
+  generated_at: z.string().datetime()
+});
+
 export const ContextSnapshotSchema = z.object({
   id: z.string(),
   goal_id: z.string(),
@@ -435,6 +464,8 @@ export type AttemptRuntimeVerification = z.infer<typeof AttemptRuntimeVerificati
 export type AttemptHeartbeatStatus = z.infer<typeof AttemptHeartbeatStatusSchema>;
 export type AttemptHeartbeat = z.infer<typeof AttemptHeartbeatSchema>;
 export type WorkerWriteback = z.infer<typeof WorkerWritebackSchema>;
+export type ReviewPacketArtifact = z.infer<typeof ReviewPacketArtifactSchema>;
+export type AttemptReviewPacket = z.infer<typeof AttemptReviewPacketSchema>;
 export type ContextSnapshot = z.infer<typeof ContextSnapshotSchema>;
 export type EvalResult = z.infer<typeof EvalResultSchema>;
 export type ContextBoard = z.infer<typeof ContextBoardSchema>;

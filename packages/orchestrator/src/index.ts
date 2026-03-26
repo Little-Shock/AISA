@@ -93,6 +93,8 @@ import {
 export interface OrchestratorOptions {
   attemptHeartbeatIntervalMs?: number;
   attemptHeartbeatStaleMs?: number;
+  waitingHumanAutoResumeMs?: number;
+  maxAutomaticResumeCycles?: number;
 }
 
 export class Orchestrator {
@@ -102,6 +104,8 @@ export class Orchestrator {
   private readonly instanceId = `orch_${randomUUID().slice(0, 8)}`;
   private readonly attemptHeartbeatIntervalMs: number;
   private readonly attemptHeartbeatStaleMs: number;
+  private readonly waitingHumanAutoResumeMs: number;
+  private readonly maxAutomaticResumeCycles: number;
 
   constructor(
     private readonly workspacePaths: WorkspacePaths,
@@ -112,6 +116,12 @@ export class Orchestrator {
   ) {
     this.attemptHeartbeatIntervalMs = options.attemptHeartbeatIntervalMs ?? 1000;
     this.attemptHeartbeatStaleMs = options.attemptHeartbeatStaleMs ?? 5000;
+    this.waitingHumanAutoResumeMs =
+      options.waitingHumanAutoResumeMs ??
+      readPositiveIntegerEnv("AISA_WAITING_HUMAN_AUTO_RESUME_MS", 120_000);
+    this.maxAutomaticResumeCycles =
+      options.maxAutomaticResumeCycles ??
+      readPositiveIntegerEnv("AISA_MAX_AUTOMATIC_RESUME_CYCLES", 3);
   }
 
   start(): void {
@@ -422,7 +432,16 @@ export class Orchestrator {
       const attempts = await listAttempts(this.workspacePaths, run.id);
       await this.ensureSettledAttemptReviewPackets(run.id, current, attempts);
 
-      if (!current || current.run_status !== "running" || current.waiting_for_human) {
+      if (!current) {
+        continue;
+      }
+
+      if (current.waiting_for_human) {
+        await this.maybeAutoResumeWaitingRun(run.id, current, attempts);
+        continue;
+      }
+
+      if (current.run_status !== "running") {
         continue;
       }
 
@@ -489,7 +508,7 @@ export class Orchestrator {
   ): Promise<void> {
     const message =
       `尝试 ${attempt.id} 在编排器恢复时仍被标记为运行中。` +
-      "重试前需要人工确认恢复。";
+      "会先短暂等待人工接管，超时后自动恢复。";
     const stoppedAttempt = updateAttempt(attempt, {
       status: "stopped",
       ended_at: new Date().toISOString()
@@ -511,16 +530,16 @@ export class Orchestrator {
     await saveCurrentDecision(this.workspacePaths, nextCurrent);
     await appendRunJournal(
       this.workspacePaths,
-      createRunJournalEntry({
-        run_id: runId,
-        attempt_id: attempt.id,
-        type: "attempt.recovery_required",
-        payload: {
-          previous_status: attempt.status,
-          recovery_policy: "pause_for_human_review"
-        }
-      })
-    );
+        createRunJournalEntry({
+          run_id: runId,
+          attempt_id: attempt.id,
+          type: "attempt.recovery_required",
+          payload: {
+            previous_status: attempt.status,
+            recovery_policy: "auto_resume_after_human_window"
+          }
+        })
+      );
     await this.persistAttemptReviewPacket(runId, attempt.id, nextCurrent);
   }
 
@@ -1164,10 +1183,11 @@ export class Orchestrator {
       case "continue_research":
         return [
           `继续研究目标：${run.title}`,
-          latestResult ? `最新摘要：${latestResult.summary}` : null,
           current.blocking_reason
-            ? `关注缺口：${current.blocking_reason}`
-            : "优先补上缺失证据，并收束到最值得做的下一步。"
+            ? `先怀疑并复核这个卡点：${current.blocking_reason}`
+            : "先怀疑上一轮结论，再补上缺失证据并收束到最值得做的下一步。",
+          latestResult ? `最新摘要：${latestResult.summary}` : null,
+          "不要延续默认假设，优先找出为什么现有方向可能不成立。"
         ]
           .filter(Boolean)
           .join("\n");
@@ -1483,6 +1503,261 @@ export class Orchestrator {
     return `${runId}:${attemptId}`;
   }
 
+  private async maybeAutoResumeWaitingRun(
+    runId: string,
+    current: CurrentDecision,
+    attempts: Attempt[]
+  ): Promise<void> {
+    if (current.run_status !== "waiting_steer" || this.waitingHumanAutoResumeMs <= 0) {
+      return;
+    }
+
+    const updatedAtMs = Date.parse(current.updated_at);
+    if (Number.isNaN(updatedAtMs) || Date.now() - updatedAtMs < this.waitingHumanAutoResumeMs) {
+      return;
+    }
+
+    const journal = await listRunJournal(this.workspacePaths, runId);
+    const automaticResumeCount = this.countAutomaticResumeCyclesSinceLastSteer(journal);
+
+    if (automaticResumeCount >= this.maxAutomaticResumeCycles) {
+      await this.persistAutomaticResumeExhausted(runId, current, journal, automaticResumeCount);
+      return;
+    }
+
+    const plan = this.buildAutomaticResumePlan({
+      current,
+      attempts,
+      journal
+    });
+
+    if (!plan) {
+      await this.persistAutomaticResumeBlocked(runId, current, journal);
+      return;
+    }
+
+    await saveCurrentDecision(
+      this.workspacePaths,
+      updateCurrentDecision(current, {
+        run_status: "running",
+        recommended_next_action: plan.next_action,
+        recommended_attempt_type: plan.attempt_type,
+        summary: plan.summary,
+        blocking_reason: plan.blocking_reason,
+        waiting_for_human: false
+      })
+    );
+    await appendRunJournal(
+      this.workspacePaths,
+      createRunJournalEntry({
+        run_id: runId,
+        attempt_id: current.latest_attempt_id,
+        type: "run.auto_resume.scheduled",
+        payload: {
+          cycle: automaticResumeCount + 1,
+          next_action: plan.next_action,
+          attempt_type: plan.attempt_type,
+          reason: plan.reason
+        }
+      })
+    );
+  }
+
+  private buildAutomaticResumePlan(input: {
+    current: CurrentDecision;
+    attempts: Attempt[];
+    journal: Awaited<ReturnType<typeof listRunJournal>>;
+  }):
+    | {
+        next_action: string;
+        attempt_type: Attempt["attempt_type"];
+        summary: string;
+        blocking_reason: string | null;
+        reason: string;
+      }
+    | null {
+    const latestAttempt = this.getLatestAttempt(input.current, input.attempts);
+    if (!latestAttempt) {
+      return {
+        next_action: "start_first_attempt",
+        attempt_type: "research",
+        summary: "人工窗口超时，系统自动恢复并重新启动首次研究。",
+        blocking_reason: input.current.blocking_reason,
+        reason: "no_attempts_yet"
+      };
+    }
+
+    if (this.hasCheckpointBlocker(input.journal, latestAttempt.id)) {
+      return null;
+    }
+
+    if (latestAttempt.status === "stopped") {
+      return {
+        next_action: "retry_attempt",
+        attempt_type: latestAttempt.attempt_type,
+        summary: `人工窗口超时，系统自动恢复上一轮${latestAttempt.attempt_type === "execution" ? "执行" : "研究"}尝试。`,
+        blocking_reason:
+          input.current.blocking_reason ??
+          "上一轮尝试中断，系统会先按原契约恢复。",
+        reason: "resume_stopped_attempt"
+      };
+    }
+
+    if (latestAttempt.status === "failed") {
+      if (latestAttempt.attempt_type === "execution") {
+        return {
+          next_action: "continue_research",
+          attempt_type: "research",
+          summary:
+            "人工窗口超时，系统自动进入怀疑式研究，先解释上一轮执行为什么失败，再决定下一步。",
+          blocking_reason:
+            input.current.blocking_reason ??
+            "上一轮执行失败，先审查失败原因和约束是否冲突。",
+          reason: "failed_execution_needs_skeptical_research"
+        };
+      }
+
+      return {
+        next_action: "retry_attempt",
+        attempt_type: "research",
+        summary: "人工窗口超时，系统自动继续研究并优先诊断阻塞点。",
+        blocking_reason:
+          input.current.blocking_reason ??
+          "上一轮研究失败，先定位阻塞点再继续。",
+        reason: "failed_research_retry"
+      };
+    }
+
+    if (latestAttempt.status === "completed") {
+      return {
+        next_action: "continue_research",
+        attempt_type: "research",
+        summary:
+          "人工窗口超时，系统自动进入怀疑式研究，重新审查现有证据并收束下一步。",
+        blocking_reason:
+          input.current.blocking_reason ??
+          "需要重新审查现有证据，避免沿着旧假设继续空转。",
+        reason: "completed_attempt_needs_skeptical_review"
+      };
+    }
+
+    return null;
+  }
+
+  private countAutomaticResumeCyclesSinceLastSteer(
+    journal: Awaited<ReturnType<typeof listRunJournal>>
+  ): number {
+    let count = 0;
+
+    for (let index = journal.length - 1; index >= 0; index -= 1) {
+      const entry = journal[index];
+      if (!entry) {
+        continue;
+      }
+
+      if (entry.type === "run.steer.queued") {
+        break;
+      }
+
+      if (entry.type === "run.auto_resume.scheduled") {
+        count += 1;
+      }
+    }
+
+    return count;
+  }
+
+  private hasCheckpointBlocker(
+    journal: Awaited<ReturnType<typeof listRunJournal>>,
+    attemptId: string
+  ): boolean {
+    return journal.some(
+      (entry) => entry.attempt_id === attemptId && entry.type === "attempt.checkpoint.blocked"
+    );
+  }
+
+  private async persistAutomaticResumeBlocked(
+    runId: string,
+    current: CurrentDecision,
+    journal: Awaited<ReturnType<typeof listRunJournal>>
+  ): Promise<void> {
+    if (this.hasAutoResumeTerminalEvent(journal, "run.auto_resume.blocked")) {
+      return;
+    }
+
+    await appendRunJournal(
+      this.workspacePaths,
+      createRunJournalEntry({
+        run_id: runId,
+        attempt_id: current.latest_attempt_id,
+        type: "run.auto_resume.blocked",
+        payload: {
+          reason: "manual_only_blocker",
+          message:
+            current.blocking_reason ??
+            "当前阻塞涉及人工边界，系统未找到安全的自动续跑方案。"
+        }
+      })
+    );
+  }
+
+  private async persistAutomaticResumeExhausted(
+    runId: string,
+    current: CurrentDecision,
+    journal: Awaited<ReturnType<typeof listRunJournal>>,
+    automaticResumeCount: number
+  ): Promise<void> {
+    if (this.hasAutoResumeTerminalEvent(journal, "run.auto_resume.exhausted")) {
+      return;
+    }
+
+    const message = `自动续跑已尝试 ${automaticResumeCount} 轮，仍未形成可执行推进方案，现停下等待人工。`;
+    await saveCurrentDecision(
+      this.workspacePaths,
+      updateCurrentDecision(current, {
+        run_status: "waiting_steer",
+        recommended_next_action: "wait_for_human",
+        summary: message,
+        blocking_reason: [current.blocking_reason, message].filter(Boolean).join(" "),
+        waiting_for_human: true
+      })
+    );
+    await appendRunJournal(
+      this.workspacePaths,
+      createRunJournalEntry({
+        run_id: runId,
+        attempt_id: current.latest_attempt_id,
+        type: "run.auto_resume.exhausted",
+        payload: {
+          attempted_cycles: automaticResumeCount,
+          message
+        }
+      })
+    );
+  }
+
+  private hasAutoResumeTerminalEvent(
+    journal: Awaited<ReturnType<typeof listRunJournal>>,
+    type: "run.auto_resume.blocked" | "run.auto_resume.exhausted"
+  ): boolean {
+    for (let index = journal.length - 1; index >= 0; index -= 1) {
+      const entry = journal[index];
+      if (!entry) {
+        continue;
+      }
+
+      if (entry.type === "run.steer.queued") {
+        return false;
+      }
+
+      if (entry.type === type) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
   private hasActiveAttemptForRun(runId: string): boolean {
     const prefix = `${runId}:`;
     for (const activeKey of this.activeAttempts) {
@@ -1528,4 +1803,14 @@ export class Orchestrator {
       released_at: input.status === "released" ? now : null
     });
   }
+}
+
+function readPositiveIntegerEnv(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (!raw) {
+    return fallback;
+  }
+
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }

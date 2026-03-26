@@ -5,6 +5,7 @@ import type {
   AttemptContract,
   AttemptHeartbeat,
   AttemptEvaluation,
+  AttemptReviewPacket,
   AttemptRuntimeVerification,
   Branch,
   BranchSpec,
@@ -26,6 +27,7 @@ import {
   AttemptContractSchema,
   AttemptHeartbeatSchema,
   AttemptEvaluationSchema,
+  AttemptReviewPacketSchema,
   AttemptRuntimeVerificationSchema,
   BranchSchema,
   ContextBoardSchema,
@@ -87,6 +89,7 @@ export interface AttemptPaths {
   contextFile: string;
   resultFile: string;
   evaluationFile: string;
+  reviewPacketFile: string;
   runtimeVerificationFile: string;
   heartbeatFile: string;
   stdoutFile: string;
@@ -134,6 +137,7 @@ export function resolveAttemptPaths(
     contextFile: join(attemptDir, "context.json"),
     resultFile: join(attemptDir, "result.json"),
     evaluationFile: join(attemptDir, "evaluation.json"),
+    reviewPacketFile: join(attemptDir, "review_packet.json"),
     runtimeVerificationFile: join(attemptDir, "artifacts", "runtime-verification.json"),
     heartbeatFile: join(attemptDir, "artifacts", "heartbeat.json"),
     stdoutFile: join(attemptDir, "stdout.log"),
@@ -556,6 +560,18 @@ export async function saveAttemptEvaluation(
   await writeJsonFile(attemptPaths.evaluationFile, evaluation);
 }
 
+export async function saveAttemptReviewPacket(
+  paths: WorkspacePaths,
+  reviewPacket: AttemptReviewPacket
+): Promise<void> {
+  const attemptPaths = await ensureAttemptDirectories(
+    paths,
+    reviewPacket.run_id,
+    reviewPacket.attempt_id
+  );
+  await writeJsonFile(attemptPaths.reviewPacketFile, reviewPacket);
+}
+
 export async function saveAttemptRuntimeVerification(
   paths: WorkspacePaths,
   verification: AttemptRuntimeVerification
@@ -578,6 +594,21 @@ export async function getAttemptEvaluation(
       resolveAttemptPaths(paths, runId, attemptId).evaluationFile
     );
     return AttemptEvaluationSchema.parse(evaluation);
+  } catch {
+    return null;
+  }
+}
+
+export async function getAttemptReviewPacket(
+  paths: WorkspacePaths,
+  runId: string,
+  attemptId: string
+): Promise<AttemptReviewPacket | null> {
+  try {
+    const reviewPacket = await readJsonFile<AttemptReviewPacket>(
+      resolveAttemptPaths(paths, runId, attemptId).reviewPacketFile
+    );
+    return AttemptReviewPacketSchema.parse(reviewPacket);
   } catch {
     return null;
   }

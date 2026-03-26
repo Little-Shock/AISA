@@ -9,7 +9,7 @@
     "recommended_next_action": null,
     "attempt_types": ["research", "execution", "execution"],
     "attempt_statuses": ["completed", "stopped", "completed"],
-    "verification_statuses": ["passed"],
+    "verification_statuses": ["not_applicable", "passed"],
     "required_journal_types": [
       "run.steer.queued",
       "attempt.started",
@@ -19,8 +19,8 @@
     ],
     "required_journal_counts": {
       "run.steer.queued": 1,
-      "attempt.started": 1,
-      "attempt.completed": 1,
+      "attempt.started": 3,
+      "attempt.completed": 2,
       "attempt.failed": 0,
       "attempt.verification.passed": 1,
       "attempt.checkpoint.created": 1

@@ -1,0 +1,680 @@
+import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
+import { mkdtemp, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import {
+  createAttempt,
+  createAttemptContract,
+  createCurrentDecision,
+  createRun,
+  createRunJournalEntry,
+  updateAttempt,
+  type Attempt,
+  type Run,
+  type WorkerWriteback
+} from "../packages/domain/src/index.js";
+import { Orchestrator } from "../packages/orchestrator/src/index.js";
+import {
+  appendRunJournal,
+  ensureWorkspace,
+  getCurrentDecision,
+  listAttempts,
+  listRunJournal,
+  resolveWorkspacePaths,
+  saveAttempt,
+  saveAttemptContract,
+  saveAttemptResult,
+  saveCurrentDecision,
+  saveRun
+} from "../packages/state-store/src/index.js";
+
+type CaseResult = {
+  id: string;
+  status: "pass" | "fail";
+  error?: string;
+};
+
+class LowSignalResearchAdapter {
+  readonly type = "fake-codex";
+
+  async runAttemptTask(input: { attempt: Attempt }): Promise<{
+    writeback: WorkerWriteback;
+    reportMarkdown: string;
+    exitCode: number;
+  }> {
+    if (input.attempt.attempt_type !== "research") {
+      throw new Error("Expected an automatic research retry.");
+    }
+
+    return {
+      writeback: {
+        summary: "Still missing grounded proof for the next move.",
+        findings: [
+          {
+            type: "hypothesis",
+            content: "The answer might be elsewhere.",
+            evidence: []
+          }
+        ],
+        questions: ["Need stronger repository evidence."],
+        recommended_next_steps: [],
+        confidence: 0.25,
+        artifacts: []
+      },
+      reportMarkdown: "# fake",
+      exitCode: 0
+    };
+  }
+}
+
+class NoDispatchAdapter {
+  readonly type = "fake-codex";
+
+  async runAttemptTask(): Promise<never> {
+    throw new Error("This case must not dispatch any new attempt.");
+  }
+}
+
+class RecoveryExecutionAdapter {
+  readonly type = "fake-codex";
+
+  async runAttemptTask(input: {
+    run: Run;
+    attempt: Attempt;
+  }): Promise<{
+    writeback: WorkerWriteback;
+    reportMarkdown: string;
+    exitCode: number;
+  }> {
+    if (input.attempt.attempt_type !== "execution") {
+      throw new Error("Recovery case should only dispatch execution.");
+    }
+
+    await writeFile(
+      join(input.run.workspace_root, "execution-change.md"),
+      `execution change from ${input.attempt.id}\n`,
+      "utf8"
+    );
+
+    return {
+      writeback: {
+        summary: "Recovered execution completed and left verification evidence.",
+        findings: [
+          {
+            type: "fact",
+            content: "Patched the intended target after recovery.",
+            evidence: ["execution-change.md"]
+          }
+        ],
+        questions: [],
+        recommended_next_steps: [],
+        confidence: 0.9,
+        artifacts: [{ type: "patch", path: "artifacts/diff.patch" }]
+      },
+      reportMarkdown: "# fake",
+      exitCode: 0
+    };
+  }
+}
+
+async function wait(ms: number): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function settle(orchestrator: Orchestrator, iterations: number, delayMs = 40): Promise<void> {
+  for (let index = 0; index < iterations; index += 1) {
+    await orchestrator.tick();
+    await wait(delayMs);
+  }
+}
+
+async function bootstrapRun(title: string): Promise<{
+  run: Run;
+  workspacePaths: ReturnType<typeof resolveWorkspacePaths>;
+  rootDir: string;
+}> {
+  const rootDir = await mkdtemp(join(tmpdir(), `aisa-autonomy-${title}-`));
+  const workspacePaths = resolveWorkspacePaths(rootDir);
+  await ensureWorkspace(workspacePaths);
+
+  const run = createRun({
+    title,
+    description: "Verify autonomous resume behavior",
+    success_criteria: ["Produce the next valid move without defaulting to human wait."],
+    constraints: [],
+    owner_id: "test",
+    workspace_root: rootDir
+  });
+
+  await saveRun(workspacePaths, run);
+  await appendRunJournal(
+    workspacePaths,
+    createRunJournalEntry({
+      run_id: run.id,
+      type: "run.created",
+      payload: {
+        title: run.title
+      }
+    })
+  );
+
+  return {
+    run,
+    workspacePaths,
+    rootDir
+  };
+}
+
+async function initializeGitRepo(rootDir: string): Promise<void> {
+  await writeFile(
+    join(rootDir, ".gitignore"),
+    ["runs/", "state/", "events/", "artifacts/", "reports/", "plans/"].join("\n") + "\n",
+    "utf8"
+  );
+  await writeFile(join(rootDir, "README.md"), "# autonomy verify\n", "utf8");
+  await runCommand(rootDir, ["git", "-C", rootDir, "init"]);
+  await runCommand(rootDir, ["git", "-C", rootDir, "config", "user.name", "AISA Verify"]);
+  await runCommand(rootDir, ["git", "-C", rootDir, "config", "user.email", "aisa-verify@example.com"]);
+  await runCommand(rootDir, ["git", "-C", rootDir, "add", "."]);
+  await runCommand(rootDir, ["git", "-C", rootDir, "commit", "-m", "test: seed autonomy repo"]);
+}
+
+async function runCommand(rootDir: string, args: string[]): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    const [command, ...commandArgs] = args;
+    const child = spawn(command!, commandArgs, {
+      cwd: rootDir,
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+    let stderr = "";
+    child.stderr.on("data", (chunk) => {
+      stderr += String(chunk);
+    });
+    child.on("error", (error) => {
+      reject(error);
+    });
+    child.on("close", (code) => {
+      if ((code ?? 1) !== 0) {
+        reject(new Error(stderr || `Command failed: ${args.join(" ")}`));
+        return;
+      }
+
+      resolve();
+    });
+  });
+}
+
+async function verifyFailedExecutionAutoResumes(): Promise<void> {
+  const { run, workspacePaths } = await bootstrapRun("failed-execution-auto-resume");
+  const failedExecution = updateAttempt(
+    createAttempt({
+      run_id: run.id,
+      attempt_type: "execution",
+      worker: "fake-codex",
+      objective: "Apply the planned execution step.",
+      success_criteria: run.success_criteria,
+      workspace_root: run.workspace_root
+    }),
+    {
+      status: "failed",
+      started_at: new Date().toISOString(),
+      ended_at: new Date().toISOString()
+    }
+  );
+
+  await saveAttempt(workspacePaths, failedExecution);
+  await saveCurrentDecision(
+    workspacePaths,
+    createCurrentDecision({
+      run_id: run.id,
+      run_status: "waiting_steer",
+      latest_attempt_id: failedExecution.id,
+      recommended_next_action: "wait_for_human",
+      recommended_attempt_type: "execution",
+      summary: "Execution failed and is waiting for steer.",
+      blocking_reason: "Expected object, received string at artifacts[0]",
+      waiting_for_human: true
+    })
+  );
+  await appendRunJournal(
+    workspacePaths,
+    createRunJournalEntry({
+      run_id: run.id,
+      attempt_id: failedExecution.id,
+      type: "attempt.failed",
+      payload: {
+        message: "Expected object, received string at artifacts[0]"
+      }
+    })
+  );
+
+  const orchestrator = new Orchestrator(
+    workspacePaths,
+    new LowSignalResearchAdapter() as never,
+    undefined,
+    60_000,
+    {
+      waitingHumanAutoResumeMs: 30,
+      maxAutomaticResumeCycles: 2
+    }
+  );
+
+  await wait(40);
+  await settle(orchestrator, 3);
+
+  const current = await getCurrentDecision(workspacePaths, run.id);
+  const attempts = await listAttempts(workspacePaths, run.id);
+  const journal = await listRunJournal(workspacePaths, run.id);
+
+  assert.ok(current, "current decision must exist");
+  assert.equal(current.waiting_for_human, false, "run should auto resume");
+  assert.equal(current.run_status, "running", "run should be back in running state");
+  assert.equal(
+    current.recommended_next_action,
+    "retry_attempt",
+    "failed execution should resume through skeptical research"
+  );
+  assert.deepEqual(
+    attempts.map((attempt) => attempt.attempt_type),
+    ["execution", "research"]
+  );
+  assert.deepEqual(
+    attempts.map((attempt) => attempt.status),
+    ["failed", "completed"]
+  );
+  assert.ok(
+    journal.some((entry) => entry.type === "run.auto_resume.scheduled"),
+    "expected an automatic resume event"
+  );
+}
+
+async function verifyRepeatedAutoResumeExhausts(): Promise<void> {
+  const { run, workspacePaths } = await bootstrapRun("auto-resume-exhaustion");
+  await saveCurrentDecision(
+    workspacePaths,
+    createCurrentDecision({
+      run_id: run.id,
+      run_status: "running",
+      recommended_next_action: "start_first_attempt",
+      recommended_attempt_type: "research",
+      summary: "Bootstrapped for repeated autonomy verification."
+    })
+  );
+
+  const orchestrator = new Orchestrator(
+    workspacePaths,
+    new LowSignalResearchAdapter() as never,
+    undefined,
+    60_000,
+    {
+      waitingHumanAutoResumeMs: 30,
+      maxAutomaticResumeCycles: 2
+    }
+  );
+
+  await settle(orchestrator, 24);
+
+  const current = await getCurrentDecision(workspacePaths, run.id);
+  const attempts = await listAttempts(workspacePaths, run.id);
+  const journal = await listRunJournal(workspacePaths, run.id);
+  const autoResumeScheduled = journal.filter(
+    (entry) => entry.type === "run.auto_resume.scheduled"
+  ).length;
+  const autoResumeExhausted = journal.filter(
+    (entry) => entry.type === "run.auto_resume.exhausted"
+  ).length;
+
+  assert.ok(current, "current decision must exist");
+  assert.equal(current.waiting_for_human, true, "run should eventually stop for human steer");
+  assert.equal(current.run_status, "waiting_steer");
+  assert.equal(autoResumeScheduled, 2, "expected two automatic resume rounds before retreat");
+  assert.equal(autoResumeExhausted, 1, "expected a single exhaustion marker");
+  assert.ok(
+    current.blocking_reason?.includes("自动续跑已尝试 2 轮"),
+    "current decision should explain that the automatic budget was exhausted"
+  );
+  assert.deepEqual(
+    attempts.map((attempt) => attempt.attempt_type),
+    ["research", "research", "research", "research"]
+  );
+  assert.ok(
+    attempts.every((attempt) => attempt.status === "completed"),
+    "all repeated research attempts should settle before the loop retreats"
+  );
+}
+
+async function verifyCheckpointBlockerStaysWaiting(): Promise<void> {
+  const { run, workspacePaths } = await bootstrapRun("checkpoint-blocker-stays-waiting");
+  const completedExecution = updateAttempt(
+    createAttempt({
+      run_id: run.id,
+      attempt_type: "execution",
+      worker: "fake-codex",
+      objective: "Leave a verified execution step.",
+      success_criteria: run.success_criteria,
+      workspace_root: run.workspace_root
+    }),
+    {
+      status: "completed",
+      started_at: new Date().toISOString(),
+      ended_at: new Date().toISOString()
+    }
+  );
+
+  await saveAttempt(workspacePaths, completedExecution);
+  await saveCurrentDecision(
+    workspacePaths,
+    createCurrentDecision({
+      run_id: run.id,
+      run_status: "waiting_steer",
+      latest_attempt_id: completedExecution.id,
+      recommended_next_action: "wait_for_human",
+      recommended_attempt_type: "execution",
+      summary: "Checkpoint creation is blocked.",
+      blocking_reason:
+        "Execution auto-checkpoint requires a clean git workspace before the attempt starts.",
+      waiting_for_human: true
+    })
+  );
+  await appendRunJournal(
+    workspacePaths,
+    createRunJournalEntry({
+      run_id: run.id,
+      attempt_id: completedExecution.id,
+      type: "attempt.checkpoint.blocked",
+      payload: {
+        reason: "workspace_not_clean_before_execution",
+        message:
+          "Execution auto-checkpoint requires a clean git workspace before the attempt starts."
+      }
+    })
+  );
+
+  const orchestrator = new Orchestrator(
+    workspacePaths,
+    new NoDispatchAdapter() as never,
+    undefined,
+    60_000,
+    {
+      waitingHumanAutoResumeMs: 30,
+      maxAutomaticResumeCycles: 2
+    }
+  );
+
+  await wait(40);
+  await settle(orchestrator, 4);
+
+  const current = await getCurrentDecision(workspacePaths, run.id);
+  const attempts = await listAttempts(workspacePaths, run.id);
+  const journal = await listRunJournal(workspacePaths, run.id);
+
+  assert.ok(current, "current decision must exist");
+  assert.equal(current.waiting_for_human, true, "checkpoint blocker should stay waiting");
+  assert.equal(current.run_status, "waiting_steer");
+  assert.equal(attempts.length, 1, "no new attempt should be dispatched");
+  assert.ok(
+    journal.some((entry) => entry.type === "run.auto_resume.blocked"),
+    "expected a blocked auto-resume marker"
+  );
+  assert.ok(
+    !journal.some((entry) => entry.type === "run.auto_resume.scheduled"),
+    "checkpoint blocker must not schedule auto resume"
+  );
+}
+
+async function verifyRecoveryAutoResumesExecution(): Promise<void> {
+  const { run, workspacePaths, rootDir } = await bootstrapRun("recovery-auto-resume");
+  await initializeGitRepo(rootDir);
+
+  const researchAttempt = updateAttempt(
+    createAttempt({
+      run_id: run.id,
+      attempt_type: "research",
+      worker: "fake-codex",
+      objective: "Find the next execution move.",
+      success_criteria: run.success_criteria,
+      workspace_root: run.workspace_root
+    }),
+    {
+      status: "completed",
+      started_at: new Date().toISOString(),
+      ended_at: new Date().toISOString()
+    }
+  );
+  const executionDraft = {
+    attempt_type: "execution" as const,
+    objective: "Apply the recovered execution step.",
+    success_criteria: ["Leave a verified execution artifact in the workspace."],
+    required_evidence: [
+      "git-visible workspace changes",
+      "a replayable verification command that checks the execution change"
+    ],
+    forbidden_shortcuts: ["do not claim success without replayable verification"],
+    expected_artifacts: ["execution-change.md"],
+    verification_plan: {
+      commands: [
+        {
+          purpose: "confirm the execution change was written",
+          command:
+            "test -f execution-change.md && rg -n '^execution change from' execution-change.md"
+        }
+      ]
+    }
+  };
+  const researchWriteback: WorkerWriteback = {
+    summary: "Repository understanding is strong enough to resume execution.",
+    findings: [
+      {
+        type: "fact",
+        content: "Found the right file to patch",
+        evidence: ["execution-change.md"]
+      }
+    ],
+    questions: [],
+    recommended_next_steps: ["Resume the execution step with the locked contract."],
+    confidence: 0.84,
+    next_attempt_contract: executionDraft,
+    artifacts: []
+  };
+
+  await saveAttempt(workspacePaths, researchAttempt);
+  await saveAttemptContract(
+    workspacePaths,
+    createAttemptContract({
+      attempt_id: researchAttempt.id,
+      run_id: run.id,
+      attempt_type: "research",
+      objective: researchAttempt.objective,
+      success_criteria: researchAttempt.success_criteria,
+      required_evidence: [
+        "Ground findings in concrete files, commands, or artifacts.",
+        "If execution is recommended, leave a replayable execution contract for the next attempt."
+      ]
+    })
+  );
+  await saveAttemptResult(workspacePaths, run.id, researchAttempt.id, researchWriteback);
+  await appendRunJournal(
+    workspacePaths,
+    createRunJournalEntry({
+      run_id: run.id,
+      attempt_id: researchAttempt.id,
+      type: "attempt.created",
+      payload: {
+        attempt_type: researchAttempt.attempt_type,
+        objective: researchAttempt.objective
+      }
+    })
+  );
+  await appendRunJournal(
+    workspacePaths,
+    createRunJournalEntry({
+      run_id: run.id,
+      attempt_id: researchAttempt.id,
+      type: "attempt.started",
+      payload: {
+        attempt_type: researchAttempt.attempt_type
+      }
+    })
+  );
+  await appendRunJournal(
+    workspacePaths,
+    createRunJournalEntry({
+      run_id: run.id,
+      attempt_id: researchAttempt.id,
+      type: "attempt.completed",
+      payload: {
+        recommendation: "continue",
+        goal_progress: 0.62,
+        suggested_attempt_type: "execution"
+      }
+    })
+  );
+
+  const orphanedExecution = updateAttempt(
+    createAttempt({
+      run_id: run.id,
+      attempt_type: "execution",
+      worker: "fake-codex",
+      objective: executionDraft.objective,
+      success_criteria: executionDraft.success_criteria,
+      workspace_root: run.workspace_root
+    }),
+    {
+      status: "running",
+      started_at: new Date().toISOString()
+    }
+  );
+
+  await saveAttempt(workspacePaths, orphanedExecution);
+  await appendRunJournal(
+    workspacePaths,
+    createRunJournalEntry({
+      run_id: run.id,
+      attempt_id: orphanedExecution.id,
+      type: "attempt.created",
+      payload: {
+        attempt_type: orphanedExecution.attempt_type,
+        objective: orphanedExecution.objective
+      }
+    })
+  );
+  await appendRunJournal(
+    workspacePaths,
+    createRunJournalEntry({
+      run_id: run.id,
+      attempt_id: orphanedExecution.id,
+      type: "attempt.started",
+      payload: {
+        attempt_type: orphanedExecution.attempt_type
+      }
+    })
+  );
+  await saveCurrentDecision(
+    workspacePaths,
+    createCurrentDecision({
+      run_id: run.id,
+      run_status: "running",
+      latest_attempt_id: orphanedExecution.id,
+      recommended_next_action: "attempt_running",
+      recommended_attempt_type: "execution",
+      summary: "Execution was in flight before restart.",
+      waiting_for_human: false
+    })
+  );
+
+  const orchestrator = new Orchestrator(
+    workspacePaths,
+    new RecoveryExecutionAdapter() as never,
+    undefined,
+    60_000,
+    {
+      waitingHumanAutoResumeMs: 30,
+      maxAutomaticResumeCycles: 2
+    }
+  );
+
+  await orchestrator.tick();
+  await wait(60);
+  await settle(orchestrator, 18, 60);
+
+  const current = await getCurrentDecision(workspacePaths, run.id);
+  const attempts = await listAttempts(workspacePaths, run.id);
+  const journal = await listRunJournal(workspacePaths, run.id);
+
+  assert.ok(current, "current decision must exist");
+  assert.equal(current.run_status, "completed", "recovered execution should finish the run");
+  assert.equal(current.waiting_for_human, false);
+  assert.deepEqual(
+    attempts.map((attempt) => attempt.attempt_type),
+    ["research", "execution", "execution"]
+  );
+  assert.deepEqual(
+    attempts.map((attempt) => attempt.status),
+    ["completed", "stopped", "completed"]
+  );
+  assert.ok(
+    journal.some((entry) => entry.type === "attempt.recovery_required"),
+    "expected recovery journal entry"
+  );
+  assert.ok(
+    journal.some((entry) => entry.type === "run.auto_resume.scheduled"),
+    "expected automatic resume after recovery wait"
+  );
+}
+
+async function main(): Promise<void> {
+  const checks: Array<{ id: string; run: () => Promise<void> }> = [
+    {
+      id: "failed_execution_auto_resumes",
+      run: verifyFailedExecutionAutoResumes
+    },
+    {
+      id: "repeated_auto_resume_exhausts",
+      run: verifyRepeatedAutoResumeExhausts
+    },
+    {
+      id: "checkpoint_blocker_stays_waiting",
+      run: verifyCheckpointBlockerStaysWaiting
+    },
+    {
+      id: "recovery_auto_resumes_execution",
+      run: verifyRecoveryAutoResumesExecution
+    }
+  ];
+  const results: CaseResult[] = [];
+
+  for (const check of checks) {
+    try {
+      await check.run();
+      results.push({
+        id: check.id,
+        status: "pass"
+      });
+    } catch (error) {
+      results.push({
+        id: check.id,
+        status: "fail",
+        error: error instanceof Error ? error.message : String(error)
+      });
+    }
+  }
+
+  const failed = results.filter((result) => result.status === "fail");
+  console.log(
+    JSON.stringify(
+      {
+        suite: "run-autonomy",
+        passed: results.length - failed.length,
+        failed: failed.length,
+        results
+      },
+      null,
+      2
+    )
+  );
+
+  assert.equal(failed.length, 0, "Run autonomy verification failed.");
+}
+
+await main();

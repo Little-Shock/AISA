@@ -9,7 +9,7 @@
     "typecheck": "pnpm -r --if-present typecheck",
     "build": "pnpm -r --if-present build",
     "smoke": "tsx scripts/smoke-plan.ts",
-    "verify:runtime": "tsx scripts/verify-run-loop.ts",
+    "verify:runtime": "node --import tsx scripts/verify-run-loop.ts",
     "verify:drive-run": "tsx scripts/verify-drive-run.ts",
     "verify:run-api": "tsx scripts/verify-run-detail-api.ts",
     "verify:worker-adapter": "tsx scripts/verify-worker-adapter.ts",

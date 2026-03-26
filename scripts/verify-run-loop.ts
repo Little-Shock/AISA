@@ -4,6 +4,7 @@ import { spawn } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  createAttemptContract,
   createAttempt,
   createRunSteer,
   createCurrentDecision,
@@ -19,13 +20,18 @@ import {
   appendRunJournal,
   ensureWorkspace,
   getAttemptEvaluation,
+  getAttemptReviewPacket,
   getCurrentDecision,
   getRun,
   listAttempts,
   listRunJournal,
+  resolveAttemptPaths,
   resolveWorkspacePaths,
   saveAttempt,
+  saveAttemptContract,
+  saveAttemptEvaluation,
   saveAttemptResult,
+  saveAttemptRuntimeVerification,
   saveCurrentDecision,
   saveRun,
   saveRunSteer
@@ -73,6 +79,22 @@ type ScenarioObservation = {
   journal_types: string[];
   journal_counts: Record<string, number>;
   blocking_reason: string | null;
+  review_packets: Array<{
+    attempt_id: string;
+    attempt_status: string;
+    path: string;
+    has_packet: boolean;
+    matches_run_id: boolean;
+    matches_attempt_id: boolean;
+    has_attempt_contract: boolean;
+    has_current_decision_snapshot: boolean;
+    journal_count: number;
+    has_failure_context: boolean;
+    has_result: boolean;
+    has_evaluation: boolean;
+    has_runtime_verification: boolean;
+    artifact_manifest_count: number;
+  }>;
 };
 
 class ScenarioAdapter {
@@ -302,6 +324,26 @@ async function seedOrphanedRunningAttempt(input: {
   );
 
   await saveAttempt(input.workspacePaths, attempt);
+  await saveAttemptContract(
+    input.workspacePaths,
+    createAttemptContract({
+      attempt_id: attempt.id,
+      run_id: input.run.id,
+      attempt_type: attempt.attempt_type,
+      objective: attempt.objective,
+      success_criteria: attempt.success_criteria,
+      required_evidence: ["Leave replayable verification evidence for the execution retry."],
+      expected_artifacts: ["review_packet.json"],
+      verification_plan: {
+        commands: [
+          {
+            purpose: "placeholder orphaned attempt replay",
+            command: "test -n orphaned-attempt"
+          }
+        ]
+      }
+    })
+  );
   await saveCurrentDecision(
     input.workspacePaths,
     createCurrentDecision({
@@ -361,6 +403,21 @@ async function seedExecutionRetryAfterRecoveryCase(input: {
   );
 
   await saveAttempt(input.workspacePaths, researchAttempt);
+  await saveAttemptContract(
+    input.workspacePaths,
+    createAttemptContract({
+      attempt_id: researchAttempt.id,
+      run_id: input.run.id,
+      attempt_type: researchAttempt.attempt_type,
+      objective: researchAttempt.objective,
+      success_criteria: researchAttempt.success_criteria,
+      required_evidence: [
+        "Ground findings in concrete files, commands, or artifacts.",
+        "If execution is recommended, leave a replayable execution contract for the next attempt."
+      ],
+      expected_artifacts: ["review_packet.json"]
+    })
+  );
   const researchWriteback = (
     await new ScenarioAdapter(input.driver).runAttemptTask({
       run: input.run,
@@ -372,6 +429,68 @@ async function seedExecutionRetryAfterRecoveryCase(input: {
     input.run.id,
     researchAttempt.id,
     researchWriteback
+  );
+  await saveAttemptEvaluation(input.workspacePaths, {
+    attempt_id: researchAttempt.id,
+    run_id: input.run.id,
+    goal_progress: 0.62,
+    evidence_quality: 1,
+    verification_status: "not_applicable",
+    recommendation: "continue",
+    suggested_attempt_type: "execution",
+    rationale: "seeded research result is strong enough to hand off to execution",
+    missing_evidence: [],
+    created_at: new Date().toISOString()
+  });
+  await saveAttemptRuntimeVerification(input.workspacePaths, {
+    attempt_id: researchAttempt.id,
+    run_id: input.run.id,
+    attempt_type: researchAttempt.attempt_type,
+    status: "not_applicable",
+    repo_root: null,
+    git_head: null,
+    git_status: [],
+    changed_files: [],
+    failure_code: null,
+    failure_reason: null,
+    command_results: [],
+    created_at: new Date().toISOString()
+  });
+  await appendRunJournal(
+    input.workspacePaths,
+    createRunJournalEntry({
+      run_id: input.run.id,
+      attempt_id: researchAttempt.id,
+      type: "attempt.created",
+      payload: {
+        attempt_type: researchAttempt.attempt_type,
+        objective: researchAttempt.objective
+      }
+    })
+  );
+  await appendRunJournal(
+    input.workspacePaths,
+    createRunJournalEntry({
+      run_id: input.run.id,
+      attempt_id: researchAttempt.id,
+      type: "attempt.started",
+      payload: {
+        attempt_type: researchAttempt.attempt_type
+      }
+    })
+  );
+  await appendRunJournal(
+    input.workspacePaths,
+    createRunJournalEntry({
+      run_id: input.run.id,
+      attempt_id: researchAttempt.id,
+      type: "attempt.completed",
+      payload: {
+        recommendation: "continue",
+        goal_progress: 0.62,
+        suggested_attempt_type: "execution"
+      }
+    })
   );
 
   const stoppedExecutionAttempt = updateAttempt(
@@ -395,6 +514,49 @@ async function seedExecutionRetryAfterRecoveryCase(input: {
   );
 
   await saveAttempt(input.workspacePaths, stoppedExecutionAttempt);
+  await saveAttemptContract(
+    input.workspacePaths,
+    createAttemptContract({
+      attempt_id: stoppedExecutionAttempt.id,
+      run_id: input.run.id,
+      attempt_type: stoppedExecutionAttempt.attempt_type,
+      objective: stoppedExecutionAttempt.objective,
+      success_criteria: stoppedExecutionAttempt.success_criteria,
+      required_evidence:
+        researchWriteback.next_attempt_contract?.required_evidence ?? [
+          "git-visible workspace changes",
+          "a replayable verification command that checks the execution change"
+        ],
+      forbidden_shortcuts:
+        researchWriteback.next_attempt_contract?.forbidden_shortcuts ?? [],
+      expected_artifacts:
+        researchWriteback.next_attempt_contract?.expected_artifacts ?? ["execution-change.md"],
+      verification_plan: researchWriteback.next_attempt_contract?.verification_plan
+    })
+  );
+  await appendRunJournal(
+    input.workspacePaths,
+    createRunJournalEntry({
+      run_id: input.run.id,
+      attempt_id: stoppedExecutionAttempt.id,
+      type: "attempt.created",
+      payload: {
+        attempt_type: stoppedExecutionAttempt.attempt_type,
+        objective: stoppedExecutionAttempt.objective
+      }
+    })
+  );
+  await appendRunJournal(
+    input.workspacePaths,
+    createRunJournalEntry({
+      run_id: input.run.id,
+      attempt_id: stoppedExecutionAttempt.id,
+      type: "attempt.started",
+      payload: {
+        attempt_type: stoppedExecutionAttempt.attempt_type
+      }
+    })
+  );
 
   const runSteer = createRunSteer({
     run_id: input.run.id,
@@ -575,6 +737,30 @@ async function collectObservation(
     accumulator[entry.type] = (accumulator[entry.type] ?? 0) + 1;
     return accumulator;
   }, {});
+  const reviewPackets = await Promise.all(
+    attempts
+      .filter((attempt) => ["completed", "failed", "stopped"].includes(attempt.status))
+      .map(async (attempt) => {
+        const reviewPacket = await getAttemptReviewPacket(workspacePaths, runId, attempt.id);
+        return {
+          attempt_id: attempt.id,
+          attempt_status: attempt.status,
+          path: resolveAttemptPaths(workspacePaths, runId, attempt.id).reviewPacketFile,
+          has_packet: reviewPacket !== null,
+          matches_run_id: reviewPacket?.run_id === runId,
+          matches_attempt_id:
+            reviewPacket?.attempt_id === attempt.id && reviewPacket?.attempt.id === attempt.id,
+          has_attempt_contract: reviewPacket?.attempt_contract !== null,
+          has_current_decision_snapshot: reviewPacket?.current_decision_snapshot !== null,
+          journal_count: reviewPacket?.journal.length ?? 0,
+          has_failure_context: reviewPacket?.failure_context !== null,
+          has_result: reviewPacket?.result !== null,
+          has_evaluation: reviewPacket?.evaluation !== null,
+          has_runtime_verification: reviewPacket?.runtime_verification !== null,
+          artifact_manifest_count: reviewPacket?.artifact_manifest.length ?? 0
+        };
+      })
+  );
 
   return {
     run_id: runId,
@@ -586,7 +772,8 @@ async function collectObservation(
     verification_statuses: verificationStatuses,
     journal_types: journal.map((entry) => entry.type),
     journal_counts: journalCounts,
-    blocking_reason: current?.blocking_reason ?? null
+    blocking_reason: current?.blocking_reason ?? null,
+    review_packets: reviewPackets
   };
 }
 
@@ -638,6 +825,58 @@ function assertCase(scenario: ScenarioCase, observation: ScenarioObservation): v
       observation.blocking_reason?.includes(scenario.expected.blocking_reason_includes),
       `${scenario.id}: blocking_reason`
     );
+  }
+
+  assert.equal(
+    observation.review_packets.length,
+    observation.attempt_statuses.filter((status) =>
+      ["completed", "failed", "stopped"].includes(status)
+    ).length,
+    `${scenario.id}: settled attempts should all persist review packets`
+  );
+
+  for (const reviewPacket of observation.review_packets) {
+    assert.ok(reviewPacket.has_packet, `${scenario.id}: missing review packet for ${reviewPacket.attempt_id}`);
+    assert.ok(
+      reviewPacket.matches_run_id,
+      `${scenario.id}: review packet run_id mismatch for ${reviewPacket.attempt_id}`
+    );
+    assert.ok(
+      reviewPacket.matches_attempt_id,
+      `${scenario.id}: review packet attempt metadata mismatch for ${reviewPacket.attempt_id}`
+    );
+    assert.ok(
+      reviewPacket.has_attempt_contract,
+      `${scenario.id}: review packet missing attempt contract for ${reviewPacket.attempt_id}`
+    );
+    assert.ok(
+      reviewPacket.has_current_decision_snapshot,
+      `${scenario.id}: review packet missing current decision snapshot for ${reviewPacket.attempt_id}`
+    );
+    assert.ok(
+      reviewPacket.artifact_manifest_count > 0,
+      `${scenario.id}: review packet missing artifact manifest for ${reviewPacket.attempt_id}`
+    );
+
+    if (reviewPacket.attempt_status === "completed") {
+      assert.ok(
+        reviewPacket.has_result,
+        `${scenario.id}: completed attempt missing result in review packet for ${reviewPacket.attempt_id}`
+      );
+      assert.ok(
+        reviewPacket.has_evaluation,
+        `${scenario.id}: completed attempt missing evaluation in review packet for ${reviewPacket.attempt_id}`
+      );
+      assert.ok(
+        reviewPacket.has_runtime_verification,
+        `${scenario.id}: completed attempt missing runtime verification in review packet for ${reviewPacket.attempt_id}`
+      );
+    } else {
+      assert.ok(
+        reviewPacket.journal_count > 0 || reviewPacket.has_failure_context,
+        `${scenario.id}: blocker attempt missing journal and failure context for ${reviewPacket.attempt_id}`
+      );
+    }
   }
 }
 

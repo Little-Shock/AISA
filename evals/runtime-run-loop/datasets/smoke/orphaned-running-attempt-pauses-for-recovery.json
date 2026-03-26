@@ -1,6 +1,6 @@
 {
   "id": "orphaned-running-attempt-pauses-for-recovery",
-  "description": "A persisted running attempt found after restart must pause for human recovery instead of being started again.",
+  "description": "A persisted running attempt found after restart must first stop and enter a short human window before any automatic recovery is allowed.",
   "driver": "orphaned_running_attempt",
   "max_ticks": 1,
   "expected": {
@@ -15,6 +15,6 @@
       "attempt.started": 1,
       "attempt.recovery_required": 1
     },
-    "blocking_reason_includes": "Recovery requires human review"
+    "blocking_reason_includes": "超时后自动恢复"
   }
 }
