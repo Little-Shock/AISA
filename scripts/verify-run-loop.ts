@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -47,8 +47,7 @@ import {
 } from "../packages/state-store/src/index.js";
 
 const REVIEWER_CONFIG_ENV = "AISA_REVIEWERS_JSON";
-const CLI_REVIEWER_TIMEOUT_CASE_MS = 150;
-const CLI_REVIEWER_PROCESS_FAILURE_TIMEOUT_MS = 1_500;
+const CLI_REVIEWER_FAILURE_TIMEOUT_MS = 1_000;
 
 type CliReviewerFailureMode = "invalid_json" | "nonzero_exit" | "timeout";
 
@@ -1169,15 +1168,20 @@ function buildCliReviewerFailureMatcher(
   }
 }
 
-function getCliReviewerFailureTimeoutMs(mode: CliReviewerFailureMode): number {
-  return mode === "timeout"
-    ? CLI_REVIEWER_TIMEOUT_CASE_MS
-    : CLI_REVIEWER_PROCESS_FAILURE_TIMEOUT_MS;
-}
+type CliReviewerFailureCaseState = {
+  run: Run;
+  workspacePaths: ReturnType<typeof resolveWorkspacePaths>;
+  failedResearchAttempt: Attempt;
+  reviewInputPacket: Awaited<ReturnType<typeof getAttemptReviewInputPacket>>;
+  reviewOpinions: Awaited<ReturnType<typeof listAttemptReviewOpinions>>;
+  evaluation: Awaited<ReturnType<typeof getAttemptEvaluation>>;
+  reviewPacket: Awaited<ReturnType<typeof getAttemptReviewPacket>>;
+  current: Awaited<ReturnType<typeof getCurrentDecision>>;
+};
 
-async function assertCliReviewerFailureBlocksOpinionPersistence(
+async function runCliReviewerFailureCase(
   mode: CliReviewerFailureMode
-): Promise<void> {
+): Promise<CliReviewerFailureCaseState> {
   const rootDir = await mkdtemp(join(tmpdir(), `aisa-cli-reviewer-${mode}-`));
   await initializeGitRepo(rootDir, false);
   const { run, workspacePaths } = await bootstrapRun(rootDir, `cli-reviewer-${mode}`);
@@ -1196,7 +1200,7 @@ async function assertCliReviewerFailureBlocksOpinionPersistence(
       command: process.execPath,
       args: [join(process.cwd(), "scripts", "fixture-reviewer-cli.mjs"), mode],
       cwd: process.cwd(),
-      timeout_ms: getCliReviewerFailureTimeoutMs(mode)
+      timeout_ms: CLI_REVIEWER_FAILURE_TIMEOUT_MS
     }
   ];
 
@@ -1224,7 +1228,6 @@ async function assertCliReviewerFailureBlocksOpinionPersistence(
     `cli_reviewer_${mode}: expected one failed research attempt`
   );
 
-  const expectedReviewInputPacketRef = `runs/${run.id}/attempts/${failedResearchAttempt!.id}/review_input_packet.json`;
   const [reviewInputPacket, reviewOpinions, evaluation, reviewPacket, current] = await Promise.all([
     getAttemptReviewInputPacket(workspacePaths, run.id, failedResearchAttempt!.id),
     listAttemptReviewOpinions(workspacePaths, run.id, failedResearchAttempt!.id),
@@ -1232,6 +1235,34 @@ async function assertCliReviewerFailureBlocksOpinionPersistence(
     getAttemptReviewPacket(workspacePaths, run.id, failedResearchAttempt!.id),
     getCurrentDecision(workspacePaths, run.id)
   ]);
+
+  return {
+    run,
+    workspacePaths,
+    failedResearchAttempt: failedResearchAttempt!,
+    reviewInputPacket,
+    reviewOpinions,
+    evaluation,
+    reviewPacket,
+    current
+  };
+}
+
+async function assertCliReviewerFailureBlocksOpinionPersistence(
+  mode: CliReviewerFailureMode
+): Promise<void> {
+  const {
+    run,
+    failedResearchAttempt,
+    reviewInputPacket,
+    reviewOpinions,
+    evaluation,
+    reviewPacket,
+    current
+  } = await runCliReviewerFailureCase(mode);
+
+  const expectedReviewInputPacketRef = `runs/${run.id}/attempts/${failedResearchAttempt.id}/review_input_packet.json`;
+  const expectedResultRef = buildExpectedResultRef(run.id, failedResearchAttempt.id);
 
   assert.ok(
     reviewInputPacket,
@@ -1241,6 +1272,16 @@ async function assertCliReviewerFailureBlocksOpinionPersistence(
     reviewInputPacket?.attempt.status,
     "completed",
     `cli_reviewer_${mode}: frozen review input packet should keep the pre-review completed status`
+  );
+  assert.equal(
+    reviewInputPacket?.attempt.result_ref,
+    expectedResultRef,
+    `cli_reviewer_${mode}: frozen review input packet should keep result_ref`
+  );
+  assert.equal(
+    failedResearchAttempt.result_ref,
+    expectedResultRef,
+    `cli_reviewer_${mode}: attempt meta should keep result_ref after reviewer failure`
   );
   assert.ok(reviewPacket, `cli_reviewer_${mode}: review packet should still be persisted`);
   assert.equal(
@@ -1252,6 +1293,11 @@ async function assertCliReviewerFailureBlocksOpinionPersistence(
     reviewPacket?.review_input_packet_ref,
     expectedReviewInputPacketRef,
     `cli_reviewer_${mode}: review packet should still point at the frozen input packet`
+  );
+  assert.equal(
+    reviewPacket?.attempt.result_ref,
+    expectedResultRef,
+    `cli_reviewer_${mode}: settled review packet should preserve result_ref`
   );
   assert.equal(
     reviewOpinions.length,
@@ -1287,13 +1333,77 @@ async function assertCliReviewerFailureBlocksOpinionPersistence(
   );
   assert.match(
     current?.blocking_reason ?? "",
-    buildCliReviewerFailureMatcher(mode, getCliReviewerFailureTimeoutMs(mode)),
+    buildCliReviewerFailureMatcher(mode, CLI_REVIEWER_FAILURE_TIMEOUT_MS),
     `cli_reviewer_${mode}: blocking reason should expose the reviewer failure`
   );
   assert.match(
     reviewPacket?.failure_context?.message ?? "",
-    buildCliReviewerFailureMatcher(mode, getCliReviewerFailureTimeoutMs(mode)),
+    buildCliReviewerFailureMatcher(mode, CLI_REVIEWER_FAILURE_TIMEOUT_MS),
     `cli_reviewer_${mode}: failure context should expose the reviewer failure`
+  );
+}
+
+async function assertCliReviewerFailureRecoveryRebuildsReviewPacketFromMetaAndResult(): Promise<void> {
+  const {
+    run,
+    workspacePaths,
+    failedResearchAttempt,
+    reviewPacket
+  } = await runCliReviewerFailureCase("invalid_json");
+  const expectedResultRef = buildExpectedResultRef(run.id, failedResearchAttempt.id);
+  const attemptPaths = resolveAttemptPaths(workspacePaths, run.id, failedResearchAttempt.id);
+
+  assert.ok(
+    reviewPacket?.result,
+    "cli_reviewer_invalid_json_recovery_chain_rebuilds_from_meta_and_result: expected a persisted result before the rebuild"
+  );
+
+  await rm(attemptPaths.reviewPacketFile, { force: true });
+  await rm(attemptPaths.reviewInputPacketFile, { force: true });
+
+  const orchestrator = new Orchestrator(
+    workspacePaths,
+    new ScenarioAdapter("happy_path") as never,
+    undefined,
+    60_000
+  );
+  await orchestrator.tick();
+
+  const rebuiltReviewPacket = await getAttemptReviewPacket(
+    workspacePaths,
+    run.id,
+    failedResearchAttempt.id
+  );
+  assert.ok(
+    rebuiltReviewPacket,
+    "cli_reviewer_invalid_json_recovery_chain_rebuilds_from_meta_and_result: review packet should be rebuilt during recovery"
+  );
+  assert.equal(
+    rebuiltReviewPacket?.review_input_packet_ref,
+    null,
+    "cli_reviewer_invalid_json_recovery_chain_rebuilds_from_meta_and_result: rebuild should not depend on a persisted review_input_packet.json"
+  );
+  assert.equal(
+    rebuiltReviewPacket?.attempt.result_ref,
+    expectedResultRef,
+    "cli_reviewer_invalid_json_recovery_chain_rebuilds_from_meta_and_result: rebuilt review packet should recover result_ref from attempt meta"
+  );
+  assert.deepEqual(
+    rebuiltReviewPacket?.result,
+    reviewPacket?.result ?? null,
+    "cli_reviewer_invalid_json_recovery_chain_rebuilds_from_meta_and_result: rebuilt review packet should recover the full result payload from result.json"
+  );
+  assert.equal(
+    rebuiltReviewPacket?.artifact_manifest.filter(
+      (artifact) => artifact.kind === "attempt_result" && artifact.exists
+    ).length,
+    1,
+    "cli_reviewer_invalid_json_recovery_chain_rebuilds_from_meta_and_result: rebuilt review packet should keep the persisted result artifact"
+  );
+  assert.match(
+    rebuiltReviewPacket?.failure_context?.message ?? "",
+    buildCliReviewerFailureMatcher("invalid_json", CLI_REVIEWER_FAILURE_TIMEOUT_MS),
+    "cli_reviewer_invalid_json_recovery_chain_rebuilds_from_meta_and_result: rebuilt review packet should keep the reviewer failure context"
   );
 }
 
@@ -2038,6 +2148,10 @@ function buildExpectedInputContextRef(runId: string, attemptId: string): string 
   return `runs/${runId}/attempts/${attemptId}/context.json`;
 }
 
+function buildExpectedResultRef(runId: string, attemptId: string): string {
+  return `runs/${runId}/attempts/${attemptId}/result.json`;
+}
+
 async function collectObservation(
   workspacePaths: ReturnType<typeof resolveWorkspacePaths>,
   runId: string
@@ -2760,6 +2874,20 @@ async function main(): Promise<void> {
   } catch (error) {
     results.push({
       id: "cli_reviewer_timeout_blocks_opinion_persistence",
+      status: "fail",
+      error: error instanceof Error ? error.message : String(error)
+    });
+  }
+
+  try {
+    await assertCliReviewerFailureRecoveryRebuildsReviewPacketFromMetaAndResult();
+    results.push({
+      id: "cli_reviewer_invalid_json_recovery_chain_rebuilds_from_meta_and_result",
+      status: "pass"
+    });
+  } catch (error) {
+    results.push({
+      id: "cli_reviewer_invalid_json_recovery_chain_rebuilds_from_meta_and_result",
       status: "fail",
       error: error instanceof Error ? error.message : String(error)
     });

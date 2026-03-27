@@ -39,7 +39,7 @@ import { appendEvent } from "@autoresearch/event-log";
 import {
   createAttemptReviewerAdapters,
   evaluateBranch,
-  runAttemptReviewerPipeline,
+  runAttemptReviewerPipeline as executeAttemptReviewerPipeline,
   synthesizeAttemptEvaluation,
   type AttemptReviewerConfig,
   type AttemptReviewerAdapter
@@ -1009,6 +1009,9 @@ export class Orchestrator {
       });
 
       await saveAttemptResult(this.workspacePaths, runId, attempt.id, execution.writeback);
+      attempt = updateAttempt(attempt, {
+        result_ref: this.buildAttemptResultRef(runId, attempt.id)
+      });
       const runtimeVerification = await runAttemptRuntimeVerification({
         run,
         attempt,
@@ -1019,7 +1022,6 @@ export class Orchestrator {
       const completedAttemptForEvaluation = updateAttempt(attempt, {
         status: "completed",
         ended_at: new Date().toISOString(),
-        result_ref: `runs/${runId}/attempts/${attempt.id}/result.json`,
         evaluation_ref: null
       });
       const reviewInputPacket = await this.buildAttemptReviewInputPacket({
@@ -1038,18 +1040,11 @@ export class Orchestrator {
         reviewInputPacketRef,
         reviewInputPacket
       );
-      let reviewOpinions: AttemptReviewerOpinion[];
-      try {
-        reviewOpinions = await runAttemptReviewerPipeline({
-          reviewInputPacket,
-          reviewers: this.reviewers,
-          reviewInputPacketRef,
-          inputRefs: reviewerInputRefs
-        });
-      } catch (error) {
-        const reason = error instanceof Error ? error.message : String(error);
-        throw new Error(`尝试 ${attempt.id} 的 reviewer 在 opinion 落盘前失败：${reason}`);
-      }
+      const reviewOpinions = await this.runAttemptReviewerPipeline({
+        reviewInputPacket,
+        reviewInputPacketRef,
+        inputRefs: reviewerInputRefs
+      });
       await Promise.all(
         reviewOpinions.map((opinion) => saveAttemptReviewOpinion(this.workspacePaths, opinion))
       );
@@ -1243,8 +1238,8 @@ export class Orchestrator {
         journal
       }));
     const reviewPacket = await this.buildAttemptReviewPacket({
+      attempt: input.attempt,
       reviewInputPacket: effectiveReviewInputPacket,
-      settledAttempt: input.attempt,
       evaluation,
       currentSnapshot: input.currentSnapshot,
       journal,
@@ -1295,6 +1290,10 @@ export class Orchestrator {
     return `runs/${runId}/attempts/${attemptId}/context.json`;
   }
 
+  private buildAttemptResultRef(runId: string, attemptId: string): string {
+    return `runs/${runId}/attempts/${attemptId}/result.json`;
+  }
+
   private buildAttemptEvaluationRef(runId: string, attemptId: string): string {
     return `runs/${runId}/attempts/${attemptId}/evaluation.json`;
   }
@@ -1342,6 +1341,26 @@ export class Orchestrator {
     }
 
     return refs;
+  }
+
+  private async runAttemptReviewerPipeline(input: {
+    reviewInputPacket: AttemptReviewInputPacket;
+    reviewInputPacketRef: string;
+    inputRefs: AttemptReviewInputRef[];
+  }): Promise<AttemptReviewerOpinion[]> {
+    try {
+      return await executeAttemptReviewerPipeline({
+        reviewInputPacket: input.reviewInputPacket,
+        reviewers: this.reviewers,
+        reviewInputPacketRef: input.reviewInputPacketRef,
+        inputRefs: input.inputRefs
+      });
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      throw new Error(
+        `尝试 ${input.reviewInputPacket.attempt_id} 的 reviewer 在 opinion 落盘前失败：${reason}`
+      );
+    }
   }
 
   private async ensureSettledAttemptReviewPackets(
@@ -1406,8 +1425,8 @@ export class Orchestrator {
         journal
       }));
     const reviewPacket = await this.buildAttemptReviewPacket({
+      attempt,
       reviewInputPacket: effectiveReviewInputPacket,
-      settledAttempt: attempt,
       evaluation,
       currentSnapshot,
       journal,
@@ -1499,8 +1518,8 @@ export class Orchestrator {
   }
 
   private async buildAttemptReviewPacket(input: {
+    attempt: Attempt;
     reviewInputPacket: AttemptReviewInputPacket;
-    settledAttempt: Attempt;
     evaluation: AttemptEvaluation | null;
     currentSnapshot: CurrentDecision | null;
     journal: Awaited<ReturnType<typeof listRunJournal>>;
@@ -1525,11 +1544,11 @@ export class Orchestrator {
 
     return {
       ...input.reviewInputPacket,
-      attempt: input.settledAttempt,
+      attempt: input.attempt,
       current_decision_snapshot: input.currentSnapshot,
       journal: attemptJournal,
       failure_context: this.buildReviewPacketFailureContext({
-        attempt: input.settledAttempt,
+        attempt: input.attempt,
         currentSnapshot: input.currentSnapshot,
         runtimeVerification: input.reviewInputPacket.runtime_verification,
         journal: attemptJournal
