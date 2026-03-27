@@ -13,6 +13,7 @@ import { Orchestrator } from "../packages/orchestrator/src/index.ts";
 import {
   ensureWorkspace,
   getAttemptContract,
+  getAttemptContext,
   getCurrentDecision,
   getRun,
   getRunRuntimeHealthSnapshot,
@@ -165,6 +166,48 @@ function parseJsonStdout<T>(label: string, stdout: string): T {
   }
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function waitForFirstAttemptContext(input: {
+  workspacePaths: ReturnType<typeof resolveWorkspacePaths>;
+  runId: string;
+  timeoutMs?: number;
+}): Promise<{
+  attempts: Attempt[];
+  context: Record<string, unknown> | null;
+}> {
+  const deadline = Date.now() + (input.timeoutMs ?? 1_500);
+
+  while (Date.now() < deadline) {
+    const attempts = await listAttempts(input.workspacePaths, input.runId);
+    const firstAttempt = attempts[0];
+
+    if (!firstAttempt) {
+      await sleep(50);
+      continue;
+    }
+
+    const context = (await getAttemptContext(
+      input.workspacePaths,
+      input.runId,
+      firstAttempt.id
+    )) as Record<string, unknown> | null;
+
+    if (context) {
+      return {
+        attempts,
+        context
+      };
+    }
+
+    await sleep(50);
+  }
+
+  throw new Error("first self-bootstrap attempt context did not persist in time");
+}
+
 async function main(): Promise<void> {
   await assertRootEntrypointsUseNodeImportTsx();
 
@@ -201,15 +244,22 @@ async function main(): Promise<void> {
     60_000
   );
   await orchestrator.tick();
+  await sleep(50);
+  await orchestrator.tick();
 
   const persistedCurrent = await getCurrentDecision(workspacePaths, run.id);
-  const attempts = await listAttempts(workspacePaths, run.id);
+  const firstAttemptState = await waitForFirstAttemptContext({
+    workspacePaths,
+    runId: run.id
+  });
+  const attempts = firstAttemptState.attempts;
   const steers = await listRunSteers(workspacePaths, run.id);
   const journal = await listRunJournal(workspacePaths, run.id);
   const runtimeHealthSnapshot = await getRunRuntimeHealthSnapshot(
     workspacePaths,
     run.id
   );
+  const firstAttemptContext = firstAttemptState.context;
 
   assert.equal(await realpath(run.workspace_root), await realpath(rootDir));
   assert.equal(run.owner_id, "test-owner");
@@ -264,6 +314,23 @@ async function main(): Promise<void> {
   assert.ok(
     attempts[0]?.objective.includes("drift_detected"),
     "first attempt should carry the runtime drift status from the snapshot"
+  );
+  assert.deepEqual(
+    firstAttemptContext?.runtime_health_snapshot,
+    {
+      path: bootstrapOutput.runtime_health_snapshot,
+      verify_runtime: {
+        status: "passed",
+        summary: runtimeHealthSnapshot?.verify_runtime.summary
+      },
+      history_contract_drift: {
+        status: "drift_detected",
+        summary: runtimeHealthSnapshot?.history_contract_drift.summary,
+        drift_count: 4
+      },
+      created_at: runtimeHealthSnapshot?.created_at
+    },
+    "first attempt context should carry the runtime health snapshot summary"
   );
   const attemptContract = attempts[0]
     ? await getAttemptContract(workspacePaths, run.id, attempts[0].id)

@@ -1,0 +1,45 @@
+{
+  "title": "把 attempt 的 input_context_ref 真正写起来",
+  "summary": "这轮已经把 run 级 `runtime_health_snapshot` 接进 attempt `context.json`。下一项最小且该优先做的运行时任务，是把 `Attempt.input_context_ref` 从长期 `null` 改成真实指向 `context.json` 的路径，让后续 worker、review packet 和 API 都能直接追到这次尝试看见的上下文切片。",
+  "why_now": [
+    "`packages/domain/src/index.ts` 和 `evals/runtime-run-loop/review-packet-schema.json` 都已经把 `input_context_ref` 作为 attempt 字段留出来了，但运行时还没有真正写它。",
+    "`runs/run_3374dc3f/attempts/att_01b2d527/meta.json` 和同路径 `review_packet.json` 里的 `input_context_ref` 现在仍然是 `null`，说明现场已经有 `context.json`，引用却没落回 attempt 真相。",
+    "这轮把 `runtime_health_snapshot` 接进了 `context.json`。如果 `input_context_ref` 继续为空，后续自举步骤和调试工具还是得靠约定路径去猜，不够稳。"
+  ],
+  "next_attempt_contract": {
+    "attempt_type": "execution",
+    "objective": "当 orchestrator 持久化 `runs/<run_id>/attempts/<attempt_id>/context.json` 时，同步把 `meta.json.input_context_ref` 写成这份上下文的稳定相对路径，并让 `review_packet.json` 保持同一引用。",
+    "success_criteria": [
+      "新产生的 attempt `meta.json` 不再把 `input_context_ref` 留成 `null`，而是指向 `runs/<run_id>/attempts/<attempt_id>/context.json`。",
+      "`review_packet.json` 里的 `attempt.input_context_ref` 会和 `meta.json` 保持一致，不再丢失这次尝试实际看到的上下文引用。",
+      "`pnpm verify:runtime` 会显式断言这个引用存在且路径正确，而不是只检查 `context.json` 文件本身存在。",
+      "`pnpm typecheck` 和 `pnpm verify:runtime` 从仓库根目录回放通过。"
+    ],
+    "required_evidence": [
+      "git 可见改动只触达 attempt 持久化主链和直接相关的最小回归。",
+      "留下一个 `input_context_ref` 非空的回放断言或等价验证输出。",
+      "给出 `pnpm typecheck` 和 `pnpm verify:runtime` 的根目录回放结果。"
+    ],
+    "forbidden_shortcuts": [
+      "不要只在 review packet 里临时拼这个路径，`meta.json` 还是留空。",
+      "不要在 `context.json` 写入失败时照样补一个默认路径继续通过。",
+      "不要把回归放宽成只看目录里存在 `context.json`。"
+    ],
+    "expected_artifacts": [
+      "packages/orchestrator/src/index.ts",
+      "scripts/verify-run-loop.ts"
+    ],
+    "verification_plan": {
+      "commands": [
+        {
+          "purpose": "typecheck the workspace after the change",
+          "command": "pnpm typecheck"
+        },
+        {
+          "purpose": "replay the runtime regression suite after the change",
+          "command": "pnpm verify:runtime"
+        }
+      ]
+    }
+  }
+}

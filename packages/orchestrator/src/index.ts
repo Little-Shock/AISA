@@ -52,6 +52,7 @@ import {
   getGoal,
   getPlanArtifacts,
   getRun,
+  getRunRuntimeHealthSnapshot,
   listAttempts,
   listRunJournal,
   getWriteback,
@@ -62,6 +63,7 @@ import {
   listSteers,
   resolveAttemptPaths,
   resolveBranchArtifactPaths,
+  resolveRunPaths,
   saveAttempt,
   saveAttemptContract,
   saveAttemptContext,
@@ -709,6 +711,10 @@ export class Orchestrator {
       status: previousAttempt.status,
       summary: result?.summary ?? ""
     }));
+    const runtimeHealthSnapshot = await getRunRuntimeHealthSnapshot(
+      this.workspacePaths,
+      runId
+    );
 
     const context = {
       contract: {
@@ -725,7 +731,27 @@ export class Orchestrator {
           id: runSteer.id,
           content: runSteer.content
         })),
-      previous_attempts: previousAttempts
+      previous_attempts: previousAttempts,
+      ...(runtimeHealthSnapshot
+        ? {
+            runtime_health_snapshot: {
+              path: relative(
+                this.workspacePaths.rootDir,
+                resolveRunPaths(this.workspacePaths, runId).runtimeHealthSnapshotFile
+              ),
+              verify_runtime: {
+                status: runtimeHealthSnapshot.verify_runtime.status,
+                summary: runtimeHealthSnapshot.verify_runtime.summary
+              },
+              history_contract_drift: {
+                status: runtimeHealthSnapshot.history_contract_drift.status,
+                summary: runtimeHealthSnapshot.history_contract_drift.summary,
+                drift_count: runtimeHealthSnapshot.history_contract_drift.drift_count
+              },
+              created_at: runtimeHealthSnapshot.created_at
+            }
+          }
+        : {})
     };
 
     let heartbeatTimer: NodeJS.Timeout | null = null;

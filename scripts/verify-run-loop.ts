@@ -21,6 +21,7 @@ import { Orchestrator } from "../packages/orchestrator/src/index.js";
 import {
   appendRunJournal,
   ensureWorkspace,
+  getAttemptContext,
   getAttemptEvaluation,
   getAttemptReviewPacket,
   getCurrentDecision,
@@ -36,6 +37,7 @@ import {
   saveAttemptRuntimeVerification,
   saveCurrentDecision,
   saveRun,
+  saveRunRuntimeHealthSnapshot,
   saveRunSteer
 } from "../packages/state-store/src/index.js";
 
@@ -599,6 +601,31 @@ class ScenarioAdapter {
   }
 }
 
+class ContextCaptureAdapter {
+  readonly type = "fake-codex";
+
+  async runAttemptTask(input: {
+    attempt: Attempt;
+  }): Promise<{
+    writeback: WorkerWriteback;
+    reportMarkdown: string;
+    exitCode: number;
+  }> {
+    return {
+      writeback: {
+        summary: `Captured context for ${input.attempt.id}.`,
+        findings: [],
+        questions: [],
+        recommended_next_steps: [],
+        confidence: 0.4,
+        artifacts: []
+      },
+      reportMarkdown: "# context capture",
+      exitCode: 0
+    };
+  }
+}
+
 async function settle(input: {
   orchestrator: Orchestrator;
   workspacePaths: ReturnType<typeof resolveWorkspacePaths>;
@@ -696,6 +723,141 @@ async function bootstrapRun(rootDir: string, title: string): Promise<{
     run,
     workspacePaths
   };
+}
+
+async function assertRuntimeHealthSnapshotContextWiring(): Promise<void> {
+  const rootDir = await mkdtemp(join(tmpdir(), "aisa-runtime-health-context-"));
+  const { run, workspacePaths } = await bootstrapRun(
+    rootDir,
+    "runtime-health-context"
+  );
+  const createdAt = new Date().toISOString();
+
+  await saveRunRuntimeHealthSnapshot(workspacePaths, {
+    run_id: run.id,
+    workspace_root: rootDir,
+    evidence_root: process.cwd(),
+    verify_runtime: {
+      command: "pnpm verify:runtime",
+      exit_code: 0,
+      status: "passed",
+      summary: "runtime 回放通过"
+    },
+    history_contract_drift: {
+      command: "node --import tsx scripts/verify-history-contract-drift.ts",
+      exit_code: 1,
+      status: "drift_detected",
+      summary: "4 个旧 execution attempt 仍有 contract 漂移。",
+      scanned_run_count: 1,
+      scanned_execution_attempt_count: 4,
+      drift_count: 4,
+      drifts: []
+    },
+    created_at: createdAt
+  });
+  await saveRunSteer(
+    workspacePaths,
+    createRunSteer({
+      run_id: run.id,
+      content: "优先读取 runtime 健康证据，再决定下一步。"
+    })
+  );
+
+  const orchestrator = new Orchestrator(
+    workspacePaths,
+    new ContextCaptureAdapter() as never,
+    undefined,
+    60_000
+  );
+  await settle({
+    orchestrator,
+    workspacePaths,
+    runId: run.id,
+    iterations: 4
+  });
+
+  const attempts = await listAttempts(workspacePaths, run.id);
+  assert.ok(
+    attempts.length >= 1,
+    "runtime_health_snapshot_context: expected at least one persisted attempt"
+  );
+  const context = (await getAttemptContext(
+    workspacePaths,
+    run.id,
+    attempts[0]!.id
+  )) as Record<string, unknown> | null;
+
+  assert.ok(
+    context && typeof context === "object",
+    "runtime_health_snapshot_context: attempt context should be persisted"
+  );
+  assert.deepEqual(
+    context?.runtime_health_snapshot,
+    {
+      path: `runs/${run.id}/artifacts/runtime-health-snapshot.json`,
+      verify_runtime: {
+        status: "passed",
+        summary: "runtime 回放通过"
+      },
+      history_contract_drift: {
+        status: "drift_detected",
+        summary: "4 个旧 execution attempt 仍有 contract 漂移。",
+        drift_count: 4
+      },
+      created_at: createdAt
+    },
+    "runtime_health_snapshot_context: attempt context should carry the run-level snapshot summary"
+  );
+}
+
+async function assertMissingRuntimeHealthSnapshotDoesNotFabricateContext(): Promise<void> {
+  const rootDir = await mkdtemp(join(tmpdir(), "aisa-missing-runtime-health-context-"));
+  const { run, workspacePaths } = await bootstrapRun(
+    rootDir,
+    "missing-runtime-health-context"
+  );
+
+  await saveRunSteer(
+    workspacePaths,
+    createRunSteer({
+      run_id: run.id,
+      content: "如果没有 runtime 快照，不要造默认健康对象。"
+    })
+  );
+
+  const orchestrator = new Orchestrator(
+    workspacePaths,
+    new ContextCaptureAdapter() as never,
+    undefined,
+    60_000
+  );
+  await settle({
+    orchestrator,
+    workspacePaths,
+    runId: run.id,
+    iterations: 4
+  });
+
+  const attempts = await listAttempts(workspacePaths, run.id);
+  assert.ok(
+    attempts.length >= 1,
+    "missing_runtime_health_snapshot_context: expected at least one persisted attempt"
+  );
+  const context = (await getAttemptContext(
+    workspacePaths,
+    run.id,
+    attempts[0]!.id
+  )) as Record<string, unknown> | null;
+
+  assert.ok(
+    context && typeof context === "object",
+    "missing_runtime_health_snapshot_context: attempt context should be persisted"
+  );
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(context, "runtime_health_snapshot"),
+    false,
+    "missing_runtime_health_snapshot_context: runtime should not fabricate a health snapshot field"
+  );
 }
 
 async function seedOrphanedRunningAttempt(input: {
@@ -1913,6 +2075,34 @@ async function main(): Promise<void> {
   } catch (error) {
     results.push({
       id: "post_restart_prompt_chain",
+      status: "fail",
+      error: error instanceof Error ? error.message : String(error)
+    });
+  }
+
+  try {
+    await assertRuntimeHealthSnapshotContextWiring();
+    results.push({
+      id: "runtime_health_snapshot_context",
+      status: "pass"
+    });
+  } catch (error) {
+    results.push({
+      id: "runtime_health_snapshot_context",
+      status: "fail",
+      error: error instanceof Error ? error.message : String(error)
+    });
+  }
+
+  try {
+    await assertMissingRuntimeHealthSnapshotDoesNotFabricateContext();
+    results.push({
+      id: "missing_runtime_health_snapshot_context",
+      status: "pass"
+    });
+  } catch (error) {
+    results.push({
+      id: "missing_runtime_health_snapshot_context",
       status: "fail",
       error: error instanceof Error ? error.message : String(error)
     });
