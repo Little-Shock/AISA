@@ -115,6 +115,15 @@ async function assertControlApiSupervisorReplay(): Promise<void> {
   );
 }
 
+async function assertRunDetailApiReplay(): Promise<void> {
+  const result = await runTsxScript("scripts/verify-run-detail-api.ts");
+  assert.equal(
+    result.exitCode,
+    0,
+    formatScriptFailure("scripts/verify-run-detail-api.ts", result)
+  );
+}
+
 async function assertHistoryContractDriftBaseline(): Promise<HistoryContractDriftReport> {
   const baselinePath = join(
     process.cwd(),
@@ -156,6 +165,7 @@ async function assertHistoryContractDriftBaseline(): Promise<HistoryContractDrif
 async function main(): Promise<void> {
   await assertRunLoopReplay();
   await assertControlApiSupervisorReplay();
+  await assertRunDetailApiReplay();
   const report = await assertHistoryContractDriftBaseline();
 
   console.log(
@@ -166,6 +176,9 @@ async function main(): Promise<void> {
           status: "passed"
         },
         control_api_supervisor: {
+          status: "passed"
+        },
+        run_detail_api: {
           status: "passed"
         },
         history_contract_drift: {

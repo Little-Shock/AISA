@@ -1,0 +1,48 @@
+{
+  "title": "把 self-bootstrap 回放接进 runtime 主链",
+  "summary": "这轮已经把 blocker `failure_context` 接进 `/runs/:runId`，也把 run detail API 回放接进了 `pnpm verify:runtime`。下一项最小且更值的后端任务，是把 `bootstrap:self` 和首轮 self-bootstrap 接线也变成 runtime 主链红线，避免系统自己的自举入口回退时主套件还继续绿灯。",
+  "why_now": [
+    "`scripts/verify-self-bootstrap.ts` 已经会回放 runtime 健康快照写入、seed steer 注入和首轮 attempt context 接线，说明这条自举链路已经有独立验证资产。",
+    "`scripts/verify-runtime.ts` 现在会回放 run loop、control-api supervisor 和 run detail API，但仍然没有把 `scripts/verify-self-bootstrap.ts` 纳入主套件。",
+    "`scripts/bootstrap-self-run.ts` 是 AISA 围绕当前仓库继续自举开发的入口。如果这条链路回退，系统就会失去安全继续改自己的能力。"
+  ],
+  "next_attempt_contract": {
+    "attempt_type": "execution",
+    "objective": "把 `scripts/verify-self-bootstrap.ts` 接进 `pnpm verify:runtime` 主链，让 self-bootstrap 入口、runtime 健康快照注入和首轮 attempt 上下文接线一起变成发布红线。",
+    "success_criteria": [
+      "`pnpm verify:runtime` 会显式回放 self-bootstrap 路径，而不是只覆盖 run loop、run detail API 和 control-api supervisor。",
+      "如果 `bootstrap:self`、runtime 健康快照写入、seed steer 注入或首轮 attempt context 接线回退，`pnpm verify:runtime` 会失败并保留可读原因。",
+      "`pnpm typecheck`、`pnpm verify:self-bootstrap`、`pnpm verify:runtime` 从仓库根目录回放通过。"
+    ],
+    "required_evidence": [
+      "git 可见改动只触达 runtime 主套件编排和必要的最小说明文档。",
+      "留下 `pnpm verify:runtime` 已包含 self-bootstrap 回放的输出或等价断言结果。",
+      "给出 `pnpm typecheck`、`pnpm verify:self-bootstrap`、`pnpm verify:runtime` 的回放结果。"
+    ],
+    "forbidden_shortcuts": [
+      "不要只保留单独的 `pnpm verify:self-bootstrap`，却不把它接进 `pnpm verify:runtime`。",
+      "不要把回归放宽成只检查脚本执行了，却不检查 runtime 健康快照、seed steer 和首轮 attempt context 这些关键接线。",
+      "不要为过用例去跳过真实的 `bootstrap:self` 调用或吞掉失败原因。"
+    ],
+    "expected_artifacts": [
+      "scripts/verify-runtime.ts",
+      "scripts/README.md"
+    ],
+    "verification_plan": {
+      "commands": [
+        {
+          "purpose": "typecheck the workspace after the change",
+          "command": "pnpm typecheck"
+        },
+        {
+          "purpose": "verify self-bootstrap entrypoint still works on its own",
+          "command": "pnpm verify:self-bootstrap"
+        },
+        {
+          "purpose": "replay the runtime regression suite with self-bootstrap on the mainline",
+          "command": "pnpm verify:runtime"
+        }
+      ]
+    }
+  }
+}

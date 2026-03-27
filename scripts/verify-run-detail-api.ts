@@ -20,6 +20,7 @@ import {
   saveAttemptContract,
   saveAttemptContext,
   saveAttemptEvaluation,
+  saveAttemptReviewPacket,
   saveAttemptResult,
   saveAttemptRuntimeVerification,
   saveCurrentDecision,
@@ -227,6 +228,84 @@ async function main(): Promise<void> {
     );
   }
 
+  const blockerCreatedAttempt = createAttempt({
+    run_id: run.id,
+    attempt_type: "execution",
+    worker: "fake-codex",
+    objective: "Surface blocker failure context for the run detail API.",
+    success_criteria: ["Return the structured blocker reason."],
+    workspace_root: projectRoot
+  });
+  const blockerAttempt = updateAttempt(blockerCreatedAttempt, {
+    status: "stopped",
+    started_at: new Date().toISOString(),
+    ended_at: new Date().toISOString()
+  });
+  const blockerCreatedEntry = createRunJournalEntry({
+    run_id: run.id,
+    attempt_id: blockerAttempt.id,
+    type: "attempt.created",
+    payload: {
+      attempt_type: blockerAttempt.attempt_type,
+      objective: blockerAttempt.objective
+    }
+  });
+  const blockerStartedEntry = createRunJournalEntry({
+    run_id: run.id,
+    attempt_id: blockerAttempt.id,
+    type: "attempt.started",
+    payload: {
+      attempt_type: blockerAttempt.attempt_type
+    }
+  });
+  const blockerRecoveryEntry = createRunJournalEntry({
+    run_id: run.id,
+    attempt_id: blockerAttempt.id,
+    type: "attempt.recovery_required",
+    payload: {
+      message: "Blocked on missing human steer after a recovery-required execution."
+    }
+  });
+  const blockerFailureContext = {
+    message: String(blockerRecoveryEntry.payload.message),
+    journal_event_id: blockerRecoveryEntry.id,
+    journal_event_ts: blockerRecoveryEntry.ts
+  };
+
+  await saveAttempt(workspacePaths, blockerAttempt);
+  await saveAttemptReviewPacket(workspacePaths, {
+    run_id: run.id,
+    attempt_id: blockerAttempt.id,
+    attempt: blockerAttempt,
+    attempt_contract: null,
+    current_decision_snapshot: null,
+    context: null,
+    journal: [],
+    failure_context: blockerFailureContext,
+    result: null,
+    evaluation: null,
+    runtime_verification: null,
+    artifact_manifest: [],
+    generated_at: new Date().toISOString()
+  });
+  await saveCurrentDecision(
+    workspacePaths,
+    createCurrentDecision({
+      run_id: run.id,
+      run_status: "waiting_steer",
+      latest_attempt_id: blockerAttempt.id,
+      best_attempt_id: attempt.id,
+      recommended_next_action: "wait_for_human",
+      recommended_attempt_type: "execution",
+      summary: blockerFailureContext.message,
+      blocking_reason: blockerFailureContext.message,
+      waiting_for_human: true
+    })
+  );
+  for (const entry of [blockerCreatedEntry, blockerStartedEntry, blockerRecoveryEntry]) {
+    await appendRunJournal(workspacePaths, entry);
+  }
+
   const attemptPaths = resolveAttemptPaths(workspacePaths, run.id, attempt.id);
   await Promise.all([
     writeFile(attemptPaths.stdoutFile, "stdout tail line\n", "utf8"),
@@ -344,6 +423,11 @@ async function main(): Promise<void> {
           current_decision: { summary: string };
           previous_attempts: Array<{ id: string; status: string }>;
         } | null;
+        failure_context: {
+          message: string;
+          journal_event_id: string | null;
+          journal_event_ts: string | null;
+        } | null;
         result: { summary: string; verification_plan?: { commands: Array<{ command: string }> } } | null;
         evaluation: { verification_status: string } | null;
         runtime_verification: { status: string; changed_files: string[] } | null;
@@ -353,29 +437,42 @@ async function main(): Promise<void> {
       }>;
     };
 
-    assert.equal(payload.attempts.length, 1);
-    assert.equal(payload.attempt_details.length, 1);
-    assert.equal(payload.attempt_details[0]?.attempt.id, attempt.id);
+    const completedDetail = payload.attempt_details.find(
+      (detail) => detail.attempt.id === attempt.id
+    );
+    const blockerDetail = payload.attempt_details.find(
+      (detail) => detail.attempt.id === blockerAttempt.id
+    );
+
+    assert.equal(payload.attempts.length, 2);
+    assert.equal(payload.attempt_details.length, 2);
+    assert.ok(completedDetail, "completed attempt detail should be returned");
+    assert.ok(blockerDetail, "blocker attempt detail should be returned");
     assert.equal(
-      payload.attempt_details[0]?.attempt.input_context_ref,
+      completedDetail?.attempt.input_context_ref,
       `runs/${run.id}/attempts/${attempt.id}/context.json`
     );
-    assert.deepEqual(payload.attempt_details[0]?.contract?.required_evidence, [
+    assert.deepEqual(completedDetail?.contract?.required_evidence, [
       "git-visible workspace changes",
       "runtime replay success"
     ]);
-    assert.deepEqual(payload.attempt_details[0]?.context, persistedContext);
+    assert.deepEqual(completedDetail?.context, persistedContext);
     assert.equal(
-      payload.attempt_details[0]?.result?.verification_plan?.commands[0]?.command,
+      completedDetail?.failure_context,
+      null,
+      "completed attempt should not fabricate a failure context"
+    );
+    assert.equal(
+      completedDetail?.result?.verification_plan?.commands[0]?.command,
       "pnpm verify:runtime"
     );
-    assert.equal(payload.attempt_details[0]?.evaluation?.verification_status, "passed");
-    assert.equal(payload.attempt_details[0]?.runtime_verification?.status, "passed");
-    assert.deepEqual(payload.attempt_details[0]?.runtime_verification?.changed_files, [
+    assert.equal(completedDetail?.evaluation?.verification_status, "passed");
+    assert.equal(completedDetail?.runtime_verification?.status, "passed");
+    assert.deepEqual(completedDetail?.runtime_verification?.changed_files, [
       "packages/orchestrator/src/index.ts"
     ]);
     assert.deepEqual(
-      payload.attempt_details[0]?.journal.map((entry) => entry.type),
+      completedDetail?.journal.map((entry) => entry.type),
       [
         "attempt.created",
         "attempt.started",
@@ -384,24 +481,44 @@ async function main(): Promise<void> {
         "attempt.checkpoint.created"
       ]
     );
-    assert.equal(payload.attempt_details[0]?.stdout_excerpt, "stdout tail line");
-    assert.ok(payload.attempt_details[0]?.stderr_excerpt.includes("verification still visible"));
+    assert.equal(completedDetail?.stdout_excerpt, "stdout tail line");
+    assert.ok(completedDetail?.stderr_excerpt.includes("verification still visible"));
+    assert.equal(blockerDetail?.failure_context?.message, blockerFailureContext.message);
+    assert.equal(
+      blockerDetail?.failure_context?.journal_event_id,
+      blockerFailureContext.journal_event_id
+    );
+    assert.equal(
+      blockerDetail?.failure_context?.journal_event_ts,
+      blockerFailureContext.journal_event_ts
+    );
+    assert.equal(blockerDetail?.context, null);
+    assert.equal(blockerDetail?.result, null);
+    assert.equal(blockerDetail?.runtime_verification, null);
+    assert.deepEqual(
+      blockerDetail?.journal.map((entry) => entry.type),
+      ["attempt.created", "attempt.started", "attempt.recovery_required"]
+    );
 
     console.log(
       JSON.stringify(
         {
           run_id: run.id,
-          attempt_id: attempt.id,
+          completed_attempt_id: attempt.id,
+          blocker_attempt_id: blockerAttempt.id,
           detail_fields: {
-            has_contract: payload.attempt_details[0]?.contract !== null,
-            has_context: payload.attempt_details[0]?.context !== null,
-            has_result: payload.attempt_details[0]?.result !== null,
-            has_evaluation: payload.attempt_details[0]?.evaluation !== null,
+            has_contract: completedDetail?.contract !== null,
+            has_context: completedDetail?.context !== null,
+            has_result: completedDetail?.result !== null,
+            has_evaluation: completedDetail?.evaluation !== null,
             has_runtime_verification:
-              payload.attempt_details[0]?.runtime_verification !== null
+              completedDetail?.runtime_verification !== null,
+            completed_has_failure_context: completedDetail?.failure_context !== null,
+            blocker_has_failure_context: blockerDetail?.failure_context !== null
           },
-          input_context_ref: payload.attempt_details[0]?.attempt.input_context_ref,
-          context_contract_title: payload.attempt_details[0]?.context?.contract.title
+          input_context_ref: completedDetail?.attempt.input_context_ref,
+          context_contract_title: completedDetail?.context?.contract.title,
+          blocker_failure_message: blockerDetail?.failure_context?.message ?? null
         },
         null,
         2

@@ -33,6 +33,7 @@ import {
   getAttemptContext,
   ensureWorkspace,
   getAttemptEvaluation,
+  getAttemptReviewPacket,
   getAttemptLogExcerpt,
   getAttemptResult,
   getAttemptRuntimeVerification,
@@ -211,31 +212,40 @@ export async function buildServer(
         getRunReport(workspacePaths, runId)
       ]);
       const attemptDetails = await Promise.all(
-        attempts.map(async (attempt) => ({
-          attempt,
-          contract: await getAttemptContract(workspacePaths, runId, attempt.id),
-          context: await getAttemptContext(workspacePaths, runId, attempt.id),
-          result: await getAttemptResult(workspacePaths, runId, attempt.id),
-          evaluation: await getAttemptEvaluation(workspacePaths, runId, attempt.id),
-          runtime_verification: await getAttemptRuntimeVerification(
-            workspacePaths,
-            runId,
-            attempt.id
-          ),
-          stdout_excerpt: await getAttemptLogExcerpt(
-            workspacePaths,
-            runId,
-            attempt.id,
-            "stdout"
-          ),
-          stderr_excerpt: await getAttemptLogExcerpt(
-            workspacePaths,
-            runId,
-            attempt.id,
-            "stderr"
-          ),
-          journal: journal.filter((entry) => entry.attempt_id === attempt.id)
-        }))
+        attempts.map(async (attempt) => {
+          const [
+            contract,
+            context,
+            reviewPacket,
+            result,
+            evaluation,
+            runtimeVerification,
+            stdoutExcerpt,
+            stderrExcerpt
+          ] = await Promise.all([
+            getAttemptContract(workspacePaths, runId, attempt.id),
+            getAttemptContext(workspacePaths, runId, attempt.id),
+            getAttemptReviewPacket(workspacePaths, runId, attempt.id),
+            getAttemptResult(workspacePaths, runId, attempt.id),
+            getAttemptEvaluation(workspacePaths, runId, attempt.id),
+            getAttemptRuntimeVerification(workspacePaths, runId, attempt.id),
+            getAttemptLogExcerpt(workspacePaths, runId, attempt.id, "stdout"),
+            getAttemptLogExcerpt(workspacePaths, runId, attempt.id, "stderr")
+          ]);
+
+          return {
+            attempt,
+            contract,
+            context,
+            failure_context: reviewPacket?.failure_context ?? null,
+            result,
+            evaluation,
+            runtime_verification: runtimeVerification,
+            stdout_excerpt: stdoutExcerpt,
+            stderr_excerpt: stderrExcerpt,
+            journal: journal.filter((entry) => entry.attempt_id === attempt.id)
+          };
+        })
       );
 
       return {
