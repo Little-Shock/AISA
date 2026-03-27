@@ -1,0 +1,49 @@
+{
+  "title": "把 runtime 健康快照接进首轮 attempt context",
+  "summary": "现在 self-bootstrap 入口已经会落 `runtime-health-snapshot.json`，首轮 research objective 也会引用它，但这份证据还只存在于 steer 文案里。下一步最小且更稳的运行时任务，是把这份快照作为结构化字段写进首轮 `context.json`，让 worker 直接拿机器可读证据，而不是靠解析提示词文本。",
+  "why_now": [
+    "`scripts/verify-self-bootstrap.ts` 现在稳定断言首轮 objective 会引用 `runs/<run_id>/artifacts/runtime-health-snapshot.json` 和 `drift_detected`，说明快照已经进了 self-bootstrap 入口。",
+    "`packages/orchestrator/src/index.ts` 当前写入 attempt `context.json` 的只有 `contract`、`current_decision`、`queued_steers`、`previous_attempts`，没有 run 级 runtime 健康字段。",
+    "`packages/worker-adapters/src/index.ts` 会把 `Current Context` 原样传给 Codex worker，所以缺少结构化快照时，worker 仍然只能从 steer 文案里提取这些回归事实。"
+  ],
+  "next_attempt_contract": {
+    "attempt_type": "execution",
+    "objective": "把 run 级 `runtime-health-snapshot.json` 接进首轮 attempt 的 `context.json`。当 self-bootstrap run 已经落下健康快照时，orchestrator 创建 research attempt 要把这份快照的路径和结构化摘要写进 context，让 worker 不再只靠 steer 文案拿 runtime 回归事实。",
+    "success_criteria": [
+      "存在 `runs/<run_id>/artifacts/runtime-health-snapshot.json` 时，新建 self-bootstrap research attempt 的 `context.json` 会包含结构化 `runtime_health_snapshot` 字段，至少能看到快照路径、`verify_runtime.status`、`history_contract_drift.status` 和 `drift_count`。",
+      "`verify:self-bootstrap` 会显式断言首轮 attempt 的 `context.json` 已包含上述快照字段，而不是只检查 objective 或 steer 文案。",
+      "缺少 run 级快照文件时，runtime 不会伪造默认健康快照去掩盖现场。",
+      "`pnpm typecheck`、`pnpm verify:self-bootstrap`、`pnpm verify:runtime` 从仓库根目录回放通过。"
+    ],
+    "required_evidence": [
+      "git 可见改动只触达 `packages/orchestrator/src/index.ts` 和直接相关的最小回归脚本。",
+      "留下一个包含 `runtime_health_snapshot` 字段的 self-bootstrap `context.json` 回放产物或等价断言输出。",
+      "给出 `pnpm typecheck`、`pnpm verify:self-bootstrap`、`pnpm verify:runtime` 的回放结果。"
+    ],
+    "forbidden_shortcuts": [
+      "不要只把快照继续拼进 steer 或 objective 文案，不改 `context.json`。",
+      "不要在快照文件缺失时造一个默认健康对象继续运行。",
+      "不要把 `verify:self-bootstrap` 的断言放宽成只检查快照文件存在。"
+    ],
+    "expected_artifacts": [
+      "packages/orchestrator/src/index.ts",
+      "scripts/verify-self-bootstrap.ts"
+    ],
+    "verification_plan": {
+      "commands": [
+        {
+          "purpose": "typecheck the workspace after the change",
+          "command": "pnpm typecheck"
+        },
+        {
+          "purpose": "verify the self-bootstrap runtime health snapshot reaches attempt context",
+          "command": "pnpm verify:self-bootstrap"
+        },
+        {
+          "purpose": "replay the runtime regression suite after the change",
+          "command": "pnpm verify:runtime"
+        }
+      ]
+    }
+  }
+}
