@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -429,6 +429,8 @@ async function writeExecutionWorkspacePackage(rootDir: string): Promise<void> {
     ) + "\n",
     "utf8"
   );
+  await mkdir(join(rootDir, "node_modules"), { recursive: true });
+  await writeFile(join(rootDir, "node_modules", ".placeholder"), "toolchain\n", "utf8");
 }
 
 async function runCommand(rootDir: string, args: string[]): Promise<void> {
@@ -1153,6 +1155,109 @@ async function verifyRateLimitedExecutionRetriesQuickly(): Promise<void> {
   );
 }
 
+async function verifyWorkerStalledExecutionRetriesQuickly(): Promise<void> {
+  const { run, workspacePaths, rootDir } = await bootstrapRun("worker-stalled-execution-retry");
+  await writeExecutionWorkspacePackage(rootDir);
+  await initializeGitRepo(rootDir);
+
+  const failedExecution = updateAttempt(
+    createAttempt({
+      run_id: run.id,
+      attempt_type: "execution",
+      worker: "fake-codex",
+      objective: "Retry the same execution after a stalled worker is terminated.",
+      success_criteria: run.success_criteria,
+      workspace_root: run.workspace_root
+    }),
+    {
+      status: "failed",
+      started_at: new Date().toISOString(),
+      ended_at: new Date().toISOString()
+    }
+  );
+
+  const stallMessage = [
+    "Codex CLI stalled for worker pid 4242.",
+    "No runtime stdout activity arrived for 190000ms (stall window 180000ms).",
+    "No live child command remained and no final output was written."
+  ].join(" ");
+
+  await saveAttempt(workspacePaths, failedExecution);
+  await saveCurrentDecision(
+    workspacePaths,
+    createCurrentDecision({
+      run_id: run.id,
+      run_status: "waiting_steer",
+      latest_attempt_id: failedExecution.id,
+      recommended_next_action: "wait_for_human",
+      recommended_attempt_type: "execution",
+      summary: "Execution worker stalled after verification finished.",
+      blocking_reason: stallMessage,
+      waiting_for_human: true
+    })
+  );
+  await appendRunJournal(
+    workspacePaths,
+    createRunJournalEntry({
+      run_id: run.id,
+      attempt_id: failedExecution.id,
+      type: "attempt.failed",
+      payload: {
+        message: stallMessage
+      }
+    })
+  );
+
+  const orchestrator = new Orchestrator(
+    workspacePaths,
+    new FastRetryExecutionAdapter() as never,
+    undefined,
+    60_000,
+    {
+      waitingHumanAutoResumeMs: 5_000,
+      workerStallAutoResumeMs: 30,
+      maxAutomaticResumeCycles: 2
+    }
+  );
+
+  await wait(60);
+  await settleUntil(orchestrator, {
+    workspacePaths,
+    runId: run.id,
+    predicate: (runStatus) => runStatus === "completed",
+    timeoutMs: 15_000,
+    delayMs: 120
+  });
+
+  const current = await getCurrentDecision(workspacePaths, run.id);
+  const attempts = await listAttempts(workspacePaths, run.id);
+  const journal = await listRunJournal(workspacePaths, run.id);
+
+  assert.ok(current, "current decision must exist");
+  assert.equal(current.waiting_for_human, false);
+  assert.equal(current.run_status, "completed");
+  assert.deepEqual(
+    attempts.map((attempt) => attempt.attempt_type),
+    ["execution", "execution"]
+  );
+  assert.deepEqual(
+    attempts.map((attempt) => attempt.status),
+    ["failed", "completed"]
+  );
+  assert.ok(
+    journal.some(
+      (entry) =>
+        entry.type === "run.auto_resume.scheduled" &&
+        entry.payload.reason === "worker_stalled_retry_execution"
+    ),
+    "stalled worker should schedule a fast execution retry instead of waiting for human steer"
+  );
+  assert.ok(
+    !journal.some((entry) => entry.type === "run.auto_resume.blocked"),
+    "stalled worker should not be treated as a manual blocker"
+  );
+}
+
 async function verifyRateLimitedResearchRetriesQuickly(): Promise<void> {
   const { run, workspacePaths } = await bootstrapRun("rate-limited-research-retry");
 
@@ -1749,6 +1854,10 @@ async function main(): Promise<void> {
     {
       id: "rate_limited_execution_retries_quickly",
       run: verifyRateLimitedExecutionRetriesQuickly
+    },
+    {
+      id: "worker_stalled_execution_retries_quickly",
+      run: verifyWorkerStalledExecutionRetriesQuickly
     },
     {
       id: "rate_limited_research_retries_quickly",

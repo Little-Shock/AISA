@@ -93,6 +93,36 @@ async function createFakeCodexScript(input: {
   return scriptPath;
 }
 
+async function createStalledCodexScript(input: {
+  rootDir: string;
+  fileName: string;
+  jsonEvents: string[];
+}): Promise<string> {
+  const scriptPath = join(input.rootDir, input.fileName);
+  const lines = [
+    "#!/usr/bin/env node",
+    "let sawJson = false;",
+    "for (let index = 2; index < process.argv.length; index += 1) {",
+    "  if (process.argv[index] === '--json') {",
+    "    sawJson = true;",
+    "  }",
+    "}",
+    "process.stdin.resume();",
+    "process.stdin.on('end', () => {",
+    "  if (!sawJson) {",
+    "    console.error('missing --json');",
+    "    process.exit(3);",
+    "  }",
+    ...input.jsonEvents.map((event) => `  process.stdout.write(${JSON.stringify(`${event}\n`)});`),
+    "  setInterval(() => {}, 60_000);",
+    "});"
+  ];
+
+  await writeFile(scriptPath, lines.join('\n'), "utf8");
+  await chmod(scriptPath, 0o755);
+  return scriptPath;
+}
+
 function createExecutionAttemptFixture(input: {
   runId: string;
   workspaceRoot: string;
@@ -292,14 +322,19 @@ async function main(): Promise<void> {
     CODEX_SANDBOX: "workspace-write",
     CODEX_MODEL: "gpt-5.4",
     CODEX_SKIP_GIT_REPO_CHECK: "false",
-    CODEX_TIMEOUT_MS: "1"
+    AISA_CODEX_PROGRESS_STALL_MS: "9",
+    AISA_CODEX_STALL_POLL_MS: "7",
+    AISA_CODEX_STALL_KILL_GRACE_MS: "5"
   });
   assert.deepEqual(loadedConfig, {
     command: "codex-test",
     model: "gpt-5.4",
     profile: undefined,
     sandbox: "workspace-write",
-    skipGitRepoCheck: false
+    skipGitRepoCheck: false,
+    progressStallMs: 9,
+    stallPollMs: 7,
+    stallKillGraceMs: 5
   });
 
   const runtimeFixture = createExecutionAttemptFixture({
@@ -497,6 +532,82 @@ async function main(): Promise<void> {
   assert.equal(runtimeEvents[3]?.summary, "执行命令：pnpm verify:runtime");
   assert.equal(runtimeEvents[4]?.summary, "命令完成：pnpm verify:runtime");
 
+  const stalledFixture = createExecutionAttemptFixture({
+    runId: run.id,
+    workspaceRoot: rootDir,
+    objective: "验证卡住的 Codex worker 会被自动终止并暴露失败。"
+  });
+  const stalledCodex = await createStalledCodexScript({
+    rootDir,
+    fileName: "fake-codex-stalled.mjs",
+    jsonEvents: [
+      JSON.stringify({
+        type: "thread.started",
+        thread_id: "sess_stalled_test"
+      }),
+      JSON.stringify({
+        type: "turn.started"
+      }),
+      JSON.stringify({
+        type: "item.started",
+        item: {
+          id: "item_verify",
+          type: "command_execution",
+          command: "/bin/zsh -lc 'pnpm verify:run-loop'",
+          aggregated_output: "",
+          exit_code: null,
+          status: "in_progress"
+        }
+      }),
+      JSON.stringify({
+        type: "item.completed",
+        item: {
+          id: "item_verify",
+          type: "command_execution",
+          command: "/bin/zsh -lc 'pnpm verify:run-loop'",
+          aggregated_output: "verify run loop ok",
+          exit_code: 0,
+          status: "completed"
+        }
+      })
+    ]
+  });
+  const stalledAdapter = new CodexCliWorkerAdapter({
+    command: stalledCodex,
+    sandbox: "workspace-write",
+    skipGitRepoCheck: true,
+    progressStallMs: 80,
+    stallPollMs: 20,
+    stallKillGraceMs: 20
+  });
+  await assert.rejects(
+    () =>
+      stalledAdapter.runAttemptTask({
+        run,
+        attempt: stalledFixture.attempt,
+        attemptContract: stalledFixture.attemptContract,
+        context: {},
+        workspacePaths
+      }),
+    (error: unknown) => {
+      const message = error instanceof Error ? error.message : String(error);
+      assert.match(message, /Codex CLI stalled/);
+      assert.match(message, /No runtime stdout activity arrived/);
+      assert.match(message, /No live child command remained and no final output was written/);
+      return true;
+    }
+  );
+
+  const stalledRuntimeState = await getAttemptRuntimeState(
+    workspacePaths,
+    run.id,
+    stalledFixture.attempt.id
+  );
+  assert.ok(stalledRuntimeState, "stalled runtime state should be persisted");
+  assert.equal(stalledRuntimeState?.running, false);
+  assert.equal(stalledRuntimeState?.phase, "failed");
+  assert.match(stalledRuntimeState?.error ?? "", /Codex CLI stalled/);
+
   const invalidFindingPayload = JSON.stringify(
     {
       summary: "坏 finding 类型不该被吞掉。",
@@ -654,6 +765,7 @@ async function main(): Promise<void> {
         research_shell_reentry: "passed",
         blocked_command_exit_code: blockedProbe.exitCode,
         runtime_event_stream: "passed",
+        stalled_worker_guard: "passed",
         malformed_findings_guard: "passed",
         malformed_artifacts_guard: "passed",
         status: "passed"

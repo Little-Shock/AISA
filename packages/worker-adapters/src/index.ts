@@ -46,6 +46,9 @@ export interface CodexCliConfig {
   profile?: string;
   sandbox: "read-only" | "workspace-write" | "danger-full-access";
   skipGitRepoCheck: boolean;
+  progressStallMs?: number;
+  stallPollMs?: number;
+  stallKillGraceMs?: number;
 }
 
 export interface BranchExecutionResult {
@@ -1198,7 +1201,20 @@ function createAttemptRuntimeTracker(input: {
 export class CodexCliWorkerAdapter {
   readonly type = "codex";
 
-  constructor(private readonly config: CodexCliConfig) {}
+  private readonly config: CodexCliConfig & {
+    progressStallMs: number;
+    stallPollMs: number;
+    stallKillGraceMs: number;
+  };
+
+  constructor(config: CodexCliConfig) {
+    this.config = {
+      ...config,
+      progressStallMs: config.progressStallMs ?? 180_000,
+      stallPollMs: config.stallPollMs ?? 5_000,
+      stallKillGraceMs: config.stallKillGraceMs ?? 5_000
+    };
+  }
 
   async runBranchTask(input: {
     goal: Goal;
@@ -1389,6 +1405,11 @@ export class CodexCliWorkerAdapter {
       runId: run.id,
       attemptId: attempt.id
     });
+    let lastActivityAt = Date.now();
+
+    const markWorkerActivity = (): void => {
+      lastActivityAt = Date.now();
+    };
 
     let exitCode: number;
     try {
@@ -1401,24 +1422,34 @@ export class CodexCliWorkerAdapter {
         });
 
         child.stdout.on("data", (chunk) => {
+          markWorkerActivity();
           stdoutStream.write(chunk);
           runtimeTracker.ingestStdoutChunk(chunk);
         });
 
         child.stderr.on("data", (chunk) => {
+          markWorkerActivity();
           stderrStream.write(chunk);
-        });
-
-        child.on("error", (error) => {
-          reject(error);
-        });
-
-        child.on("close", (code) => {
-          resolve(code ?? 1);
         });
 
         child.stdin.write(prompt);
         child.stdin.end();
+
+        void waitForChildExitWithStallGuard({
+          child,
+          outputFile,
+          progressStallMs: this.config.progressStallMs,
+          stallPollMs: this.config.stallPollMs,
+          stallKillGraceMs: this.config.stallKillGraceMs,
+          getLastActivityAt: () => lastActivityAt,
+          onStallDetected: (message) => {
+            runtimeTracker.saveStatePatch({
+              phase: "stalled",
+              progress_text: "检测到 worker 卡住，正在终止当前尝试",
+              error: message
+            });
+          }
+        }).then(resolve, reject);
       });
 
       runtimeTracker.flushStdoutRemainder();
@@ -1477,7 +1508,19 @@ export function loadCodexCliConfig(env: NodeJS.ProcessEnv): CodexCliConfig {
     profile: env.CODEX_PROFILE,
     sandbox:
       (env.CODEX_SANDBOX as CodexCliConfig["sandbox"] | undefined) ?? "read-only",
-    skipGitRepoCheck: env.CODEX_SKIP_GIT_REPO_CHECK !== "false"
+    skipGitRepoCheck: env.CODEX_SKIP_GIT_REPO_CHECK !== "false",
+    progressStallMs: readPositiveInteger(
+      env.AISA_CODEX_PROGRESS_STALL_MS ?? env.CODEX_PROGRESS_STALL_MS,
+      180_000
+    ),
+    stallPollMs: readPositiveInteger(
+      env.AISA_CODEX_STALL_POLL_MS ?? env.CODEX_STALL_POLL_MS,
+      5_000
+    ),
+    stallKillGraceMs: readPositiveInteger(
+      env.AISA_CODEX_STALL_KILL_GRACE_MS ?? env.CODEX_STALL_KILL_GRACE_MS,
+      5_000
+    )
   };
 }
 
@@ -1706,6 +1749,231 @@ async function closeStream(stream: {
   await new Promise<void>((resolve, reject) => {
     stream.once("error", reject);
     stream.end(resolve);
+  });
+}
+
+function readPositiveInteger(value: string | undefined, fallback: number): number {
+  if (!value) {
+    return fallback;
+  }
+
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+async function listLiveDescendantPids(rootPid: number): Promise<number[]> {
+  const output = await new Promise<string>((resolve, reject) => {
+    const child = spawn("ps", ["-axo", "pid=,ppid=,stat="], {
+      stdio: ["ignore", "pipe", "pipe"],
+      shell: false
+    });
+
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => {
+      stdout += String(chunk);
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += String(chunk);
+    });
+    child.on("error", reject);
+    child.on("close", (code) => {
+      if (code === 0) {
+        resolve(stdout);
+        return;
+      }
+
+      reject(new Error(stderr.trim() || `ps exited with code ${code ?? 1}`));
+    });
+  });
+
+  const childrenByParent = new Map<number, number[]>();
+  const liveStateByPid = new Map<number, boolean>();
+  for (const line of output.split(/\r?\n/u)) {
+    const trimmed = line.trim();
+    if (!trimmed) {
+      continue;
+    }
+
+    const match = trimmed.match(/^(\d+)\s+(\d+)\s+(.+)$/u);
+    if (!match) {
+      continue;
+    }
+
+    const pid = Number.parseInt(match[1] ?? "", 10);
+    const ppid = Number.parseInt(match[2] ?? "", 10);
+    const stat = normalizeWhitespace(match[3]);
+    if (!Number.isFinite(pid) || !Number.isFinite(ppid)) {
+      continue;
+    }
+
+    const children = childrenByParent.get(ppid) ?? [];
+    children.push(pid);
+    childrenByParent.set(ppid, children);
+    liveStateByPid.set(pid, !stat.startsWith("Z"));
+  }
+
+  const descendants: number[] = [];
+  const queue = [...(childrenByParent.get(rootPid) ?? [])];
+  while (queue.length > 0) {
+    const pid = queue.shift();
+    if (!pid) {
+      continue;
+    }
+
+    if (liveStateByPid.get(pid) !== false) {
+      descendants.push(pid);
+    }
+
+    queue.push(...(childrenByParent.get(pid) ?? []));
+  }
+
+  return descendants;
+}
+
+function signalProcess(pid: number, signal: NodeJS.Signals): void {
+  try {
+    process.kill(pid, signal);
+  } catch (error) {
+    if (hasErrorCode(error, "ESRCH")) {
+      return;
+    }
+
+    throw error;
+  }
+}
+
+function buildCodexStallMessage(input: {
+  progressStallMs: number;
+  stalledForMs: number;
+  pid: number;
+}): string {
+  return [
+    `Codex CLI stalled for worker pid ${input.pid}.`,
+    `No runtime stdout activity arrived for ${input.stalledForMs}ms (stall window ${input.progressStallMs}ms).`,
+    "No live child command remained and no final output was written."
+  ].join(" ");
+}
+
+async function waitForChildExitWithStallGuard(input: {
+  child: ReturnType<typeof spawn>;
+  outputFile: string;
+  progressStallMs: number;
+  stallPollMs: number;
+  stallKillGraceMs: number;
+  getLastActivityAt: () => number;
+  onStallDetected?: (message: string) => void;
+}): Promise<number> {
+  return await new Promise<number>((resolve, reject) => {
+    let settled = false;
+    let checking = false;
+    let stallError: Error | null = null;
+    let killTimer: NodeJS.Timeout | null = null;
+    const pollMs = Math.max(250, Math.min(input.stallPollMs, input.progressStallMs));
+
+    const cleanup = (): void => {
+      clearInterval(interval);
+      if (killTimer) {
+        clearTimeout(killTimer);
+      }
+    };
+
+    const finalizeResolve = (code: number): void => {
+      if (settled) {
+        return;
+      }
+
+      settled = true;
+      cleanup();
+      if (stallError) {
+        reject(stallError);
+        return;
+      }
+
+      resolve(code);
+    };
+
+    const finalizeReject = (error: unknown): void => {
+      if (settled) {
+        return;
+      }
+
+      settled = true;
+      cleanup();
+      reject(error);
+    };
+
+    const interval = setInterval(() => {
+      void (async () => {
+        if (
+          settled ||
+          checking ||
+          stallError ||
+          input.progressStallMs <= 0 ||
+          !input.child.pid
+        ) {
+          return;
+        }
+
+        const stalledForMs = Date.now() - input.getLastActivityAt();
+        if (stalledForMs < input.progressStallMs) {
+          return;
+        }
+
+        checking = true;
+        try {
+          const descendants = await listLiveDescendantPids(input.child.pid);
+          if (descendants.length > 0) {
+            return;
+          }
+
+          try {
+            await access(input.outputFile, fsConstants.F_OK);
+            return;
+          } catch {
+            // The current hang pattern leaves no final output file behind.
+          }
+
+          stallError = new Error(
+            buildCodexStallMessage({
+              progressStallMs: input.progressStallMs,
+              stalledForMs,
+              pid: input.child.pid
+            })
+          );
+          input.onStallDetected?.(stallError.message);
+          signalProcess(input.child.pid, "SIGTERM");
+          killTimer = setTimeout(() => {
+            if (!settled && input.child.pid) {
+              signalProcess(input.child.pid, "SIGKILL");
+            }
+          }, input.stallKillGraceMs);
+          killTimer.unref?.();
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          stallError = new Error(
+            `Codex CLI stall watchdog failed while monitoring worker pid ${input.child.pid}. ${message}`
+          );
+          input.onStallDetected?.(stallError.message);
+          if (input.child.pid) {
+            signalProcess(input.child.pid, "SIGTERM");
+          }
+        } finally {
+          checking = false;
+        }
+      })().catch((error) => {
+        finalizeReject(error);
+      });
+    }, pollMs);
+    interval.unref?.();
+
+    input.child.on("error", (error) => {
+      finalizeReject(error);
+    });
+
+    input.child.on("close", (code) => {
+      finalizeResolve(code ?? 1);
+    });
   });
 }
 

@@ -134,6 +134,7 @@ export interface OrchestratorOptions {
   maxAutomaticResumeCycles?: number;
   providerRateLimitAutoResumeMs?: number;
   maxProviderRateLimitAutoResumeCycles?: number;
+  workerStallAutoResumeMs?: number;
   runtimeSourceDriftAutoResumeMs?: number;
   runWorkspaceScopePolicy?: RunWorkspaceScopePolicy;
   reviewers?: AttemptReviewerAdapter[];
@@ -249,6 +250,7 @@ export class Orchestrator {
   private readonly maxAutomaticResumeCycles: number;
   private readonly providerRateLimitAutoResumeMs: number;
   private readonly maxProviderRateLimitAutoResumeCycles: number;
+  private readonly workerStallAutoResumeMs: number;
   private readonly runtimeSourceDriftAutoResumeMs: number;
   private readonly runWorkspaceScopePolicy: RunWorkspaceScopePolicy;
   private readonly reviewers: AttemptReviewerAdapter[];
@@ -279,6 +281,9 @@ export class Orchestrator {
     this.maxProviderRateLimitAutoResumeCycles =
       options.maxProviderRateLimitAutoResumeCycles ??
       readPositiveIntegerEnv("AISA_MAX_PROVIDER_RATE_LIMIT_AUTO_RESUME_CYCLES", 8);
+    this.workerStallAutoResumeMs =
+      options.workerStallAutoResumeMs ??
+      readPositiveIntegerEnv("AISA_WORKER_STALL_AUTO_RESUME_MS", 5_000);
     this.runtimeSourceDriftAutoResumeMs =
       options.runtimeSourceDriftAutoResumeMs ??
       readPositiveIntegerEnv("AISA_RUNTIME_SOURCE_DRIFT_AUTO_RESUME_MS", 1_000);
@@ -2462,14 +2467,14 @@ export class Orchestrator {
       journal: input.journal,
       latestAttempt
     });
-    const providerBlocker = this.classifyProviderBlocker(failureMessage);
+    const failureMode = this.classifyFailureMode(failureMessage);
 
-    if (providerBlocker !== "provider_auth_failed" || !failureMessage) {
+    if (failureMode !== "provider_auth_failed" || !failureMessage) {
       return null;
     }
 
     return {
-      reason: providerBlocker,
+      reason: failureMode,
       message: `上一轮${latestAttempt.attempt_type === "execution" ? "execution" : "research"}命中 provider 鉴权失败，自动续跑已暂停。原始阻塞：${failureMessage}`
     };
   }
@@ -2553,9 +2558,9 @@ export class Orchestrator {
         journal: input.journal,
         latestAttempt
       });
-      const providerBlocker = this.classifyProviderBlocker(failureMessage);
+      const failureMode = this.classifyFailureMode(failureMessage);
 
-      if (providerBlocker === "provider_rate_limited") {
+      if (failureMode === "provider_rate_limited") {
         return {
           next_action: "retry_attempt",
           attempt_type: latestAttempt.attempt_type,
@@ -2571,6 +2576,25 @@ export class Orchestrator {
             latestAttempt.attempt_type === "execution"
               ? "provider_rate_limited_retry_execution"
               : "provider_rate_limited_retry_research"
+        };
+      }
+
+      if (failureMode === "worker_stalled") {
+        return {
+          next_action: "retry_attempt",
+          attempt_type: latestAttempt.attempt_type,
+          summary:
+            latestAttempt.attempt_type === "execution"
+              ? "worker 卡住，系统短退避后自动重试上一轮执行。"
+              : "worker 卡住，系统短退避后自动重试上一轮研究。",
+          blocking_reason:
+            failureMessage ??
+            input.current.blocking_reason ??
+            "上一轮 worker 卡住，系统会短退避后重试。",
+          reason:
+            latestAttempt.attempt_type === "execution"
+              ? "worker_stalled_retry_execution"
+              : "worker_stalled_retry_research"
         };
       }
 
@@ -2704,12 +2728,20 @@ export class Orchestrator {
       journal: input.journal,
       latestAttempt
     });
-    const providerBlocker = this.classifyProviderBlocker(failureMessage);
-    if (providerBlocker === "provider_rate_limited") {
+    const failureMode = this.classifyFailureMode(failureMessage);
+    if (failureMode === "provider_rate_limited") {
       return {
         delayMs: this.providerRateLimitAutoResumeMs,
         maxCycles: this.maxProviderRateLimitAutoResumeCycles,
         reasonPrefix: "provider_rate_limited_retry_"
+      };
+    }
+
+    if (failureMode === "worker_stalled") {
+      return {
+        delayMs: this.workerStallAutoResumeMs,
+        maxCycles: this.maxAutomaticResumeCycles,
+        reasonPrefix: "worker_stalled_retry_"
       };
     }
 
@@ -2805,9 +2837,9 @@ export class Orchestrator {
     );
   }
 
-  private classifyProviderBlocker(
+  private classifyFailureMode(
     message: string | null | undefined
-  ): "provider_rate_limited" | "provider_auth_failed" | null {
+  ): "provider_rate_limited" | "provider_auth_failed" | "worker_stalled" | null {
     if (!message) {
       return null;
     }
@@ -2844,6 +2876,18 @@ export class Orchestrator {
     ];
     if (authPatterns.some((pattern) => pattern.test(message))) {
       return "provider_auth_failed";
+    }
+
+    const workerStallPatterns = [
+      /Codex CLI stalled/i,
+      /stall watchdog/i,
+      /no runtime stdout activity/i,
+      /no live child command remained/i,
+      /no final output was written/i,
+      /worker 卡住/u
+    ];
+    if (workerStallPatterns.some((pattern) => pattern.test(message))) {
+      return "worker_stalled";
     }
 
     return null;
