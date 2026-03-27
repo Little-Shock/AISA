@@ -7,7 +7,9 @@ import type {
   AttemptRuntimeEvent,
   AttemptRuntimeState,
   AttemptEvaluation,
+  AttemptReviewInputPacket,
   AttemptReviewPacket,
+  AttemptReviewerOpinion,
   AttemptRuntimeVerification,
   Branch,
   BranchSpec,
@@ -32,7 +34,9 @@ import {
   AttemptRuntimeEventSchema,
   AttemptRuntimeStateSchema,
   AttemptEvaluationSchema,
+  AttemptReviewInputPacketSchema,
   AttemptReviewPacketSchema,
+  AttemptReviewerOpinionSchema,
   AttemptRuntimeVerificationSchema,
   BranchSchema,
   ContextBoardSchema,
@@ -97,7 +101,9 @@ export interface AttemptPaths {
   contextFile: string;
   resultFile: string;
   evaluationFile: string;
+  reviewInputPacketFile: string;
   reviewPacketFile: string;
+  reviewOpinionsDir: string;
   runtimeVerificationFile: string;
   heartbeatFile: string;
   runtimeStateFile: string;
@@ -153,7 +159,9 @@ export function resolveAttemptPaths(
     contextFile: join(attemptDir, "context.json"),
     resultFile: join(attemptDir, "result.json"),
     evaluationFile: join(attemptDir, "evaluation.json"),
+    reviewInputPacketFile: join(attemptDir, "review_input_packet.json"),
     reviewPacketFile: join(attemptDir, "review_packet.json"),
+    reviewOpinionsDir: join(attemptDir, "review_opinions"),
     runtimeVerificationFile: join(attemptDir, "artifacts", "runtime-verification.json"),
     heartbeatFile: join(attemptDir, "artifacts", "heartbeat.json"),
     runtimeStateFile: join(attemptDir, "artifacts", "runtime-state.json"),
@@ -251,7 +259,7 @@ export async function ensureAttemptDirectories(
   const attemptPaths = resolveAttemptPaths(paths, runId, attemptId);
 
   await Promise.all(
-    [attemptPaths.attemptDir, attemptPaths.artifactsDir].map((dir) =>
+    [attemptPaths.attemptDir, attemptPaths.artifactsDir, attemptPaths.reviewOpinionsDir].map((dir) =>
       mkdir(dir, { recursive: true })
     )
   );
@@ -640,6 +648,18 @@ export async function saveAttemptEvaluation(
   await writeJsonFile(attemptPaths.evaluationFile, evaluation);
 }
 
+export async function saveAttemptReviewInputPacket(
+  paths: WorkspacePaths,
+  reviewInputPacket: AttemptReviewInputPacket
+): Promise<void> {
+  const attemptPaths = await ensureAttemptDirectories(
+    paths,
+    reviewInputPacket.run_id,
+    reviewInputPacket.attempt_id
+  );
+  await writeJsonFile(attemptPaths.reviewInputPacketFile, reviewInputPacket);
+}
+
 export async function saveAttemptReviewPacket(
   paths: WorkspacePaths,
   reviewPacket: AttemptReviewPacket
@@ -650,6 +670,18 @@ export async function saveAttemptReviewPacket(
     reviewPacket.attempt_id
   );
   await writeJsonFile(attemptPaths.reviewPacketFile, reviewPacket);
+}
+
+export async function saveAttemptReviewOpinion(
+  paths: WorkspacePaths,
+  opinion: AttemptReviewerOpinion
+): Promise<void> {
+  const attemptPaths = await ensureAttemptDirectories(
+    paths,
+    opinion.run_id,
+    opinion.attempt_id
+  );
+  await writeJsonFile(join(attemptPaths.reviewOpinionsDir, `${opinion.opinion_id}.json`), opinion);
 }
 
 export async function saveAttemptRuntimeVerification(
@@ -679,6 +711,21 @@ export async function getAttemptEvaluation(
   }
 }
 
+export async function getAttemptReviewInputPacket(
+  paths: WorkspacePaths,
+  runId: string,
+  attemptId: string
+): Promise<AttemptReviewInputPacket | null> {
+  try {
+    const reviewInputPacket = await readJsonFile<AttemptReviewInputPacket>(
+      resolveAttemptPaths(paths, runId, attemptId).reviewInputPacketFile
+    );
+    return AttemptReviewInputPacketSchema.parse(reviewInputPacket);
+  } catch {
+    return null;
+  }
+}
+
 export async function getAttemptReviewPacket(
   paths: WorkspacePaths,
   runId: string,
@@ -692,6 +739,19 @@ export async function getAttemptReviewPacket(
   } catch {
     return null;
   }
+}
+
+export async function listAttemptReviewOpinions(
+  paths: WorkspacePaths,
+  runId: string,
+  attemptId: string
+): Promise<AttemptReviewerOpinion[]> {
+  const attemptPaths = resolveAttemptPaths(paths, runId, attemptId);
+  const opinions = await listJsonFiles(attemptPaths.reviewOpinionsDir, (value) =>
+    AttemptReviewerOpinionSchema.parse(value)
+  );
+
+  return opinions.sort((left, right) => left.created_at.localeCompare(right.created_at));
 }
 
 export async function getAttemptRuntimeVerification(

@@ -21,7 +21,10 @@ import {
   type AttemptContract,
   type AttemptContractDraft,
   type AttemptEvaluation,
+  type AttemptReviewInputPacket,
+  type AttemptReviewInputRef,
   type AttemptReviewPacket,
+  type AttemptReviewerOpinion,
   type AttemptRuntimeVerification,
   type Branch,
   type CurrentDecision,
@@ -33,7 +36,14 @@ import {
   type WorkerWriteback
 } from "@autoresearch/domain";
 import { appendEvent } from "@autoresearch/event-log";
-import { evaluateAttempt, evaluateBranch } from "@autoresearch/judge";
+import {
+  createAttemptReviewerAdapters,
+  evaluateBranch,
+  runAttemptReviewerPipeline,
+  synthesizeAttemptEvaluation,
+  type AttemptReviewerConfig,
+  type AttemptReviewerAdapter
+} from "@autoresearch/judge";
 import { buildGoalReport } from "@autoresearch/report-builder";
 import {
   appendRunJournal,
@@ -42,6 +52,7 @@ import {
   getAttemptContext,
   getAttemptHeartbeat,
   getAttemptEvaluation,
+  getAttemptReviewInputPacket,
   getAttemptReviewPacket,
   getAttemptResult,
   getAttemptRuntimeVerification,
@@ -54,6 +65,7 @@ import {
   getRun,
   getRunRuntimeHealthSnapshot,
   listAttempts,
+  listAttemptReviewOpinions,
   listRunJournal,
   getWriteback,
   listBranches,
@@ -69,6 +81,8 @@ import {
   saveAttemptContext,
   saveAttemptEvaluation,
   saveAttemptHeartbeat,
+  saveAttemptReviewInputPacket,
+  saveAttemptReviewOpinion,
   saveAttemptReviewPacket,
   saveAttemptResult,
   saveBranch,
@@ -116,6 +130,9 @@ export interface OrchestratorOptions {
   maxProviderRateLimitAutoResumeCycles?: number;
   runtimeSourceDriftAutoResumeMs?: number;
   runWorkspaceScopePolicy?: RunWorkspaceScopePolicy;
+  reviewers?: AttemptReviewerAdapter[];
+  reviewerConfigs?: AttemptReviewerConfig[];
+  reviewerConfigEnv?: NodeJS.ProcessEnv;
   requestRuntimeRestart?: (request: RuntimeRestartRequest) => Promise<void> | void;
 }
 
@@ -125,6 +142,92 @@ export type RuntimeRestartRequest = {
   affectedFiles: string[];
   message: string;
 };
+
+export type ExecutionVerificationToolchainAssessment = {
+  has_package_json: boolean;
+  has_local_node_modules: boolean;
+  inferred_pnpm_commands: string[];
+  blocked_pnpm_commands: string[];
+};
+
+async function readWorkspacePackageScripts(
+  workspaceRoot: string
+): Promise<Record<string, string> | null> {
+  const packageJsonPath = resolve(workspaceRoot, "package.json");
+
+  try {
+    const packageJson = JSON.parse(await readFile(packageJsonPath, "utf8")) as {
+      scripts?: Record<string, string>;
+    };
+    return packageJson.scripts ?? {};
+  } catch {
+    return null;
+  }
+}
+
+function buildDefaultExecutionVerificationCommandsFromScripts(
+  scripts: Record<string, string>
+): ExecutionVerificationPlan["commands"] {
+  const commands: ExecutionVerificationPlan["commands"] = [];
+
+  if (typeof scripts.typecheck === "string" && scripts.typecheck.length > 0) {
+    commands.push({
+      purpose: "typecheck the workspace after the change",
+      command: "pnpm typecheck"
+    });
+  }
+
+  if (typeof scripts["verify:runtime"] === "string" && scripts["verify:runtime"].length > 0) {
+    commands.push({
+      purpose: "replay the runtime regression suite after the change",
+      command: "pnpm verify:runtime"
+    });
+  } else if (typeof scripts.test === "string" && scripts.test.length > 0) {
+    commands.push({
+      purpose: "run the workspace test suite after the change",
+      command: "pnpm test"
+    });
+  } else if (typeof scripts.build === "string" && scripts.build.length > 0) {
+    commands.push({
+      purpose: "build the workspace after the change",
+      command: "pnpm build"
+    });
+  }
+
+  return commands;
+}
+
+async function workspaceHasLocalNodeModules(workspaceRoot: string): Promise<boolean> {
+  try {
+    return (await stat(resolve(workspaceRoot, "node_modules"))).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+export async function assessExecutionVerificationToolchain(input: {
+  workspaceRoot: string;
+  verificationPlan?: ExecutionVerificationPlan | null;
+}): Promise<ExecutionVerificationToolchainAssessment> {
+  const scripts = await readWorkspacePackageScripts(input.workspaceRoot);
+  const inferredCommands =
+    scripts === null ? [] : buildDefaultExecutionVerificationCommandsFromScripts(scripts);
+  const blockedPnpmCommands = (input.verificationPlan?.commands ?? [])
+    .map((command) => command.command.trim())
+    .filter((command) => command.startsWith("pnpm "));
+  const hasLocalNodeModules = await workspaceHasLocalNodeModules(input.workspaceRoot);
+
+  return {
+    has_package_json: scripts !== null,
+    has_local_node_modules: hasLocalNodeModules,
+    inferred_pnpm_commands: inferredCommands.map((command) => command.command),
+    blocked_pnpm_commands: blockedPnpmCommands
+  };
+}
+
+function formatVerificationCommands(commands: string[]): string {
+  return commands.join(", ");
+}
 
 export class Orchestrator {
   private timer: NodeJS.Timeout | null = null;
@@ -139,6 +242,7 @@ export class Orchestrator {
   private readonly maxProviderRateLimitAutoResumeCycles: number;
   private readonly runtimeSourceDriftAutoResumeMs: number;
   private readonly runWorkspaceScopePolicy: RunWorkspaceScopePolicy;
+  private readonly reviewers: AttemptReviewerAdapter[];
   private readonly requestRuntimeRestart: ((
     request: RuntimeRestartRequest
   ) => Promise<void> | void) | null;
@@ -171,6 +275,19 @@ export class Orchestrator {
     this.runWorkspaceScopePolicy =
       options.runWorkspaceScopePolicy ??
       createDefaultRunWorkspaceScopePolicy(this.workspacePaths.rootDir);
+    if (options.reviewers && options.reviewerConfigs) {
+      throw new Error("Orchestrator reviewer injection is ambiguous. Use reviewers or reviewerConfigs.");
+    }
+    if (options.reviewers && options.reviewers.length === 0) {
+      throw new Error("Orchestrator reviewers cannot be an empty array.");
+    }
+    this.reviewers =
+      options.reviewers && options.reviewers.length > 0
+        ? options.reviewers
+        : createAttemptReviewerAdapters({
+            configs: options.reviewerConfigs,
+            env: options.reviewerConfigEnv ?? process.env
+          });
     this.requestRuntimeRestart = options.requestRuntimeRestart ?? null;
     this.instanceStartedAtMs = Date.now();
   }
@@ -879,11 +996,14 @@ export class Orchestrator {
         })
       );
 
-      this.assertDispatchableAttemptContract(attempt, attemptContract);
+      const dispatchableAttemptContract = await this.requireDispatchableAttemptContract(
+        attempt,
+        attemptContract
+      );
       const execution = await this.adapter.runAttemptTask({
         run,
         attempt,
-        attemptContract,
+        attemptContract: dispatchableAttemptContract,
         context,
         workspacePaths: this.workspacePaths
       });
@@ -892,7 +1012,7 @@ export class Orchestrator {
       const runtimeVerification = await runAttemptRuntimeVerification({
         run,
         attempt,
-        attemptContract,
+        attemptContract: dispatchableAttemptContract,
         result: execution.writeback,
         attemptPaths
       });
@@ -902,19 +1022,44 @@ export class Orchestrator {
         result_ref: `runs/${runId}/attempts/${attempt.id}/result.json`,
         evaluation_ref: null
       });
-      const reviewPacketForEvaluation = await this.buildAttemptReviewPacket({
+      const reviewInputPacket = await this.buildAttemptReviewInputPacket({
         runId,
         attempt: completedAttemptForEvaluation,
         attemptContract,
         currentSnapshot: current,
         context,
         result: execution.writeback,
-        evaluation: null,
         runtimeVerification: runtimeVerification.verification,
         journal: await listRunJournal(this.workspacePaths, runId)
       });
-      const evaluation = evaluateAttempt({
-        reviewPacket: reviewPacketForEvaluation
+      await saveAttemptReviewInputPacket(this.workspacePaths, reviewInputPacket);
+      const reviewInputPacketRef = this.buildAttemptReviewInputPacketRef(runId, attempt.id);
+      const reviewerInputRefs = this.buildReviewerInputRefs(
+        reviewInputPacketRef,
+        reviewInputPacket
+      );
+      let reviewOpinions: AttemptReviewerOpinion[];
+      try {
+        reviewOpinions = await runAttemptReviewerPipeline({
+          reviewInputPacket,
+          reviewers: this.reviewers,
+          reviewInputPacketRef,
+          inputRefs: reviewerInputRefs
+        });
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : String(error);
+        throw new Error(`尝试 ${attempt.id} 的 reviewer 在 opinion 落盘前失败：${reason}`);
+      }
+      await Promise.all(
+        reviewOpinions.map((opinion) => saveAttemptReviewOpinion(this.workspacePaths, opinion))
+      );
+      const evaluation = synthesizeAttemptEvaluation({
+        reviewInputPacket,
+        opinions: reviewOpinions,
+        reviewInputPacketRef,
+        opinionRefs: reviewOpinions.map((opinion) =>
+          this.buildAttemptReviewOpinionRef(runId, attempt.id, opinion.opinion_id)
+        )
       });
       await saveAttemptEvaluation(this.workspacePaths, evaluation);
 
@@ -1071,6 +1216,8 @@ export class Orchestrator {
       context,
       result,
       evaluation,
+      reviewInputPacket,
+      reviewOpinions,
       runtimeVerification,
       journal
     ] = await Promise.all([
@@ -1078,19 +1225,33 @@ export class Orchestrator {
       getAttemptContext(this.workspacePaths, input.runId, input.attempt.id),
       getAttemptResult(this.workspacePaths, input.runId, input.attempt.id),
       getAttemptEvaluation(this.workspacePaths, input.runId, input.attempt.id),
+      getAttemptReviewInputPacket(this.workspacePaths, input.runId, input.attempt.id),
+      listAttemptReviewOpinions(this.workspacePaths, input.runId, input.attempt.id),
       getAttemptRuntimeVerification(this.workspacePaths, input.runId, input.attempt.id),
       listRunJournal(this.workspacePaths, input.runId)
     ]);
+    const effectiveReviewInputPacket =
+      reviewInputPacket ??
+      (await this.buildAttemptReviewInputPacket({
+        runId: input.runId,
+        attempt: input.attempt,
+        attemptContract,
+        currentSnapshot: input.currentSnapshot,
+        context,
+        result,
+        runtimeVerification,
+        journal
+      }));
     const reviewPacket = await this.buildAttemptReviewPacket({
-      runId: input.runId,
-      attempt: input.attempt,
-      attemptContract,
-      currentSnapshot: input.currentSnapshot,
-      context,
-      result,
+      reviewInputPacket: effectiveReviewInputPacket,
+      settledAttempt: input.attempt,
       evaluation,
-      runtimeVerification,
-      journal
+      currentSnapshot: input.currentSnapshot,
+      journal,
+      reviewInputPacketRef: reviewInputPacket
+        ? this.buildAttemptReviewInputPacketRef(input.runId, input.attempt.id)
+        : null,
+      reviewOpinions
     });
 
     await saveAttemptReviewPacket(this.workspacePaths, reviewPacket);
@@ -1134,6 +1295,55 @@ export class Orchestrator {
     return `runs/${runId}/attempts/${attemptId}/context.json`;
   }
 
+  private buildAttemptEvaluationRef(runId: string, attemptId: string): string {
+    return `runs/${runId}/attempts/${attemptId}/evaluation.json`;
+  }
+
+  private buildAttemptReviewInputPacketRef(runId: string, attemptId: string): string {
+    return `runs/${runId}/attempts/${attemptId}/review_input_packet.json`;
+  }
+
+  private buildAttemptReviewOpinionRef(
+    runId: string,
+    attemptId: string,
+    opinionId: string
+  ): string {
+    return `runs/${runId}/attempts/${attemptId}/review_opinions/${opinionId}.json`;
+  }
+
+  private buildReviewerInputRefs(
+    reviewInputPacketRef: string,
+    reviewInputPacket: AttemptReviewInputPacket
+  ): AttemptReviewInputRef[] {
+    const seen = new Set<string>();
+    const refs: AttemptReviewInputRef[] = [];
+    const addRef = (kind: string, path: string | null | undefined): void => {
+      if (!path) {
+        return;
+      }
+
+      const key = `${kind}:${path}`;
+      if (seen.has(key)) {
+        return;
+      }
+
+      seen.add(key);
+      refs.push({
+        kind,
+        path
+      });
+    };
+
+    addRef("review_input_packet", reviewInputPacketRef);
+    for (const artifact of reviewInputPacket.artifact_manifest) {
+      if (artifact.exists) {
+        addRef(artifact.kind, artifact.path);
+      }
+    }
+
+    return refs;
+  }
+
   private async ensureSettledAttemptReviewPackets(
     runId: string,
     current: CurrentDecision | null,
@@ -1168,6 +1378,8 @@ export class Orchestrator {
       context,
       result,
       evaluation,
+      reviewInputPacket,
+      reviewOpinions,
       runtimeVerification,
       journal
     ] = await Promise.all([
@@ -1176,55 +1388,87 @@ export class Orchestrator {
       getAttemptContext(this.workspacePaths, runId, attemptId),
       getAttemptResult(this.workspacePaths, runId, attemptId),
       getAttemptEvaluation(this.workspacePaths, runId, attemptId),
+      getAttemptReviewInputPacket(this.workspacePaths, runId, attemptId),
+      listAttemptReviewOpinions(this.workspacePaths, runId, attemptId),
       getAttemptRuntimeVerification(this.workspacePaths, runId, attemptId),
       listRunJournal(this.workspacePaths, runId)
     ]);
+    const effectiveReviewInputPacket =
+      reviewInputPacket ??
+      (await this.buildAttemptReviewInputPacket({
+        runId,
+        attempt,
+        attemptContract,
+        currentSnapshot,
+        context,
+        result,
+        runtimeVerification,
+        journal
+      }));
     const reviewPacket = await this.buildAttemptReviewPacket({
-      runId,
-      attempt,
-      attemptContract,
-      currentSnapshot,
-      context,
-      result,
+      reviewInputPacket: effectiveReviewInputPacket,
+      settledAttempt: attempt,
       evaluation,
-      runtimeVerification,
-      journal
+      currentSnapshot,
+      journal,
+      reviewInputPacketRef: reviewInputPacket
+        ? this.buildAttemptReviewInputPacketRef(runId, attemptId)
+        : null,
+      reviewOpinions
     });
 
     await saveAttemptReviewPacket(this.workspacePaths, reviewPacket);
   }
 
-  private async buildAttemptReviewPacket(input: {
-    runId: string;
+  private buildReviewPacketFailureContext(input: {
     attempt: Attempt;
-    attemptContract: AttemptContract | null;
     currentSnapshot: CurrentDecision | null;
-    context: unknown | null;
-    result: WorkerWriteback | null;
-    evaluation: AttemptEvaluation | null;
     runtimeVerification: AttemptRuntimeVerification | null;
     journal: Awaited<ReturnType<typeof listRunJournal>>;
-  }): Promise<AttemptReviewPacket> {
-    const attemptPaths = resolveAttemptPaths(
-      this.workspacePaths,
-      input.runId,
-      input.attempt.id
-    );
-    const attemptJournal = input.journal.filter((entry) => entry.attempt_id === input.attempt.id);
-    const failureEntry = [...attemptJournal].reverse().find((entry) =>
+  }): AttemptReviewInputPacket["failure_context"] {
+    const failureEntry = [...input.journal].reverse().find((entry) =>
       [
         "attempt.failed",
         "attempt.recovery_required",
         "attempt.restart_required"
       ].includes(entry.type)
     );
+    const currentBlockingReason =
+      input.currentSnapshot?.latest_attempt_id === input.attempt.id
+        ? input.currentSnapshot.blocking_reason
+        : null;
     const failureMessage =
       this.getReviewPacketFailureMessage(failureEntry?.payload) ??
       input.runtimeVerification?.failure_reason ??
       (["failed", "stopped"].includes(input.attempt.status)
-        ? input.currentSnapshot?.blocking_reason ??
-          `Attempt ${input.attempt.id} ended as ${input.attempt.status}.`
-        : null);
+        ? currentBlockingReason ?? `Attempt ${input.attempt.id} ended as ${input.attempt.status}.`
+        : currentBlockingReason);
+
+    return failureMessage
+      ? {
+          message: failureMessage,
+          journal_event_id: failureEntry?.id ?? null,
+          journal_event_ts: failureEntry?.ts ?? null
+        }
+      : null;
+  }
+
+  private async buildAttemptReviewInputPacket(input: {
+    runId: string;
+    attempt: Attempt;
+    attemptContract: AttemptContract | null;
+    currentSnapshot: CurrentDecision | null;
+    context: unknown | null;
+    result: WorkerWriteback | null;
+    runtimeVerification: AttemptRuntimeVerification | null;
+    journal: Awaited<ReturnType<typeof listRunJournal>>;
+  }): Promise<AttemptReviewInputPacket> {
+    const attemptPaths = resolveAttemptPaths(
+      this.workspacePaths,
+      input.runId,
+      input.attempt.id
+    );
+    const attemptJournal = input.journal.filter((entry) => entry.attempt_id === input.attempt.id);
 
     return {
       run_id: input.runId,
@@ -1234,22 +1478,83 @@ export class Orchestrator {
       current_decision_snapshot: input.currentSnapshot,
       context: input.context,
       journal: attemptJournal,
-      failure_context: failureMessage
-        ? {
-            message: failureMessage,
-            journal_event_id: failureEntry?.id ?? null,
-            journal_event_ts: failureEntry?.ts ?? null
-          }
-        : null,
+      failure_context: this.buildReviewPacketFailureContext({
+        attempt: input.attempt,
+        currentSnapshot: input.currentSnapshot,
+        runtimeVerification: input.runtimeVerification,
+        journal: attemptJournal
+      }),
       result: input.result,
-      evaluation: input.evaluation,
       runtime_verification: input.runtimeVerification,
       artifact_manifest: await this.buildAttemptArtifactManifest({
         attemptPaths,
         result: input.result,
         runtimeVerification: input.runtimeVerification,
+        journal: attemptJournal,
+        reviewInputPacketFile: null,
+        reviewOpinionFiles: []
+      }),
+      generated_at: new Date().toISOString()
+    };
+  }
+
+  private async buildAttemptReviewPacket(input: {
+    reviewInputPacket: AttemptReviewInputPacket;
+    settledAttempt: Attempt;
+    evaluation: AttemptEvaluation | null;
+    currentSnapshot: CurrentDecision | null;
+    journal: Awaited<ReturnType<typeof listRunJournal>>;
+    reviewInputPacketRef: string | null;
+    reviewOpinions: AttemptReviewerOpinion[];
+  }): Promise<AttemptReviewPacket> {
+    const attemptPaths = resolveAttemptPaths(
+      this.workspacePaths,
+      input.reviewInputPacket.run_id,
+      input.reviewInputPacket.attempt_id
+    );
+    const attemptJournal = input.journal.filter(
+      (entry) => entry.attempt_id === input.reviewInputPacket.attempt_id
+    );
+    const reviewOpinionRefs = input.reviewOpinions.map((opinion) =>
+      this.buildAttemptReviewOpinionRef(
+        input.reviewInputPacket.run_id,
+        input.reviewInputPacket.attempt_id,
+        opinion.opinion_id
+      )
+    );
+
+    return {
+      ...input.reviewInputPacket,
+      attempt: input.settledAttempt,
+      current_decision_snapshot: input.currentSnapshot,
+      journal: attemptJournal,
+      failure_context: this.buildReviewPacketFailureContext({
+        attempt: input.settledAttempt,
+        currentSnapshot: input.currentSnapshot,
+        runtimeVerification: input.reviewInputPacket.runtime_verification,
         journal: attemptJournal
       }),
+      evaluation: input.evaluation,
+      artifact_manifest: await this.buildAttemptArtifactManifest({
+        attemptPaths,
+        result: input.reviewInputPacket.result,
+        runtimeVerification: input.reviewInputPacket.runtime_verification,
+        journal: attemptJournal,
+        reviewInputPacketFile: input.reviewInputPacketRef
+          ? attemptPaths.reviewInputPacketFile
+          : null,
+        reviewOpinionFiles: input.reviewOpinions.map((opinion) =>
+          resolve(attemptPaths.reviewOpinionsDir, `${opinion.opinion_id}.json`)
+        )
+      }),
+      review_input_packet_ref: input.reviewInputPacketRef,
+      review_opinion_refs: reviewOpinionRefs,
+      synthesized_evaluation_ref: input.evaluation
+        ? this.buildAttemptEvaluationRef(
+            input.reviewInputPacket.run_id,
+            input.reviewInputPacket.attempt_id
+          )
+        : null,
       generated_at: new Date().toISOString()
     };
   }
@@ -1259,6 +1564,8 @@ export class Orchestrator {
     result: WorkerWriteback | null;
     runtimeVerification: AttemptRuntimeVerification | null;
     journal: Awaited<ReturnType<typeof listRunJournal>>;
+    reviewInputPacketFile: string | null;
+    reviewOpinionFiles: string[];
   }): Promise<ReviewPacketArtifact[]> {
     const candidatePaths = new Map<string, { kind: string; rawPath: string }>();
     const addPath = (kind: string, rawPath: string | null | undefined): void => {
@@ -1277,10 +1584,14 @@ export class Orchestrator {
     addPath("attempt_context", input.attemptPaths.contextFile);
     addPath("attempt_result", input.attemptPaths.resultFile);
     addPath("attempt_evaluation", input.attemptPaths.evaluationFile);
+    addPath("review_input_packet", input.reviewInputPacketFile);
     addPath("runtime_verification", input.attemptPaths.runtimeVerificationFile);
     addPath("heartbeat", input.attemptPaths.heartbeatFile);
     addPath("stdout", input.attemptPaths.stdoutFile);
     addPath("stderr", input.attemptPaths.stderrFile);
+    for (const reviewOpinionPath of input.reviewOpinionFiles) {
+      addPath("review_opinion", reviewOpinionPath);
+    }
 
     for (const artifact of input.result?.artifacts ?? []) {
       addPath(`worker_${artifact.type}`, artifact.path);
@@ -1841,64 +2152,95 @@ export class Orchestrator {
   private async inferDefaultExecutionVerificationPlan(
     workspaceRoot: string
   ): Promise<ExecutionVerificationPlan | undefined> {
-    const packageJsonPath = resolve(workspaceRoot, "package.json");
-    let packageJson: {
-      scripts?: Record<string, string>;
-    } | null = null;
-
-    try {
-      packageJson = JSON.parse(await readFile(packageJsonPath, "utf8")) as {
-        scripts?: Record<string, string>;
-      };
-    } catch {
+    const scripts = await readWorkspacePackageScripts(workspaceRoot);
+    if (!scripts) {
       return undefined;
     }
 
-    const scripts = packageJson?.scripts ?? {};
-    const commands: ExecutionVerificationPlan["commands"] = [];
-
-    if (typeof scripts.typecheck === "string" && scripts.typecheck.length > 0) {
-      commands.push({
-        purpose: "typecheck the workspace after the change",
-        command: "pnpm typecheck"
-      });
+    const commands = buildDefaultExecutionVerificationCommandsFromScripts(scripts);
+    if (commands.length === 0) {
+      return undefined;
     }
 
-    if (typeof scripts["verify:runtime"] === "string" && scripts["verify:runtime"].length > 0) {
-      commands.push({
-        purpose: "replay the runtime regression suite after the change",
-        command: "pnpm verify:runtime"
-      });
-    } else if (typeof scripts.test === "string" && scripts.test.length > 0) {
-      commands.push({
-        purpose: "run the workspace test suite after the change",
-        command: "pnpm test"
-      });
-    } else if (typeof scripts.build === "string" && scripts.build.length > 0) {
-      commands.push({
-        purpose: "build the workspace after the change",
-        command: "pnpm build"
-      });
+    if (!(await workspaceHasLocalNodeModules(workspaceRoot))) {
+      return undefined;
     }
 
-    return commands.length > 0 ? { commands } : undefined;
+    return { commands };
   }
 
-  private assertDispatchableAttemptContract(
+  private buildMissingVerificationToolchainMessage(
+    attempt: Attempt,
+    assessment: ExecutionVerificationToolchainAssessment
+  ): string | null {
+    if (
+      assessment.has_package_json &&
+      !assessment.has_local_node_modules &&
+      assessment.inferred_pnpm_commands.length > 0
+    ) {
+      return [
+        `Execution attempt ${attempt.id} is blocked before dispatch because ${attempt.workspace_root} has package.json verification scripts but no local node_modules.`,
+        `Runtime refused to auto-generate ${formatVerificationCommands(assessment.inferred_pnpm_commands)}.`,
+        "Add the local verifier toolchain or lock direct replay commands into attempt_contract.json."
+      ].join(" ");
+    }
+
+    return null;
+  }
+
+  private buildBlockedPnpmVerificationMessage(
+    attempt: Attempt,
+    assessment: ExecutionVerificationToolchainAssessment
+  ): string | null {
+    if (
+      !assessment.has_local_node_modules &&
+      assessment.blocked_pnpm_commands.length > 0
+    ) {
+      return [
+        `Execution attempt ${attempt.id} is blocked before dispatch because attempt_contract.json asks runtime to replay ${formatVerificationCommands(assessment.blocked_pnpm_commands)}.`,
+        `${attempt.workspace_root} has no local node_modules, so those pnpm commands are not replayable here.`,
+        "Add the local verifier toolchain or replace the pnpm commands with direct replay commands."
+      ].join(" ");
+    }
+
+    return null;
+  }
+
+  private async requireDispatchableAttemptContract(
     attempt: Attempt,
     attemptContract: AttemptContract | null
-  ): asserts attemptContract is AttemptContract {
+  ): Promise<AttemptContract> {
     if (!attemptContract) {
       throw new Error(
         `Attempt ${attempt.id} is missing attempt_contract.json. Dispatch is blocked until the contract is recreated.`
       );
     }
 
-    if (attempt.attempt_type === "execution" && !isExecutionAttemptContractReady(attemptContract)) {
+    if (attempt.attempt_type !== "execution") {
+      return attemptContract;
+    }
+
+    const assessment = await assessExecutionVerificationToolchain({
+      workspaceRoot: attempt.workspace_root,
+      verificationPlan: attemptContract.verification_plan ?? null
+    });
+
+    if (!isExecutionAttemptContractReady(attemptContract)) {
       throw new Error(
-        `Execution attempt ${attempt.id} is missing replayable verification commands in attempt_contract.json.`
+        this.buildMissingVerificationToolchainMessage(attempt, assessment) ??
+          `Execution attempt ${attempt.id} is missing replayable verification commands in attempt_contract.json.`
       );
     }
+
+    const blockedPnpmMessage = this.buildBlockedPnpmVerificationMessage(
+      attempt,
+      assessment
+    );
+    if (blockedPnpmMessage) {
+      throw new Error(blockedPnpmMessage);
+    }
+
+    return attemptContract;
   }
 
   private getActiveAttemptKey(runId: string, attemptId: string): string {

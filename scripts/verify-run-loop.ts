@@ -17,16 +17,21 @@ import {
   type Run,
   type WorkerWriteback
 } from "../packages/domain/src/index.js";
-import { Orchestrator } from "../packages/orchestrator/src/index.js";
+import {
+  assessExecutionVerificationToolchain,
+  Orchestrator
+} from "../packages/orchestrator/src/index.js";
 import {
   appendRunJournal,
   ensureWorkspace,
   getAttemptContext,
   getAttemptEvaluation,
+  getAttemptReviewInputPacket,
   getAttemptReviewPacket,
   getCurrentDecision,
   getRun,
   listAttempts,
+  listAttemptReviewOpinions,
   listRunJournal,
   resolveAttemptPaths,
   resolveWorkspacePaths,
@@ -41,6 +46,12 @@ import {
   saveRunSteer
 } from "../packages/state-store/src/index.js";
 
+const REVIEWER_CONFIG_ENV = "AISA_REVIEWERS_JSON";
+const CLI_REVIEWER_TIMEOUT_CASE_MS = 150;
+const CLI_REVIEWER_PROCESS_FAILURE_TIMEOUT_MS = 1_500;
+
+type CliReviewerFailureMode = "invalid_json" | "nonzero_exit" | "timeout";
+
 type ScenarioDriver =
   | "happy_path"
   | "running_attempt_owned_elsewhere"
@@ -51,6 +62,7 @@ type ScenarioDriver =
   | "execution_checkpoint_blocked_dirty_workspace"
   | "execution_dirty_workspace_without_new_changes_fails_verification"
   | "execution_missing_verification_plan"
+  | "execution_missing_local_toolchain_blocks_dispatch"
   | "execution_parse_failure"
   | "orphaned_running_attempt"
   | "execution_retry_after_recovery_preserves_contract"
@@ -133,6 +145,8 @@ type ScenarioObservation = {
     runtime_verification_preexisting_git_status: string[];
     runtime_verification_new_git_status: string[];
     runtime_verification_changed_files: string[];
+    attempt_contract_has_verification_plan: boolean;
+    attempt_contract_verification_commands: string[];
     restart_required_message: string | null;
     restart_required_affected_files: string[];
   }>;
@@ -381,6 +395,13 @@ class ScenarioAdapter {
       throw new Error("Workspace scope breach case must be blocked before worker dispatch.");
     }
 
+    if (
+      this.driver === "execution_missing_local_toolchain_blocks_dispatch" &&
+      input.attempt.attempt_type === "execution"
+    ) {
+      throw new Error("Missing-toolchain case must be blocked before worker dispatch.");
+    }
+
     const key = input.run.id;
     const nextCount = (this.counts.get(key) ?? 0) + 1;
     this.counts.set(key, nextCount);
@@ -458,6 +479,7 @@ class ScenarioAdapter {
       this.driver === "execution_checkpoint_blocked_dirty_workspace" ||
       this.driver === "execution_dirty_workspace_without_new_changes_fails_verification" ||
       this.driver === "execution_missing_verification_plan" ||
+      this.driver === "execution_missing_local_toolchain_blocks_dispatch" ||
       this.driver === "execution_retry_after_recovery_preserves_contract"
         ? this.buildHappyPathWriteback(input.attempt, nextCount)
         : this.buildStuckWriteback(nextCount);
@@ -475,6 +497,17 @@ class ScenarioAdapter {
         this.driver === "execution_runtime_source_drift_requires_restart"
           ? "packages/orchestrator/src/index.ts"
           : "execution-change.md";
+      const nextAttemptVerificationPlan =
+        this.driver === "execution_missing_local_toolchain_blocks_dispatch"
+          ? undefined
+          : {
+              commands: [
+                {
+                  purpose: "confirm the execution change was written",
+                  command: this.buildExecutionVerificationCommand()
+                }
+              ]
+            };
       return {
         summary: "Repository understanding is strong enough to start execution.",
         findings: [
@@ -499,14 +532,7 @@ class ScenarioAdapter {
             "do not claim success without replayable verification"
           ],
           expected_artifacts: [expectedArtifact],
-          verification_plan: {
-            commands: [
-              {
-                purpose: "confirm the execution change was written",
-                command: this.buildExecutionVerificationCommand()
-              }
-            ]
-          }
+          verification_plan: nextAttemptVerificationPlan
         },
         artifacts: []
       };
@@ -692,6 +718,25 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+async function withTemporaryEnv<T>(
+  name: string,
+  value: string,
+  callback: () => Promise<T>
+): Promise<T> {
+  const previous = process.env[name];
+  process.env[name] = value;
+
+  try {
+    return await callback();
+  } finally {
+    if (previous === undefined) {
+      delete process.env[name];
+    } else {
+      process.env[name] = previous;
+    }
+  }
+}
+
 async function bootstrapRun(rootDir: string, title: string): Promise<{
   run: Run;
   workspacePaths: ReturnType<typeof resolveWorkspacePaths>;
@@ -866,6 +911,389 @@ async function assertMissingRuntimeHealthSnapshotDoesNotFabricateContext(): Prom
     Object.prototype.hasOwnProperty.call(context, "runtime_health_snapshot"),
     false,
     "missing_runtime_health_snapshot_context: runtime should not fabricate a health snapshot field"
+  );
+}
+
+async function assertExplicitPnpmVerificationPlanNeedsLocalNodeModules(): Promise<void> {
+  const rootDir = await mkdtemp(join(tmpdir(), "aisa-explicit-pnpm-toolchain-"));
+  await seedPackageJsonScriptsWithoutNodeModules(rootDir);
+
+  const assessment = await assessExecutionVerificationToolchain({
+    workspaceRoot: rootDir,
+    verificationPlan: {
+      commands: [
+        {
+          purpose: "typecheck the workspace after the change",
+          command: "pnpm typecheck"
+        },
+        {
+          purpose: "replay the runtime regression suite after the change",
+          command: "pnpm verify:runtime"
+        }
+      ]
+    }
+  });
+
+  assert.equal(
+    assessment.has_package_json,
+    true,
+    "explicit_pnpm_verification_plan_needs_local_node_modules: package.json should be visible"
+  );
+  assert.equal(
+    assessment.has_local_node_modules,
+    false,
+    "explicit_pnpm_verification_plan_needs_local_node_modules: fixture should stay without node_modules"
+  );
+  assert.deepEqual(
+    assessment.inferred_pnpm_commands,
+    ["pnpm typecheck", "pnpm verify:runtime"],
+    "explicit_pnpm_verification_plan_needs_local_node_modules: default pnpm command inference should stay stable"
+  );
+  assert.deepEqual(
+    assessment.blocked_pnpm_commands,
+    ["pnpm typecheck", "pnpm verify:runtime"],
+    "explicit_pnpm_verification_plan_needs_local_node_modules: explicit pnpm replay commands should be flagged"
+  );
+}
+
+async function assertMultiReviewerPipelinePersistsOpinionsAndSynthesizesEvaluation(): Promise<void> {
+  const rootDir = await mkdtemp(join(tmpdir(), "aisa-multi-reviewer-pipeline-"));
+  await initializeGitRepo(rootDir, false);
+  const { run, workspacePaths } = await bootstrapRun(rootDir, "multi-reviewer-pipeline");
+  const reviewerConfigs = [
+    {
+      kind: "heuristic",
+      reviewer_id: "principal-reviewer",
+      role: "principal_reviewer",
+      adapter: "deterministic-heuristic",
+      provider: "mock-provider-a",
+      model: "mock-model-a"
+    },
+    {
+      kind: "cli",
+      reviewer_id: "risk-reviewer",
+      role: "risk_reviewer",
+      adapter: "fixture-cli-reviewer",
+      provider: "mock-provider-b",
+      model: "mock-model-b",
+      command: process.execPath,
+      args: [join(process.cwd(), "scripts", "fixture-reviewer-cli.mjs")],
+      cwd: process.cwd(),
+      timeout_ms: 5_000
+    }
+  ];
+
+  await withTemporaryEnv(REVIEWER_CONFIG_ENV, JSON.stringify(reviewerConfigs), async () => {
+    const orchestrator = new Orchestrator(
+      workspacePaths,
+      new ScenarioAdapter("happy_path") as never,
+      undefined,
+      60_000
+    );
+    await settle({
+      orchestrator,
+      workspacePaths,
+      runId: run.id,
+      iterations: 2
+    });
+  });
+
+  const attempts = await listAttempts(workspacePaths, run.id);
+  const researchAttempt = attempts.find(
+    (attempt) => attempt.attempt_type === "research" && attempt.status === "completed"
+  );
+  assert.ok(
+    researchAttempt,
+    "multi_reviewer_pipeline: expected one completed research attempt"
+  );
+
+  const expectedReviewInputPacketRef = `runs/${run.id}/attempts/${researchAttempt!.id}/review_input_packet.json`;
+  const expectedEvaluationRef = `runs/${run.id}/attempts/${researchAttempt!.id}/evaluation.json`;
+  const [reviewInputPacket, reviewOpinions, evaluation, reviewPacket, current] = await Promise.all([
+    getAttemptReviewInputPacket(workspacePaths, run.id, researchAttempt!.id),
+    listAttemptReviewOpinions(workspacePaths, run.id, researchAttempt!.id),
+    getAttemptEvaluation(workspacePaths, run.id, researchAttempt!.id),
+    getAttemptReviewPacket(workspacePaths, run.id, researchAttempt!.id),
+    getCurrentDecision(workspacePaths, run.id)
+  ]);
+
+  assert.ok(
+    reviewInputPacket,
+    "multi_reviewer_pipeline: review_input_packet.json should be persisted"
+  );
+  assert.equal(
+    reviewInputPacket?.runtime_verification?.status,
+    "not_applicable",
+    "multi_reviewer_pipeline: research review input packet should still carry deterministic runtime status"
+  );
+  assert.equal(
+    reviewInputPacket?.attempt.id,
+    researchAttempt!.id,
+    "multi_reviewer_pipeline: review input packet should match the completed attempt"
+  );
+
+  const sortedOpinions = [...reviewOpinions].sort((left, right) =>
+    left.reviewer.reviewer_id.localeCompare(right.reviewer.reviewer_id)
+  );
+  assert.equal(
+    sortedOpinions.length,
+    2,
+    "multi_reviewer_pipeline: both reviewer opinions should be persisted"
+  );
+  assert.deepEqual(
+    sortedOpinions.map((opinion) => opinion.reviewer.role),
+    ["principal_reviewer", "risk_reviewer"],
+    "multi_reviewer_pipeline: reviewer roles should stay persisted"
+  );
+  assert.deepEqual(
+    sortedOpinions.map((opinion) => opinion.reviewer.provider),
+    ["mock-provider-a", "mock-provider-b"],
+    "multi_reviewer_pipeline: provider metadata should stay on opinions"
+  );
+  assert.deepEqual(
+    sortedOpinions.map((opinion) => opinion.reviewer.model),
+    ["mock-model-a", "mock-model-b"],
+    "multi_reviewer_pipeline: model metadata should stay on opinions"
+  );
+  assert.deepEqual(
+    sortedOpinions.map((opinion) => opinion.reviewer.adapter),
+    ["deterministic-heuristic", "fixture-cli-reviewer"],
+    "multi_reviewer_pipeline: configured reviewer adapters should stay persisted"
+  );
+  assert.ok(
+    sortedOpinions.every((opinion) => opinion.review_input_packet_ref === expectedReviewInputPacketRef),
+    "multi_reviewer_pipeline: every opinion should point back to the frozen review input packet"
+  );
+  assert.ok(
+    sortedOpinions.every((opinion) =>
+      opinion.input_refs.some(
+        (ref) => ref.kind === "review_input_packet" && ref.path === expectedReviewInputPacketRef
+      )
+    ),
+    "multi_reviewer_pipeline: reviewer input refs should include the frozen packet"
+  );
+  assert.ok(
+    sortedOpinions.every(
+      (opinion) => opinion.proposed_next_contract?.attempt_type === "execution"
+    ),
+    "multi_reviewer_pipeline: proposed next contract should be persisted per opinion"
+  );
+  const cliOpinion = sortedOpinions.find(
+    (opinion) => opinion.reviewer.adapter === "fixture-cli-reviewer"
+  );
+  assert.ok(cliOpinion, "multi_reviewer_pipeline: expected one CLI reviewer opinion");
+  const cliOutput = JSON.parse(cliOpinion!.raw_output) as {
+    received_attempt_id?: string;
+    structured_judgment?: {
+      rationale?: string;
+    };
+  };
+  assert.equal(
+    cliOutput.received_attempt_id,
+    researchAttempt!.id,
+    "multi_reviewer_pipeline: CLI reviewer should receive the frozen review input packet"
+  );
+  assert.equal(
+    cliOpinion?.structured_judgment.rationale,
+    `cli reviewer checked ${researchAttempt!.id}`,
+    "multi_reviewer_pipeline: CLI reviewer judgment should come from the external command"
+  );
+
+  assert.ok(evaluation, "multi_reviewer_pipeline: synthesized evaluation should be persisted");
+  assert.equal(
+    evaluation?.review_input_packet_ref,
+    expectedReviewInputPacketRef,
+    "multi_reviewer_pipeline: synthesized evaluation should reference the frozen input packet"
+  );
+  assert.equal(
+    evaluation?.opinion_refs.length,
+    2,
+    "multi_reviewer_pipeline: synthesized evaluation should reference every opinion"
+  );
+  assert.equal(
+    evaluation?.reviewer_count,
+    2,
+    "multi_reviewer_pipeline: synthesized evaluation should record reviewer count"
+  );
+  assert.equal(
+    evaluation?.synthesis_strategy,
+    "deterministic_consensus_v1",
+    "multi_reviewer_pipeline: synthesized evaluation should record its merge strategy"
+  );
+
+  assert.ok(reviewPacket, "multi_reviewer_pipeline: review packet should still be persisted");
+  assert.equal(
+    reviewPacket?.review_input_packet_ref,
+    expectedReviewInputPacketRef,
+    "multi_reviewer_pipeline: review packet should expose the frozen packet ref"
+  );
+  assert.equal(
+    reviewPacket?.synthesized_evaluation_ref,
+    expectedEvaluationRef,
+    "multi_reviewer_pipeline: review packet should expose the synthesized evaluation ref"
+  );
+  assert.equal(
+    reviewPacket?.review_opinion_refs.length,
+    2,
+    "multi_reviewer_pipeline: review packet should expose both opinion refs"
+  );
+  assert.equal(
+    reviewPacket?.artifact_manifest.filter((artifact) => artifact.kind === "review_opinion" && artifact.exists).length,
+    2,
+    "multi_reviewer_pipeline: artifact manifest should include both persisted opinions"
+  );
+
+  assert.equal(
+    current?.recommended_next_action,
+    "start_execution",
+    "multi_reviewer_pipeline: loop should keep consuming a single synthesized evaluation"
+  );
+  assert.equal(
+    current?.latest_attempt_id,
+    researchAttempt!.id,
+    "multi_reviewer_pipeline: current decision should still point at the settled attempt"
+  );
+}
+
+function buildCliReviewerFailureMatcher(
+  mode: CliReviewerFailureMode,
+  timeoutMs: number
+): RegExp {
+  switch (mode) {
+    case "invalid_json":
+      return /opinion 落盘前失败：CLI reviewer .* returned invalid JSON/;
+    case "nonzero_exit":
+      return /opinion 落盘前失败：CLI reviewer command failed/;
+    case "timeout":
+      return new RegExp(`opinion 落盘前失败：CLI reviewer command timed out after ${timeoutMs}ms`);
+  }
+}
+
+function getCliReviewerFailureTimeoutMs(mode: CliReviewerFailureMode): number {
+  return mode === "timeout"
+    ? CLI_REVIEWER_TIMEOUT_CASE_MS
+    : CLI_REVIEWER_PROCESS_FAILURE_TIMEOUT_MS;
+}
+
+async function assertCliReviewerFailureBlocksOpinionPersistence(
+  mode: CliReviewerFailureMode
+): Promise<void> {
+  const rootDir = await mkdtemp(join(tmpdir(), `aisa-cli-reviewer-${mode}-`));
+  await initializeGitRepo(rootDir, false);
+  const { run, workspacePaths } = await bootstrapRun(rootDir, `cli-reviewer-${mode}`);
+  const reviewerConfigs = [
+    {
+      kind: "heuristic",
+      reviewer_id: "principal-reviewer",
+      role: "principal_reviewer",
+      adapter: "deterministic-heuristic"
+    },
+    {
+      kind: "cli",
+      reviewer_id: `${mode}-reviewer`,
+      role: "runtime_reviewer",
+      adapter: `inline-${mode}-reviewer`,
+      command: process.execPath,
+      args: [join(process.cwd(), "scripts", "fixture-reviewer-cli.mjs"), mode],
+      cwd: process.cwd(),
+      timeout_ms: getCliReviewerFailureTimeoutMs(mode)
+    }
+  ];
+
+  await withTemporaryEnv(REVIEWER_CONFIG_ENV, JSON.stringify(reviewerConfigs), async () => {
+    const orchestrator = new Orchestrator(
+      workspacePaths,
+      new ScenarioAdapter("happy_path") as never,
+      undefined,
+      60_000
+    );
+    await settle({
+      orchestrator,
+      workspacePaths,
+      runId: run.id,
+      iterations: 2
+    });
+  });
+
+  const attempts = await listAttempts(workspacePaths, run.id);
+  const failedResearchAttempt = attempts.find(
+    (attempt) => attempt.attempt_type === "research" && attempt.status === "failed"
+  );
+  assert.ok(
+    failedResearchAttempt,
+    `cli_reviewer_${mode}: expected one failed research attempt`
+  );
+
+  const expectedReviewInputPacketRef = `runs/${run.id}/attempts/${failedResearchAttempt!.id}/review_input_packet.json`;
+  const [reviewInputPacket, reviewOpinions, evaluation, reviewPacket, current] = await Promise.all([
+    getAttemptReviewInputPacket(workspacePaths, run.id, failedResearchAttempt!.id),
+    listAttemptReviewOpinions(workspacePaths, run.id, failedResearchAttempt!.id),
+    getAttemptEvaluation(workspacePaths, run.id, failedResearchAttempt!.id),
+    getAttemptReviewPacket(workspacePaths, run.id, failedResearchAttempt!.id),
+    getCurrentDecision(workspacePaths, run.id)
+  ]);
+
+  assert.ok(
+    reviewInputPacket,
+    `cli_reviewer_${mode}: review_input_packet.json should still be persisted before the reviewer fails`
+  );
+  assert.equal(
+    reviewInputPacket?.attempt.status,
+    "completed",
+    `cli_reviewer_${mode}: frozen review input packet should keep the pre-review completed status`
+  );
+  assert.ok(reviewPacket, `cli_reviewer_${mode}: review packet should still be persisted`);
+  assert.equal(
+    reviewPacket?.attempt.status,
+    "failed",
+    `cli_reviewer_${mode}: settled review packet should expose the failed attempt status`
+  );
+  assert.equal(
+    reviewPacket?.review_input_packet_ref,
+    expectedReviewInputPacketRef,
+    `cli_reviewer_${mode}: review packet should still point at the frozen input packet`
+  );
+  assert.equal(
+    reviewOpinions.length,
+    0,
+    `cli_reviewer_${mode}: no reviewer opinion should be persisted when one reviewer fails`
+  );
+  assert.equal(
+    reviewPacket?.review_opinion_refs.length,
+    0,
+    `cli_reviewer_${mode}: review packet should not expose opinion refs after reviewer failure`
+  );
+  assert.equal(
+    reviewPacket?.artifact_manifest.filter(
+      (artifact) => artifact.kind === "review_opinion" && artifact.exists
+    ).length,
+    0,
+    `cli_reviewer_${mode}: artifact manifest should stay free of review opinion files`
+  );
+  assert.equal(
+    evaluation,
+    null,
+    `cli_reviewer_${mode}: synthesized evaluation should not be persisted after reviewer failure`
+  );
+  assert.equal(
+    current?.recommended_next_action,
+    "wait_for_human",
+    `cli_reviewer_${mode}: loop should stop and wait for human recovery`
+  );
+  assert.equal(
+    current?.latest_attempt_id,
+    failedResearchAttempt!.id,
+    `cli_reviewer_${mode}: current decision should point at the failed attempt`
+  );
+  assert.match(
+    current?.blocking_reason ?? "",
+    buildCliReviewerFailureMatcher(mode, getCliReviewerFailureTimeoutMs(mode)),
+    `cli_reviewer_${mode}: blocking reason should expose the reviewer failure`
+  );
+  assert.match(
+    reviewPacket?.failure_context?.message ?? "",
+    buildCliReviewerFailureMatcher(mode, getCliReviewerFailureTimeoutMs(mode)),
+    `cli_reviewer_${mode}: failure context should expose the reviewer failure`
   );
 }
 
@@ -1417,6 +1845,10 @@ async function runCase(scenario: ScenarioCase): Promise<ScenarioObservation> {
     await initializeGitRepo(rootDir, false);
   }
 
+  if (scenario.driver === "execution_missing_local_toolchain_blocks_dispatch") {
+    await seedPackageJsonScriptsWithoutNodeModules(rootDir);
+  }
+
   if (scenario.driver === "orphaned_running_attempt") {
     await seedOrphanedRunningAttempt({ run, workspacePaths });
   }
@@ -1501,6 +1933,25 @@ async function initializeGitRepo(rootDir: string, leaveDirty: boolean): Promise<
   if (leaveDirty) {
     await writeFile(join(rootDir, "README.md"), "# temp runtime repo\n\nleft dirty\n", "utf8");
   }
+}
+
+async function seedPackageJsonScriptsWithoutNodeModules(rootDir: string): Promise<void> {
+  await writeFile(
+    join(rootDir, "package.json"),
+    JSON.stringify(
+      {
+        name: "missing-toolchain-workspace",
+        private: true,
+        scripts: {
+          typecheck: "tsc --noEmit",
+          "verify:runtime": "node --import tsx scripts/verify-runtime.ts"
+        }
+      },
+      null,
+      2
+    ) + "\n",
+    "utf8"
+  );
 }
 
 async function seedLiveRuntimeSourceFixture(rootDir: string): Promise<void> {
@@ -1627,6 +2078,10 @@ async function collectObservation(
         const evaluationArtifact = artifactByKind.get("attempt_evaluation") ?? null;
         const runtimeVerificationArtifact = artifactByKind.get("runtime_verification") ?? null;
         const expectedInputContextRef = buildExpectedInputContextRef(runId, attempt.id);
+        const attemptContractVerificationCommands =
+          reviewPacket?.attempt_contract?.verification_plan?.commands.map(
+            (command) => command.command
+          ) ?? [];
         const restartRequiredEntry = [...(reviewPacket?.journal ?? [])]
           .reverse()
           .find((entry) => entry.type === "attempt.restart_required");
@@ -1697,6 +2152,9 @@ async function collectObservation(
             reviewPacket?.runtime_verification?.new_git_status ?? [],
           runtime_verification_changed_files:
             reviewPacket?.runtime_verification?.changed_files ?? [],
+          attempt_contract_has_verification_plan:
+            reviewPacket?.attempt_contract?.verification_plan !== undefined,
+          attempt_contract_verification_commands: attemptContractVerificationCommands,
           restart_required_message:
             typeof restartRequiredPayload?.message === "string"
               ? restartRequiredPayload.message
@@ -2013,6 +2471,41 @@ function assertCase(scenario: ScenarioCase, observation: ScenarioObservation): v
       `${scenario.id}: review packet should record the affected runtime files`
     );
   }
+
+  if (scenario.driver === "execution_missing_local_toolchain_blocks_dispatch") {
+    const executionPacket = observation.review_packets.find(
+      (packet) => packet.attempt_status === "failed"
+    );
+    assert.ok(
+      executionPacket,
+      `${scenario.id}: expected a failed execution review packet`
+    );
+    assert.equal(
+      executionPacket.has_result,
+      false,
+      `${scenario.id}: execution should be blocked before any worker result is persisted`
+    );
+    assert.equal(
+      executionPacket.has_evaluation,
+      false,
+      `${scenario.id}: execution should be blocked before evaluation`
+    );
+    assert.equal(
+      executionPacket.has_runtime_verification,
+      false,
+      `${scenario.id}: execution should be blocked before runtime verification`
+    );
+    assert.equal(
+      executionPacket.attempt_contract_has_verification_plan,
+      false,
+      `${scenario.id}: runtime should refuse to auto-generate a pnpm verification plan`
+    );
+    assert.deepEqual(
+      executionPacket.attempt_contract_verification_commands,
+      [],
+      `${scenario.id}: execution attempt contract should stay free of inferred pnpm commands`
+    );
+  }
 }
 
 function parseNdjson<T>(text: string): T[] {
@@ -2211,6 +2704,76 @@ async function main(): Promise<void> {
   } catch (error) {
     results.push({
       id: "missing_runtime_health_snapshot_context",
+      status: "fail",
+      error: error instanceof Error ? error.message : String(error)
+    });
+  }
+
+  try {
+    await assertExplicitPnpmVerificationPlanNeedsLocalNodeModules();
+    results.push({
+      id: "explicit_pnpm_verification_plan_needs_local_node_modules",
+      status: "pass"
+    });
+  } catch (error) {
+    results.push({
+      id: "explicit_pnpm_verification_plan_needs_local_node_modules",
+      status: "fail",
+      error: error instanceof Error ? error.message : String(error)
+    });
+  }
+
+  try {
+    await assertCliReviewerFailureBlocksOpinionPersistence("invalid_json");
+    results.push({
+      id: "cli_reviewer_invalid_json_blocks_opinion_persistence",
+      status: "pass"
+    });
+  } catch (error) {
+    results.push({
+      id: "cli_reviewer_invalid_json_blocks_opinion_persistence",
+      status: "fail",
+      error: error instanceof Error ? error.message : String(error)
+    });
+  }
+
+  try {
+    await assertCliReviewerFailureBlocksOpinionPersistence("nonzero_exit");
+    results.push({
+      id: "cli_reviewer_nonzero_exit_blocks_opinion_persistence",
+      status: "pass"
+    });
+  } catch (error) {
+    results.push({
+      id: "cli_reviewer_nonzero_exit_blocks_opinion_persistence",
+      status: "fail",
+      error: error instanceof Error ? error.message : String(error)
+    });
+  }
+
+  try {
+    await assertCliReviewerFailureBlocksOpinionPersistence("timeout");
+    results.push({
+      id: "cli_reviewer_timeout_blocks_opinion_persistence",
+      status: "pass"
+    });
+  } catch (error) {
+    results.push({
+      id: "cli_reviewer_timeout_blocks_opinion_persistence",
+      status: "fail",
+      error: error instanceof Error ? error.message : String(error)
+    });
+  }
+
+  try {
+    await assertMultiReviewerPipelinePersistsOpinionsAndSynthesizesEvaluation();
+    results.push({
+      id: "multi_reviewer_pipeline_persists_and_synthesizes",
+      status: "pass"
+    });
+  } catch (error) {
+    results.push({
+      id: "multi_reviewer_pipeline_persists_and_synthesizes",
       status: "fail",
       error: error instanceof Error ? error.message : String(error)
     });

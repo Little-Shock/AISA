@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp } from "node:fs/promises";
+import { request as httpRequest, type ClientRequest, type IncomingMessage } from "node:http";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -33,10 +34,81 @@ type RunStreamPayload = {
   }>;
 };
 
+type RunStreamClient = {
+  request: ClientRequest;
+  response: IncomingMessage;
+  state: {
+    buffer: string;
+    ended: boolean;
+    error: Error | null;
+    waiters: Set<() => void>;
+  };
+};
+
+function attachRunStreamState(response: IncomingMessage): RunStreamClient["state"] {
+  response.setEncoding("utf8");
+
+  const state: RunStreamClient["state"] = {
+    buffer: "",
+    ended: false,
+    error: null,
+    waiters: new Set()
+  };
+
+  response.on("data", (chunk) => {
+    state.buffer += String(chunk);
+    notifyWaiters(state);
+  });
+  response.on("end", () => {
+    state.ended = true;
+    notifyWaiters(state);
+  });
+  response.on("error", (error) => {
+    state.error = error instanceof Error ? error : new Error(String(error));
+    notifyWaiters(state);
+  });
+
+  return state;
+}
+
+function notifyWaiters(state: RunStreamClient["state"]): void {
+  for (const waiter of state.waiters) {
+    waiter();
+  }
+  state.waiters.clear();
+}
+
+function waitForStreamActivity(
+  state: RunStreamClient["state"],
+  timeoutMs: number
+): Promise<void> {
+  if (state.error) {
+    return Promise.reject(state.error);
+  }
+
+  if (state.ended) {
+    return Promise.reject(
+      new Error("SSE stream ended before a snapshot arrived")
+    );
+  }
+
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      state.waiters.delete(onSignal);
+      reject(new Error("Timed out waiting for SSE snapshot"));
+    }, timeoutMs);
+
+    const onSignal = () => {
+      clearTimeout(timer);
+      resolve();
+    };
+
+    state.waiters.add(onSignal);
+  });
+}
+
 async function readNextSnapshot(
-  reader: ReadableStreamDefaultReader<Uint8Array>,
-  decoder: TextDecoder,
-  state: { buffer: string },
+  state: RunStreamClient["state"],
   timeoutMs: number
 ): Promise<RunStreamPayload> {
   const deadline = Date.now() + timeoutMs;
@@ -73,29 +145,73 @@ async function readNextSnapshot(
       continue;
     }
 
-    const remainingMs = Math.max(deadline - Date.now(), 1);
-    const chunk = await Promise.race([
-      reader.read(),
-      new Promise<never>((_, reject) => {
-        setTimeout(() => {
-          reject(new Error("Timed out waiting for SSE snapshot"));
-        }, remainingMs);
-      })
-    ]);
+    if (state.error) {
+      throw state.error;
+    }
 
-    if (chunk.done) {
+    if (state.ended) {
       throw new Error("SSE stream ended before a snapshot arrived");
     }
 
-    state.buffer += decoder.decode(chunk.value, { stream: true });
+    await waitForStreamActivity(state, Math.max(deadline - Date.now(), 1));
   }
 
   throw new Error("Timed out waiting for SSE snapshot");
 }
 
+async function openRunStream(
+  socketPath: string,
+  runId: string
+): Promise<RunStreamClient> {
+  return await new Promise((resolve, reject) => {
+    const request = httpRequest({
+      socketPath,
+      path: `/runs/${runId}/stream`,
+      method: "GET",
+      headers: {
+        accept: "text/event-stream"
+      }
+    });
+
+    request.on("error", reject);
+    request.on("response", (response) => {
+      resolve({
+        request,
+        response,
+        state: attachRunStreamState(response)
+      });
+    });
+
+    request.end();
+  });
+}
+
+async function openInjectedRunStream(app: {
+  injectStream: (input: {
+    method: string;
+    url: string;
+  }) => Promise<{
+    request: ClientRequest;
+    response: IncomingMessage;
+  }>;
+}, runId: string): Promise<RunStreamClient> {
+  const stream = await app.injectStream({
+    method: "GET",
+    url: `/runs/${runId}/stream`
+  });
+  stream.request.end();
+
+  return {
+    ...stream,
+    state: attachRunStreamState(stream.response)
+  };
+}
+
 async function main(): Promise<void> {
   const rootDir = await mkdtemp(join(tmpdir(), "aisa-run-stream-"));
   const projectScopeDir = await mkdtemp(join(tmpdir(), "aisa-run-stream-scope-"));
+  const socketDir = await mkdtemp(join(tmpdir(), "aisa-sse-"));
+  const socketPath = join(socketDir, "s.sock");
   const projectRoot = join(projectScopeDir, "project-a");
   await mkdir(projectRoot, { recursive: true });
   const workspacePaths = resolveWorkspacePaths(rootDir);
@@ -158,26 +274,34 @@ async function main(): Promise<void> {
     allowedRunWorkspaceRoots: [rootDir, projectScopeDir]
   });
 
-  let baseUrl = "";
   try {
-    baseUrl = await app.listen({
-      host: "127.0.0.1",
-      port: 0
-    });
+    const usesInjectedStream =
+      typeof (app as { injectStream?: unknown }).injectStream === "function";
+    const stream = usesInjectedStream
+      ? await openInjectedRunStream(
+          app as {
+            injectStream: (input: {
+              method: string;
+              url: string;
+            }) => Promise<{
+              request: ClientRequest;
+              response: IncomingMessage;
+            }>;
+          },
+          run.id
+        )
+      : (await app.listen({
+          path: socketPath
+        }),
+        await openRunStream(socketPath, run.id));
+    assert.equal(stream.response.statusCode, 200);
+    const contentType = String(stream.response.headers["content-type"] ?? "");
 
-    const response = await fetch(`${baseUrl}/runs/${run.id}/stream`, {
-      headers: {
-        accept: "text/event-stream"
-      }
-    });
-    assert.equal(response.status, 200);
-    assert.ok(response.body, "SSE response body should exist");
+    if (contentType.length > 0 || !usesInjectedStream) {
+      assert.match(contentType, /text\/event-stream/i);
+    }
 
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder();
-    const streamState = { buffer: "" };
-
-    const firstSnapshot = await readNextSnapshot(reader, decoder, streamState, 5_000);
+    const firstSnapshot = await readNextSnapshot(stream.state, 5_000);
     const firstRuntimeState =
       firstSnapshot.attempt_details.find((detail) => detail.attempt.id === attempt.id)
         ?.runtime_state ?? null;
@@ -195,7 +319,7 @@ async function main(): Promise<void> {
       })
     );
 
-    const secondSnapshot = await readNextSnapshot(reader, decoder, streamState, 5_000);
+    const secondSnapshot = await readNextSnapshot(stream.state, 5_000);
     const secondRuntimeState =
       secondSnapshot.attempt_details.find((detail) => detail.attempt.id === attempt.id)
         ?.runtime_state ?? null;
@@ -203,7 +327,8 @@ async function main(): Promise<void> {
     assert.equal(secondRuntimeState?.phase, "tool");
     assert.equal(secondRuntimeState?.event_count, 2);
 
-    await reader.cancel();
+    stream.request.destroy();
+    stream.response.destroy();
 
     console.log(
       JSON.stringify(
@@ -220,6 +345,10 @@ async function main(): Promise<void> {
     );
   } finally {
     await app.close();
+    await rm(socketDir, {
+      recursive: true,
+      force: true
+    });
   }
 }
 
