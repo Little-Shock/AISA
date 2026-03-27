@@ -72,6 +72,49 @@ const currentDir = dirname(fileURLToPath(import.meta.url));
 const repositoryRoot = join(currentDir, "..", "..", "..");
 loadEnv({ path: join(repositoryRoot, ".env") });
 
+function inferLaunchAttemptType(input: {
+  current: Awaited<ReturnType<typeof getCurrentDecision>> | null;
+  attempts: Awaited<ReturnType<typeof listAttempts>>;
+}): "research" | "execution" {
+  const latestAttempt =
+    input.current?.latest_attempt_id
+      ? input.attempts.find((attempt) => attempt.id === input.current?.latest_attempt_id) ?? null
+      : input.attempts.at(-1) ?? null;
+
+  return (
+    input.current?.recommended_attempt_type ??
+    latestAttempt?.attempt_type ??
+    "research"
+  );
+}
+
+function inferLaunchNextAction(input: {
+  current: Awaited<ReturnType<typeof getCurrentDecision>> | null;
+  attempts: Awaited<ReturnType<typeof listAttempts>>;
+}): string {
+  const currentAction = input.current?.recommended_next_action;
+  if (currentAction && currentAction !== "wait_for_human") {
+    return currentAction;
+  }
+
+  const latestAttempt =
+    input.current?.latest_attempt_id
+      ? input.attempts.find((attempt) => attempt.id === input.current?.latest_attempt_id) ?? null
+      : input.attempts.at(-1) ?? null;
+
+  if (!latestAttempt) {
+    return "start_first_attempt";
+  }
+
+  if (latestAttempt.status === "failed" || latestAttempt.status === "stopped") {
+    return "retry_attempt";
+  }
+
+  return inferLaunchAttemptType(input) === "execution"
+    ? "continue_execution"
+    : "continue_research";
+}
+
 export async function buildServer(
   options: {
     workspaceRoot?: string;
@@ -524,21 +567,28 @@ export async function buildServer(
     try {
       const run = await getRun(workspacePaths, runId);
       await lockWorkspaceRootOrThrow(run.workspace_root);
+      const attempts = await listAttempts(workspacePaths, runId);
       const current =
         (await getCurrentDecision(workspacePaths, runId)) ??
         createCurrentDecision({
           run_id: runId,
           run_status: "draft"
         });
+      const nextAction = inferLaunchNextAction({
+        current,
+        attempts
+      });
+      const nextAttemptType = inferLaunchAttemptType({
+        current,
+        attempts
+      });
 
       const nextCurrent = updateCurrentDecision(current, {
         run_status: "running",
         waiting_for_human: false,
         blocking_reason: null,
-        recommended_next_action:
-          current.recommended_next_action ?? "start_first_attempt",
-        recommended_attempt_type:
-          current.recommended_attempt_type ?? "research",
+        recommended_next_action: nextAction,
+        recommended_attempt_type: nextAttemptType,
         summary:
           current.latest_attempt_id === null
             ? "Run launched. Loop will create the first attempt."

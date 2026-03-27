@@ -32,6 +32,10 @@ import {
   saveRun
 } from "../packages/state-store/src/index.ts";
 import { buildServer } from "../apps/control-api/src/index.ts";
+import {
+  createRunWorkspaceScopePolicy,
+  Orchestrator
+} from "../packages/orchestrator/src/index.ts";
 
 async function main(): Promise<void> {
   const rootDir = await mkdtemp(join(tmpdir(), "aisa-run-detail-api-"));
@@ -469,6 +473,110 @@ async function main(): Promise<void> {
     });
     assert.equal(blockedLaunchResponse.statusCode, 400);
     assert.match(blockedLaunchResponse.body, /工作区超出允许范围/u);
+
+    const resumableRun = createRun({
+      title: "Resumable waiting run",
+      description: "Ensure launch turns a waiting run back into an actionable run.",
+      success_criteria: ["resume should create a new execution attempt"],
+      constraints: [],
+      owner_id: "test-owner",
+      workspace_root: projectRoot
+    });
+    const failedResumableAttempt = updateAttempt(
+      createAttempt({
+        run_id: resumableRun.id,
+        attempt_type: "execution",
+        worker: "fake-codex",
+        objective: "Retry the latest execution with the same contract.",
+        success_criteria: resumableRun.success_criteria,
+        workspace_root: projectRoot
+      }),
+      {
+        status: "failed",
+        started_at: new Date().toISOString(),
+        ended_at: new Date().toISOString()
+      }
+    );
+    await saveRun(workspacePaths, resumableRun);
+    await saveAttempt(workspacePaths, failedResumableAttempt);
+    await saveAttemptContract(
+      workspacePaths,
+      createAttemptContract({
+        attempt_id: failedResumableAttempt.id,
+        run_id: resumableRun.id,
+        attempt_type: "execution",
+        objective: failedResumableAttempt.objective,
+        success_criteria: failedResumableAttempt.success_criteria,
+        required_evidence: ["leave git-visible changes", "replay runtime verification"],
+        expected_artifacts: ["artifacts/runtime.patch"],
+        verification_plan: {
+          commands: [
+            {
+              purpose: "replay runtime suite",
+              command: "pnpm verify:runtime"
+            }
+          ]
+        }
+      })
+    );
+    await saveCurrentDecision(
+      workspacePaths,
+      createCurrentDecision({
+        run_id: resumableRun.id,
+        run_status: "waiting_steer",
+        latest_attempt_id: failedResumableAttempt.id,
+        recommended_next_action: "wait_for_human",
+        recommended_attempt_type: "execution",
+        summary: "Paused after the last execution failed.",
+        blocking_reason: "Need to retry the latest execution contract.",
+        waiting_for_human: true
+      })
+    );
+    const resumeResponse = await app.inject({
+      method: "POST",
+      url: `/runs/${resumableRun.id}/launch`
+    });
+    assert.equal(resumeResponse.statusCode, 200);
+    const resumePayload = resumeResponse.json() as {
+      current: {
+        run_status: string;
+        waiting_for_human: boolean;
+        recommended_next_action: string | null;
+        recommended_attempt_type: string | null;
+      };
+    };
+    assert.equal(resumePayload.current.run_status, "running");
+    assert.equal(resumePayload.current.waiting_for_human, false);
+    assert.equal(
+      resumePayload.current.recommended_next_action,
+      "retry_attempt",
+      "launch should turn wait_for_human into an actionable retry"
+    );
+    assert.equal(resumePayload.current.recommended_attempt_type, "execution");
+
+    const launchRunWorkspaceScopePolicy = await createRunWorkspaceScopePolicy({
+      runtimeRoot: rootDir,
+      allowedRoots: [rootDir, projectScopeDir]
+    });
+    const launchOrchestrator = new Orchestrator(
+      workspacePaths,
+      {
+        type: "fake-codex",
+        async runAttemptTask() {
+          throw new Error("launch resume verification should not dispatch worker execution");
+        }
+      } as never,
+      undefined,
+      60_000,
+      {
+        runWorkspaceScopePolicy: launchRunWorkspaceScopePolicy
+      }
+    );
+    await launchOrchestrator.tick();
+    const resumedAttempts = await listAttempts(workspacePaths, resumableRun.id);
+    assert.equal(resumedAttempts.length, 2);
+    assert.equal(resumedAttempts[1]?.attempt_type, "execution");
+    assert.equal(resumedAttempts[1]?.status, "created");
 
     const response = await app.inject({
       method: "GET",
