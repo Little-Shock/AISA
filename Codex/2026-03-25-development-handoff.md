@@ -52,6 +52,7 @@
 - `runs/<run_id>/current.json`
 - `runs/<run_id>/journal.ndjson`
 - `runs/<run_id>/report.md`
+- `runs/<run_id>/artifacts/runtime-health-snapshot.json`
 - `runs/<run_id>/steers/*.json`
 - `runs/<run_id>/attempts/<attempt_id>/meta.json`
 - `runs/<run_id>/attempts/<attempt_id>/context.json`
@@ -62,6 +63,12 @@
 - `runs/<run_id>/attempts/<attempt_id>/artifacts/`
 
 一句话说，现在一次任务的真相已经开始围着 `runs/<run_id>/` 组织，而不是散落在好几套平行概念里。
+
+其中 `runs/<run_id>/artifacts/runtime-health-snapshot.json` 是给 self-bootstrap 用的只读运行时体检产物，当前最小 schema 包含：
+
+- `verify_runtime`
+- `history_contract_drift`
+- `created_at`
 
 ### 2.2 API 已经能围着 `run` 工作
 

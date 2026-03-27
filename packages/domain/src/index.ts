@@ -341,6 +341,42 @@ export const AttemptRuntimeVerificationSchema = z.object({
   created_at: z.string().datetime()
 });
 
+export const RuntimeHealthHistoryContractDriftSchema = z.object({
+  run_id: z.string(),
+  attempt_id: z.string(),
+  status: z.string().min(1),
+  objective_match: z.boolean(),
+  success_criteria_match: z.boolean(),
+  review_packet_present: z.boolean(),
+  review_packet_contract_matches_attempt: z.boolean(),
+  meta_file: z.string().min(1),
+  contract_file: z.string().min(1),
+  review_packet_file: z.string().min(1)
+});
+
+export const RuntimeHealthSnapshotSchema = z.object({
+  run_id: z.string(),
+  workspace_root: z.string().min(1),
+  evidence_root: z.string().min(1),
+  verify_runtime: z.object({
+    command: z.string().min(1),
+    exit_code: z.number().int(),
+    status: z.enum(["passed", "failed"]),
+    summary: z.string().min(1)
+  }),
+  history_contract_drift: z.object({
+    command: z.string().min(1),
+    exit_code: z.number().int(),
+    status: z.enum(["ok", "drift_detected"]),
+    summary: z.string().min(1),
+    scanned_run_count: z.number().int().nonnegative(),
+    scanned_execution_attempt_count: z.number().int().nonnegative(),
+    drift_count: z.number().int().nonnegative(),
+    drifts: z.array(RuntimeHealthHistoryContractDriftSchema)
+  }),
+  created_at: z.string().datetime()
+});
+
 export const AttemptHeartbeatStatusSchema = z.enum(["active", "released"]);
 
 export const AttemptHeartbeatSchema = z.object({
@@ -472,6 +508,10 @@ export type RuntimeVerificationFailureCode = z.infer<
 >;
 export type VerificationCommandResult = z.infer<typeof VerificationCommandResultSchema>;
 export type AttemptRuntimeVerification = z.infer<typeof AttemptRuntimeVerificationSchema>;
+export type RuntimeHealthHistoryContractDrift = z.infer<
+  typeof RuntimeHealthHistoryContractDriftSchema
+>;
+export type RuntimeHealthSnapshot = z.infer<typeof RuntimeHealthSnapshotSchema>;
 export type AttemptHeartbeatStatus = z.infer<typeof AttemptHeartbeatStatusSchema>;
 export type AttemptHeartbeat = z.infer<typeof AttemptHeartbeatSchema>;
 export type WorkerWriteback = z.infer<typeof WorkerWritebackSchema>;

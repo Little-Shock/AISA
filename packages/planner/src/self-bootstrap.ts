@@ -1,4 +1,4 @@
-import type { CreateRunInput } from "@autoresearch/domain";
+import type { CreateRunInput, RuntimeHealthSnapshot } from "@autoresearch/domain";
 
 export interface SelfBootstrapTemplateOptions {
   workspaceRoot?: string;
@@ -6,6 +6,10 @@ export interface SelfBootstrapTemplateOptions {
   focus?: string;
   extraConstraints?: string[];
   extraSuccessCriteria?: string[];
+  runtimeHealthSnapshot?: {
+    path: string;
+    snapshot: RuntimeHealthSnapshot;
+  };
 }
 
 export interface SelfBootstrapTemplate {
@@ -50,9 +54,12 @@ export function buildSelfBootstrapRunTemplate(
     "用当前回归用例选出下一项最小的自举改进。",
     "只有运行时能亲自回放验证命令时，执行才算通过。",
     "如果建议下一步执行，就把运行时该强制执行的可回放尝试约定一并给出。",
+    buildRuntimeHealthSnapshotHint(options.runtimeHealthSnapshot),
     focus,
     "如果改了运行时行为，就在同一轮补上或更新回归用例。"
-  ].join("\n");
+  ]
+    .filter(Boolean)
+    .join("\n");
 
   return {
     runInput: {
@@ -68,4 +75,25 @@ export function buildSelfBootstrapRunTemplate(
     },
     initialSteer
   };
+}
+
+function buildRuntimeHealthSnapshotHint(
+  runtimeHealthSnapshot: SelfBootstrapTemplateOptions["runtimeHealthSnapshot"]
+): string | null {
+  if (!runtimeHealthSnapshot) {
+    return null;
+  }
+
+  const driftRefs = runtimeHealthSnapshot.snapshot.history_contract_drift.drifts
+    .slice(0, 4)
+    .map((drift) => `${drift.run_id}/${drift.attempt_id}`);
+
+  return [
+    `先读 runtime 健康快照：${runtimeHealthSnapshot.path}。`,
+    `当前 runtime 结论：${runtimeHealthSnapshot.snapshot.verify_runtime.summary}`,
+    `历史 contract 漂移状态：${runtimeHealthSnapshot.snapshot.history_contract_drift.status}，数量 ${runtimeHealthSnapshot.snapshot.history_contract_drift.drift_count}。`,
+    driftRefs.length > 0 ? `当前旧漂移现场：${driftRefs.join("，")}` : null
+  ]
+    .filter(Boolean)
+    .join("\n");
 }

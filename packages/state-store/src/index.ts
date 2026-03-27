@@ -15,6 +15,7 @@ import type {
   EvalResult,
   EvalSpec,
   Goal,
+  RuntimeHealthSnapshot,
   Run,
   RunJournalEntry,
   RunSteer,
@@ -35,6 +36,7 @@ import {
   CurrentDecisionSchema,
   EvalResultSchema,
   GoalSchema,
+  RuntimeHealthSnapshotSchema,
   RunJournalEntrySchema,
   RunSchema,
   RunSteerSchema,
@@ -76,10 +78,12 @@ export interface RunPaths {
   runDir: string;
   attemptsDir: string;
   steersDir: string;
+  artifactsDir: string;
   contractFile: string;
   currentFile: string;
   reportFile: string;
   journalFile: string;
+  runtimeHealthSnapshotFile: string;
 }
 
 export interface AttemptPaths {
@@ -116,10 +120,16 @@ export function resolveRunPaths(paths: WorkspacePaths, runId: string): RunPaths 
     runDir,
     attemptsDir: join(runDir, "attempts"),
     steersDir: join(runDir, "steers"),
+    artifactsDir: join(runDir, "artifacts"),
     contractFile: join(runDir, "contract.json"),
     currentFile: join(runDir, "current.json"),
     reportFile: join(runDir, "report.md"),
-    journalFile: join(runDir, "journal.ndjson")
+    journalFile: join(runDir, "journal.ndjson"),
+    runtimeHealthSnapshotFile: join(
+      runDir,
+      "artifacts",
+      "runtime-health-snapshot.json"
+    )
   };
 }
 
@@ -214,9 +224,12 @@ export async function ensureRunDirectories(
   const runPaths = resolveRunPaths(paths, runId);
 
   await Promise.all(
-    [runPaths.runDir, runPaths.attemptsDir, runPaths.steersDir].map((dir) =>
-      mkdir(dir, { recursive: true })
-    )
+    [
+      runPaths.runDir,
+      runPaths.attemptsDir,
+      runPaths.steersDir,
+      runPaths.artifactsDir
+    ].map((dir) => mkdir(dir, { recursive: true }))
   );
 
   return runPaths;
@@ -713,6 +726,28 @@ export async function getRunReport(
     return await readFile(resolveRunPaths(paths, runId).reportFile, "utf8");
   } catch {
     return "";
+  }
+}
+
+export async function saveRunRuntimeHealthSnapshot(
+  paths: WorkspacePaths,
+  snapshot: RuntimeHealthSnapshot
+): Promise<void> {
+  const runPaths = await ensureRunDirectories(paths, snapshot.run_id);
+  await writeJsonFile(runPaths.runtimeHealthSnapshotFile, snapshot);
+}
+
+export async function getRunRuntimeHealthSnapshot(
+  paths: WorkspacePaths,
+  runId: string
+): Promise<RuntimeHealthSnapshot | null> {
+  try {
+    const snapshot = await readJsonFile<RuntimeHealthSnapshot>(
+      resolveRunPaths(paths, runId).runtimeHealthSnapshotFile
+    );
+    return RuntimeHealthSnapshotSchema.parse(snapshot);
+  } catch {
+    return null;
   }
 }
 

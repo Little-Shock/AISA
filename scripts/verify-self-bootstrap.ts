@@ -1,31 +1,25 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile } from "node:fs/promises";
+import { spawn } from "node:child_process";
+import { mkdtemp, readFile, realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
-  createCurrentDecision,
-  createRun,
-  createRunJournalEntry,
-  createRunSteer,
-  updateCurrentDecision,
   type Attempt,
   type Run,
   type WorkerWriteback
 } from "../packages/domain/src/index.ts";
 import { Orchestrator } from "../packages/orchestrator/src/index.ts";
-import { buildSelfBootstrapRunTemplate } from "../packages/planner/src/index.ts";
 import {
-  appendRunJournal,
   ensureWorkspace,
   getAttemptContract,
   getCurrentDecision,
+  getRun,
+  getRunRuntimeHealthSnapshot,
   listAttempts,
   listRunJournal,
   listRunSteers,
   resolveWorkspacePaths,
-  saveCurrentDecision,
-  saveRun,
-  saveRunSteer
 } from "../packages/state-store/src/index.ts";
 
 class NoopAdapter {
@@ -84,79 +78,121 @@ async function assertRootEntrypointsUseNodeImportTsx(): Promise<void> {
   }
 }
 
+type ScriptResult = {
+  exitCode: number | null;
+  stdout: string;
+  stderr: string;
+};
+
+type BootstrapOutput = {
+  run_id: string;
+  current_status: string;
+  workspace_root: string;
+  steer_id: string | null;
+  launched: boolean;
+  template: string;
+  runtime_health_snapshot: string;
+};
+
+function resolveSourceRoot(): string {
+  return dirname(dirname(fileURLToPath(import.meta.url)));
+}
+
+function resolveTsxLoaderPath(sourceRoot: string): string {
+  return join(sourceRoot, "node_modules", "tsx", "dist", "loader.mjs");
+}
+
+function runTsxScript(input: {
+  cwd: string;
+  sourceRoot: string;
+  scriptPath: string;
+  args?: string[];
+}): Promise<ScriptResult> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(
+      process.execPath,
+      [
+        "--import",
+        resolveTsxLoaderPath(input.sourceRoot),
+        input.scriptPath,
+        ...(input.args ?? [])
+      ],
+      {
+        cwd: input.cwd,
+        env: process.env,
+        stdio: ["ignore", "pipe", "pipe"]
+      }
+    );
+    let stdout = "";
+    let stderr = "";
+
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk;
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk;
+    });
+    child.on("error", reject);
+    child.on("close", (exitCode) => {
+      resolve({
+        exitCode,
+        stdout,
+        stderr
+      });
+    });
+  });
+}
+
+function formatScriptFailure(label: string, result: ScriptResult): string {
+  const stdout = result.stdout.trim();
+  const stderr = result.stderr.trim();
+
+  return [
+    `${label} exit code: ${result.exitCode ?? "null"}`,
+    stdout.length > 0 ? `stdout:\n${stdout}` : "stdout:\n<empty>",
+    stderr.length > 0 ? `stderr:\n${stderr}` : "stderr:\n<empty>"
+  ].join("\n\n");
+}
+
+function parseJsonStdout<T>(label: string, stdout: string): T {
+  try {
+    return JSON.parse(stdout) as T;
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    throw new Error(`${label} returned invalid JSON stdout: ${reason}`);
+  }
+}
+
 async function main(): Promise<void> {
   await assertRootEntrypointsUseNodeImportTsx();
 
+  const sourceRoot = resolveSourceRoot();
   const rootDir = await mkdtemp(join(tmpdir(), "aisa-self-bootstrap-"));
   const workspacePaths = resolveWorkspacePaths(rootDir);
   await ensureWorkspace(workspacePaths);
-
-  const template = buildSelfBootstrapRunTemplate({
-    workspaceRoot: rootDir,
-    ownerId: "test-owner",
-    focus: "Use runtime evidence to choose the next backend step."
+  const bootstrapResult = await runTsxScript({
+    cwd: rootDir,
+    sourceRoot,
+    scriptPath: join(sourceRoot, "scripts", "bootstrap-self-run.ts"),
+    args: [
+      "--owner",
+      "test-owner",
+      "--focus",
+      "Use runtime evidence to choose the next backend step."
+    ]
   });
-  assert.equal(template.runInput.workspace_root, rootDir);
-  assert.equal(template.runInput.owner_id, "test-owner");
-  assert.equal(template.runInput.title, "AISA 自举下一步规划");
-  assert.match(template.runInput.description, /自举开发/);
-  assert.equal(template.runInput.success_criteria[0], "确定下一项该做的具体后端或运行时任务。");
-  assert.ok(template.initialSteer.includes("runtime"));
-  assert.ok(template.initialSteer.includes("回放"));
-
-  const run = createRun(template.runInput);
-  let current = createCurrentDecision({
-    run_id: run.id,
-    run_status: "draft",
-    summary: "Self-bootstrap run created. Waiting to launch."
-  });
-  const steer = createRunSteer({
-    run_id: run.id,
-    content: template.initialSteer
-  });
-
-  await saveRun(workspacePaths, run);
-  await saveCurrentDecision(workspacePaths, current);
-  await saveRunSteer(workspacePaths, steer);
-  await appendRunJournal(
-    workspacePaths,
-    createRunJournalEntry({
-      run_id: run.id,
-      type: "run.created",
-      payload: {
-        title: run.title,
-        template: "self-bootstrap"
-      }
-    })
+  assert.equal(
+    bootstrapResult.exitCode,
+    0,
+    formatScriptFailure("scripts/bootstrap-self-run.ts", bootstrapResult)
   );
-  await appendRunJournal(
-    workspacePaths,
-    createRunJournalEntry({
-      run_id: run.id,
-      type: "run.steer.queued",
-      payload: {
-        content: steer.content,
-        template: "self-bootstrap"
-      }
-    })
+  const bootstrapOutput = parseJsonStdout<BootstrapOutput>(
+    "scripts/bootstrap-self-run.ts",
+    bootstrapResult.stdout
   );
-  current = updateCurrentDecision(current, {
-    run_status: "running",
-    recommended_next_action: "start_first_attempt",
-    recommended_attempt_type: "research",
-    summary: "Self-bootstrap run launched. Loop will create the first attempt."
-  });
-  await saveCurrentDecision(workspacePaths, current);
-  await appendRunJournal(
-    workspacePaths,
-    createRunJournalEntry({
-      run_id: run.id,
-      type: "run.launched",
-      payload: {
-        template: "self-bootstrap"
-      }
-    })
-  );
+  const run = await getRun(workspacePaths, bootstrapOutput.run_id);
 
   const orchestrator = new Orchestrator(
     workspacePaths,
@@ -170,18 +206,64 @@ async function main(): Promise<void> {
   const attempts = await listAttempts(workspacePaths, run.id);
   const steers = await listRunSteers(workspacePaths, run.id);
   const journal = await listRunJournal(workspacePaths, run.id);
+  const runtimeHealthSnapshot = await getRunRuntimeHealthSnapshot(
+    workspacePaths,
+    run.id
+  );
 
+  assert.equal(await realpath(run.workspace_root), await realpath(rootDir));
+  assert.equal(run.owner_id, "test-owner");
+  assert.equal(run.title, "AISA 自举下一步规划");
+  assert.match(run.description, /自举开发/);
+  assert.equal(run.success_criteria[0], "确定下一项该做的具体后端或运行时任务。");
+  assert.equal(bootstrapOutput.current_status, "running");
+  assert.equal(bootstrapOutput.launched, true);
+  assert.equal(bootstrapOutput.template, "self-bootstrap");
+  assert.ok(
+    bootstrapOutput.runtime_health_snapshot.endsWith("runtime-health-snapshot.json"),
+    "bootstrap output should expose the runtime health snapshot path"
+  );
   assert.equal(persistedCurrent?.run_status, "running");
   assert.equal(steers.length, 1);
   assert.equal(attempts.length, 1);
   assert.equal(attempts[0]?.attempt_type, "research");
+  assert.ok(runtimeHealthSnapshot, "self-bootstrap should persist runtime health snapshot");
+  assert.equal(
+    runtimeHealthSnapshot?.workspace_root
+      ? await realpath(runtimeHealthSnapshot.workspace_root)
+      : null,
+    await realpath(rootDir)
+  );
+  assert.equal(runtimeHealthSnapshot?.evidence_root, sourceRoot);
+  assert.equal(runtimeHealthSnapshot?.verify_runtime.status, "passed");
+  assert.equal(
+    runtimeHealthSnapshot?.history_contract_drift.status,
+    "drift_detected"
+  );
+  assert.equal(runtimeHealthSnapshot?.history_contract_drift.drift_count, 4);
+  assert.ok(
+    steers[0]?.content.includes(bootstrapOutput.runtime_health_snapshot),
+    "seeded steer should point to the runtime health snapshot path"
+  );
+  assert.ok(
+    steers[0]?.content.includes("drift_detected"),
+    "seeded steer should carry the history drift status"
+  );
   assert.ok(
     attempts[0]?.objective.includes("人工指令："),
     "first attempt should incorporate the seeded steer in Chinese"
   );
   assert.ok(
-    attempts[0]?.objective.includes("runtime evidence"),
+    attempts[0]?.objective.includes("Use runtime evidence"),
     "first attempt should keep the self-bootstrap focus"
+  );
+  assert.ok(
+    attempts[0]?.objective.includes(bootstrapOutput.runtime_health_snapshot),
+    "first attempt should reference the persisted runtime health snapshot"
+  );
+  assert.ok(
+    attempts[0]?.objective.includes("drift_detected"),
+    "first attempt should carry the runtime drift status from the snapshot"
   );
   const attemptContract = attempts[0]
     ? await getAttemptContract(workspacePaths, run.id, attempts[0].id)
@@ -199,13 +281,23 @@ async function main(): Promise<void> {
     journal.some((entry) => entry.type === "run.steer.queued"),
     "journal should record the seeded steer"
   );
+  assert.ok(
+    journal.some(
+      (entry) =>
+        entry.type === "run.runtime_health_snapshot.captured" &&
+        entry.payload.path === bootstrapOutput.runtime_health_snapshot
+    ),
+    "journal should record the runtime health snapshot artifact"
+  );
 
   console.log(
     JSON.stringify(
       {
         run_id: run.id,
         attempt_id: attempts[0]?.id ?? null,
-        objective: attempts[0]?.objective ?? null
+        objective: attempts[0]?.objective ?? null,
+        runtime_health_snapshot: bootstrapOutput.runtime_health_snapshot,
+        drift_count: runtimeHealthSnapshot?.history_contract_drift.drift_count ?? null
       },
       null,
       2

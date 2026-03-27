@@ -1,17 +1,23 @@
+import { spawn } from "node:child_process";
+import { dirname, relative } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   createCurrentDecision,
   createRun,
   createRunJournalEntry,
   createRunSteer,
-  updateCurrentDecision
+  updateCurrentDecision,
+  type RuntimeHealthSnapshot
 } from "../packages/domain/src/index.ts";
 import { buildSelfBootstrapRunTemplate } from "../packages/planner/src/index.ts";
 import {
   appendRunJournal,
   ensureWorkspace,
+  resolveRunPaths,
   resolveWorkspacePaths,
   saveCurrentDecision,
   saveRun,
+  saveRunRuntimeHealthSnapshot,
   saveRunSteer
 } from "../packages/state-store/src/index.ts";
 
@@ -20,6 +26,25 @@ type CliOptions = {
   focus?: string;
   launch: boolean;
   seedSteer: boolean;
+};
+
+type ScriptResult = {
+  exitCode: number | null;
+  stdout: string;
+  stderr: string;
+};
+
+type VerifyRuntimeReport = {
+  summary: string;
+};
+
+type HistoryContractDriftReport = {
+  status: "ok" | "drift_detected";
+  summary: string;
+  scanned_run_count: number;
+  scanned_execution_attempt_count: number;
+  drift_count: number;
+  drifts: RuntimeHealthSnapshot["history_contract_drift"]["drifts"];
 };
 
 function parseArgs(argv: string[]): CliOptions {
@@ -56,18 +81,146 @@ function parseArgs(argv: string[]): CliOptions {
   return options;
 }
 
+function resolveSourceRoot(): string {
+  return dirname(dirname(fileURLToPath(import.meta.url)));
+}
+
+function runTsxScript(rootDir: string, scriptPath: string): Promise<ScriptResult> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, ["--import", "tsx", scriptPath], {
+      cwd: rootDir,
+      env: process.env,
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+    let stdout = "";
+    let stderr = "";
+
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk;
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk;
+    });
+    child.on("error", reject);
+    child.on("close", (exitCode) => {
+      resolve({
+        exitCode,
+        stdout,
+        stderr
+      });
+    });
+  });
+}
+
+function formatScriptFailure(label: string, result: ScriptResult): string {
+  const stdout = result.stdout.trim();
+  const stderr = result.stderr.trim();
+
+  return [
+    `${label} exit code: ${result.exitCode ?? "null"}`,
+    stdout.length > 0 ? `stdout:\n${stdout}` : "stdout:\n<empty>",
+    stderr.length > 0 ? `stderr:\n${stderr}` : "stderr:\n<empty>"
+  ].join("\n\n");
+}
+
+function parseJsonStdout<T>(label: string, stdout: string): T {
+  try {
+    return JSON.parse(stdout) as T;
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    throw new Error(`${label} returned invalid JSON stdout: ${reason}`);
+  }
+}
+
+async function captureRuntimeHealthSnapshot(input: {
+  runId: string;
+  workspaceRoot: string;
+  evidenceRoot: string;
+}): Promise<RuntimeHealthSnapshot> {
+  const verifyRuntimeCommand = "pnpm verify:runtime";
+  const verifyRuntimeResult = await runTsxScript(
+    input.evidenceRoot,
+    "scripts/verify-runtime.ts"
+  );
+
+  if (verifyRuntimeResult.exitCode !== 0) {
+    throw new Error(
+      `bootstrap:self blocked because ${verifyRuntimeCommand} failed.\n\n${formatScriptFailure(
+        "scripts/verify-runtime.ts",
+        verifyRuntimeResult
+      )}`
+    );
+  }
+
+  const verifyRuntimeReport = parseJsonStdout<VerifyRuntimeReport>(
+    "scripts/verify-runtime.ts",
+    verifyRuntimeResult.stdout
+  );
+  const historyContractDriftCommand = "node --import tsx scripts/verify-history-contract-drift.ts";
+  const historyContractDriftResult = await runTsxScript(
+    input.evidenceRoot,
+    "scripts/verify-history-contract-drift.ts"
+  );
+  const historyContractDriftReport = parseJsonStdout<HistoryContractDriftReport>(
+    "scripts/verify-history-contract-drift.ts",
+    historyContractDriftResult.stdout
+  );
+  const historyExitCode = historyContractDriftResult.exitCode ?? 1;
+  const historyLooksExpected =
+    (historyExitCode === 0 && historyContractDriftReport.status === "ok") ||
+    (historyExitCode === 1 &&
+      historyContractDriftReport.status === "drift_detected");
+
+  if (!historyLooksExpected) {
+    throw new Error(
+      "bootstrap:self blocked because history contract drift scan returned an unexpected result.\n\n" +
+        formatScriptFailure(
+          "scripts/verify-history-contract-drift.ts",
+          historyContractDriftResult
+        )
+    );
+  }
+
+  return {
+    run_id: input.runId,
+    workspace_root: input.workspaceRoot,
+    evidence_root: input.evidenceRoot,
+    verify_runtime: {
+      command: verifyRuntimeCommand,
+      exit_code: 0,
+      status: "passed",
+      summary: verifyRuntimeReport.summary
+    },
+    history_contract_drift: {
+      command: historyContractDriftCommand,
+      exit_code: historyExitCode,
+      status: historyContractDriftReport.status,
+      summary: historyContractDriftReport.summary,
+      scanned_run_count: historyContractDriftReport.scanned_run_count,
+      scanned_execution_attempt_count:
+        historyContractDriftReport.scanned_execution_attempt_count,
+      drift_count: historyContractDriftReport.drift_count,
+      drifts: historyContractDriftReport.drifts
+    },
+    created_at: new Date().toISOString()
+  };
+}
+
 async function main(): Promise<void> {
-  const repositoryRoot = process.cwd();
-  const workspacePaths = resolveWorkspacePaths(repositoryRoot);
+  const workspaceRoot = process.cwd();
+  const sourceRoot = resolveSourceRoot();
+  const workspacePaths = resolveWorkspacePaths(workspaceRoot);
   await ensureWorkspace(workspacePaths);
 
   const options = parseArgs(process.argv.slice(2));
-  const template = buildSelfBootstrapRunTemplate({
-    workspaceRoot: repositoryRoot,
+  const baseTemplate = buildSelfBootstrapRunTemplate({
+    workspaceRoot,
     ownerId: options.ownerId,
     focus: options.focus
   });
-  const run = createRun(template.runInput);
+  const run = createRun(baseTemplate.runInput);
   let current = createCurrentDecision({
     run_id: run.id,
     run_status: "draft",
@@ -75,6 +228,12 @@ async function main(): Promise<void> {
   });
 
   await saveRun(workspacePaths, run);
+  const runtimeHealthSnapshot = await captureRuntimeHealthSnapshot({
+    runId: run.id,
+    workspaceRoot,
+    evidenceRoot: sourceRoot
+  });
+  await saveRunRuntimeHealthSnapshot(workspacePaths, runtimeHealthSnapshot);
   await saveCurrentDecision(workspacePaths, current);
   await appendRunJournal(
     workspacePaths,
@@ -88,6 +247,34 @@ async function main(): Promise<void> {
       }
     })
   );
+  const runPaths = resolveRunPaths(workspacePaths, run.id);
+  const runtimeHealthSnapshotPath = relative(
+    workspaceRoot,
+    runPaths.runtimeHealthSnapshotFile
+  );
+  await appendRunJournal(
+    workspacePaths,
+    createRunJournalEntry({
+      run_id: run.id,
+      type: "run.runtime_health_snapshot.captured",
+      payload: {
+        path: runtimeHealthSnapshotPath,
+        verify_runtime_status: runtimeHealthSnapshot.verify_runtime.status,
+        history_contract_drift_status:
+          runtimeHealthSnapshot.history_contract_drift.status,
+        drift_count: runtimeHealthSnapshot.history_contract_drift.drift_count
+      }
+    })
+  );
+  const template = buildSelfBootstrapRunTemplate({
+    workspaceRoot,
+    ownerId: options.ownerId,
+    focus: options.focus,
+    runtimeHealthSnapshot: {
+      path: runtimeHealthSnapshotPath,
+      snapshot: runtimeHealthSnapshot
+    }
+  });
 
   let steerId: string | null = null;
   if (options.seedSteer) {
@@ -141,7 +328,8 @@ async function main(): Promise<void> {
         workspace_root: run.workspace_root,
         steer_id: steerId,
         launched: options.launch,
-        template: "self-bootstrap"
+        template: "self-bootstrap",
+        runtime_health_snapshot: runtimeHealthSnapshotPath
       },
       null,
       2
