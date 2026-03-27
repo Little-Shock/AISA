@@ -13,5 +13,6 @@
 - `verify-run-detail-api.ts`: 验证 `/runs/:runId` 会返回 attempt 的 context、failure_context、结果、判断和 runtime 验证证据
 - `verify-worker-adapter.ts`: 验证 worker 非零退出时会把 stderr 里的根因带回阻塞信息
 - `bootstrap-self-run.ts`: 生成并可直接启动一个面向当前仓库的 self-bootstrap run
+- `supervise-self-bootstrap.ts`: 监督当前 self-bootstrap run，自动修复常见卡点，并在需要时切到新的 self-bootstrap run
 - `drive-run.ts`: 不依赖 control-api，直接在本地推进一个 run，适合 self-bootstrap 和后端调试
 - `verify-self-bootstrap.ts`: 验证 self-bootstrap 模板、seeded steer 和首个 attempt 的接线是否成立

@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { cp, mkdir, stat } from "node:fs/promises";
+import { cp, lstat, mkdir, stat, symlink } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import { updateRun, type Run } from "@autoresearch/domain";
@@ -75,6 +75,20 @@ export async function ensureRunManagedWorkspace(input: {
       managedWorkspaceRoot: input.run.managed_workspace_root,
       policy: input.policy
     });
+    const managedRepoRoot = await resolveGitRepoRoot(validatedManagedWorkspaceRoot);
+    if (!managedRepoRoot) {
+      throw new RunWorkspaceScopeError(
+        "managed_workspace_not_git_repo",
+        `记录的隔离工作区不是 git worktree：${validatedManagedWorkspaceRoot}`,
+        {
+          managed_workspace_root: validatedManagedWorkspaceRoot
+        }
+      );
+    }
+    await provisionManagedWorkspaceToolchain({
+      sourceRepoRoot,
+      managedRepoRoot
+    });
 
     return updateRun(input.run, {
       workspace_root: sourceWorkspaceRoot,
@@ -94,6 +108,10 @@ export async function ensureRunManagedWorkspace(input: {
 
   const existingWorktree = await stat(worktreeRepoRoot).catch(() => null);
   if (existingWorktree) {
+    await provisionManagedWorkspaceToolchain({
+      sourceRepoRoot,
+      managedRepoRoot: worktreeRepoRoot
+    });
     const validatedManagedWorkspaceRoot = await validateManagedWorkspace({
       sourceRepoRoot,
       sourceWorkspaceRoot,
@@ -112,6 +130,10 @@ export async function ensureRunManagedWorkspace(input: {
     runId: input.run.id,
     sourceRepoRoot,
     worktreeRepoRoot
+  });
+  await provisionManagedWorkspaceToolchain({
+    sourceRepoRoot,
+    managedRepoRoot: worktreeRepoRoot
   });
   const validatedManagedWorkspaceRoot = await validateManagedWorkspace({
     sourceRepoRoot,
@@ -188,6 +210,12 @@ async function createManagedWorkspace(input: {
 
   const untrackedPaths = await listUntrackedPaths(input.sourceRepoRoot);
   for (const relativePath of untrackedPaths) {
+    if (
+      relativePath === "node_modules" ||
+      relativePath.startsWith(`node_modules${"/"}`)
+    ) {
+      continue;
+    }
     const sourcePath = join(input.sourceRepoRoot, relativePath);
     const destinationPath = join(input.worktreeRepoRoot, relativePath);
     await mkdir(dirname(destinationPath), { recursive: true });
@@ -232,6 +260,25 @@ async function createManagedWorkspace(input: {
       }
     );
   }
+}
+
+async function provisionManagedWorkspaceToolchain(input: {
+  sourceRepoRoot: string;
+  managedRepoRoot: string;
+}): Promise<void> {
+  const sourceNodeModulesPath = join(input.sourceRepoRoot, "node_modules");
+  const sourceNodeModulesStat = await stat(sourceNodeModulesPath).catch(() => null);
+  if (!sourceNodeModulesStat?.isDirectory()) {
+    return;
+  }
+
+  const managedNodeModulesPath = join(input.managedRepoRoot, "node_modules");
+  const managedNodeModulesStat = await lstat(managedNodeModulesPath).catch(() => null);
+  if (managedNodeModulesStat) {
+    return;
+  }
+
+  await symlink(sourceNodeModulesPath, managedNodeModulesPath, "dir");
 }
 
 async function validateManagedWorkspace(input: {

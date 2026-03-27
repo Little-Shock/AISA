@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -21,6 +21,8 @@ import {
   assessExecutionVerificationToolchain,
   Orchestrator
 } from "../packages/orchestrator/src/index.js";
+import { ensureRunManagedWorkspace } from "../packages/orchestrator/src/run-workspace.js";
+import { createDefaultRunWorkspaceScopePolicy } from "../packages/orchestrator/src/workspace-scope.js";
 import { synthesizeAttemptEvaluation } from "../packages/judge/src/index.js";
 import {
   appendRunJournal,
@@ -957,6 +959,75 @@ async function assertExplicitPnpmVerificationPlanNeedsLocalNodeModules(): Promis
     assessment.blocked_pnpm_commands,
     ["pnpm typecheck", "pnpm verify:runtime"],
     "explicit_pnpm_verification_plan_needs_local_node_modules: explicit pnpm replay commands should be flagged"
+  );
+}
+
+async function assertManagedWorkspaceInheritsLocalNodeModules(): Promise<void> {
+  const rootDir = await mkdtemp(join(tmpdir(), "aisa-managed-workspace-node-modules-"));
+  await initializeGitRepo(rootDir, false);
+  await seedPackageJsonScriptsWithoutNodeModules(rootDir);
+  await mkdir(join(rootDir, "node_modules"), { recursive: true });
+  await writeFile(join(rootDir, "node_modules", ".placeholder"), "toolchain\n", "utf8");
+
+  const { run } = await bootstrapRun(rootDir, "managed-workspace-node-modules");
+  const managedRun = await ensureRunManagedWorkspace({
+    run,
+    policy: createDefaultRunWorkspaceScopePolicy(rootDir)
+  });
+
+  assert.ok(
+    managedRun.managed_workspace_root,
+    "managed_workspace_inherits_local_node_modules: expected a managed workspace to be provisioned"
+  );
+
+  const assessment = await assessExecutionVerificationToolchain({
+    workspaceRoot: managedRun.managed_workspace_root!,
+    verificationPlan: {
+      commands: [
+        {
+          purpose: "typecheck the workspace after the change",
+          command: "pnpm typecheck"
+        },
+        {
+          purpose: "replay the runtime regression suite after the change",
+          command: "pnpm verify:runtime"
+        }
+      ]
+    }
+  });
+
+  assert.equal(
+    assessment.has_local_node_modules,
+    true,
+    "managed_workspace_inherits_local_node_modules: managed workspace should see local node_modules from the source repo"
+  );
+
+  const managedNodeModulesStat = await lstat(
+    join(managedRun.managed_workspace_root!, "node_modules")
+  );
+  assert.equal(
+    managedNodeModulesStat.isSymbolicLink(),
+    true,
+    "managed_workspace_inherits_local_node_modules: managed workspace should link the source node_modules instead of copying it"
+  );
+
+  await rm(join(managedRun.managed_workspace_root!, "node_modules"), {
+    recursive: true,
+    force: true
+  });
+
+  const resumedManagedRun = await ensureRunManagedWorkspace({
+    run: managedRun,
+    policy: createDefaultRunWorkspaceScopePolicy(rootDir)
+  });
+  const reprovisionedNodeModulesStat = await lstat(
+    join(resumedManagedRun.managed_workspace_root!, "node_modules")
+  );
+
+  assert.equal(
+    reprovisionedNodeModulesStat.isSymbolicLink(),
+    true,
+    "managed_workspace_inherits_local_node_modules: existing managed workspaces should reprovision the source node_modules link on resume"
   );
 }
 
@@ -3475,6 +3546,20 @@ async function main(): Promise<void> {
   } catch (error) {
     results.push({
       id: "cli_synthesizer_nonzero_exit_blocks_evaluation_persistence",
+      status: "fail",
+      error: error instanceof Error ? error.message : String(error)
+    });
+  }
+
+  try {
+    await assertManagedWorkspaceInheritsLocalNodeModules();
+    results.push({
+      id: "managed_workspace_inherits_local_node_modules",
+      status: "pass"
+    });
+  } catch (error) {
+    results.push({
+      id: "managed_workspace_inherits_local_node_modules",
       status: "fail",
       error: error instanceof Error ? error.message : String(error)
     });

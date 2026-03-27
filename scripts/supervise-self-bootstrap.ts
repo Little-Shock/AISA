@@ -1,0 +1,725 @@
+import { spawn } from "node:child_process";
+import {
+  lstat,
+  mkdir,
+  readFile,
+  stat,
+  symlink,
+  writeFile
+} from "node:fs/promises";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import type { Attempt, CurrentDecision, Run, RunJournalEntry } from "../packages/domain/src/index.js";
+import {
+  ensureWorkspace,
+  getAttemptHeartbeat,
+  getAttemptRuntimeState,
+  getCurrentDecision,
+  getRun,
+  listAttempts,
+  listRunJournal,
+  listRuns,
+  resolveWorkspacePaths
+} from "../packages/state-store/src/index.js";
+
+type CliOptions = {
+  apiBaseUrl: string;
+  focus?: string;
+  once: boolean;
+  ownerId: string;
+  pollMs: number;
+  runId?: string;
+  staleAttemptMs: number;
+  stateFile?: string;
+  targetCompletedAttempts: number;
+  waitingRelaunchMs: number;
+};
+
+type SupervisorState = {
+  version: 1;
+  started_at: string;
+  updated_at: string;
+  active_run_id: string | null;
+  supervised_run_ids: string[];
+  completed_attempt_keys: string[];
+  repair_log: Array<{
+    ts: string;
+    run_id: string;
+    action: string;
+    detail: string;
+  }>;
+};
+
+type RunSnapshot = {
+  run: Run;
+  current: CurrentDecision | null;
+  attempts: Attempt[];
+  journal: RunJournalEntry[];
+  latestAttempt: Attempt | null;
+  latestHeartbeat: Awaited<ReturnType<typeof getAttemptHeartbeat>>;
+  latestRuntimeState: Awaited<ReturnType<typeof getAttemptRuntimeState>>;
+};
+
+type JsonResponse<T> = T & {
+  message?: string;
+};
+
+const DEFAULT_OWNER_ID = "atou";
+const DEFAULT_TARGET_COMPLETED_ATTEMPTS = 40;
+const DEFAULT_POLL_MS = 15_000;
+const DEFAULT_STALE_ATTEMPT_MS = 180_000;
+const DEFAULT_WAITING_RELAUNCH_MS = 45_000;
+const MAX_REPAIR_LOG_ENTRIES = 200;
+const SELF_BOOTSTRAP_RUN_TITLE = "AISA 自举下一步规划";
+
+function parseArgs(argv: string[]): CliOptions {
+  const defaultPort = process.env.CONTROL_API_PORT ?? process.env.PORT ?? "8787";
+  const defaultHost = process.env.CONTROL_API_HOST ?? process.env.HOST ?? "127.0.0.1";
+  const options: CliOptions = {
+    apiBaseUrl: process.env.AISA_CONTROL_API_URL ?? `http://${defaultHost}:${defaultPort}`,
+    once: false,
+    ownerId: DEFAULT_OWNER_ID,
+    pollMs: DEFAULT_POLL_MS,
+    staleAttemptMs: DEFAULT_STALE_ATTEMPT_MS,
+    targetCompletedAttempts: DEFAULT_TARGET_COMPLETED_ATTEMPTS,
+    waitingRelaunchMs: DEFAULT_WAITING_RELAUNCH_MS
+  };
+
+  for (let index = 0; index < argv.length; index += 1) {
+    const token = argv[index];
+
+    if (token === "--") {
+      continue;
+    }
+
+    if (token === "--api-base-url" && argv[index + 1]) {
+      options.apiBaseUrl = argv[index + 1]!;
+      index += 1;
+      continue;
+    }
+
+    if (token === "--focus" && argv[index + 1]) {
+      options.focus = argv[index + 1]!;
+      index += 1;
+      continue;
+    }
+
+    if (token === "--once") {
+      options.once = true;
+      continue;
+    }
+
+    if (token === "--owner" && argv[index + 1]) {
+      options.ownerId = argv[index + 1]!;
+      index += 1;
+      continue;
+    }
+
+    if (token === "--poll-ms" && argv[index + 1]) {
+      options.pollMs = parsePositiveInt(argv[index + 1]!, "--poll-ms");
+      index += 1;
+      continue;
+    }
+
+    if (token === "--run-id" && argv[index + 1]) {
+      options.runId = argv[index + 1]!;
+      index += 1;
+      continue;
+    }
+
+    if (token === "--stale-attempt-ms" && argv[index + 1]) {
+      options.staleAttemptMs = parsePositiveInt(argv[index + 1]!, "--stale-attempt-ms");
+      index += 1;
+      continue;
+    }
+
+    if (token === "--state-file" && argv[index + 1]) {
+      options.stateFile = argv[index + 1]!;
+      index += 1;
+      continue;
+    }
+
+    if (token === "--target-completed-attempts" && argv[index + 1]) {
+      options.targetCompletedAttempts = parsePositiveInt(
+        argv[index + 1]!,
+        "--target-completed-attempts"
+      );
+      index += 1;
+      continue;
+    }
+
+    if (token === "--waiting-relaunch-ms" && argv[index + 1]) {
+      options.waitingRelaunchMs = parsePositiveInt(
+        argv[index + 1]!,
+        "--waiting-relaunch-ms"
+      );
+      index += 1;
+      continue;
+    }
+
+    throw new Error(`Unknown argument: ${token}`);
+  }
+
+  return options;
+}
+
+function parsePositiveInt(raw: string, flag: string): number {
+  const value = Number.parseInt(raw, 10);
+  if (!Number.isFinite(value) || value <= 0) {
+    throw new Error(`${flag} expects a positive integer, got: ${raw}`);
+  }
+  return value;
+}
+
+function resolveRepositoryRoot(): string {
+  return dirname(dirname(fileURLToPath(import.meta.url)));
+}
+
+function isSelfBootstrapRun(run: Run): boolean {
+  return run.title === SELF_BOOTSTRAP_RUN_TITLE;
+}
+
+function nowIso(): string {
+  return new Date().toISOString();
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function logLine(message: string): void {
+  console.log(`[${nowIso()}] ${message}`);
+}
+
+async function loadSupervisorState(stateFile: string): Promise<SupervisorState | null> {
+  try {
+    const raw = await readFile(stateFile, "utf8");
+    const parsed = JSON.parse(raw) as Partial<SupervisorState>;
+    if (parsed.version !== 1) {
+      throw new Error(`Unsupported supervisor state version: ${String(parsed.version)}`);
+    }
+    if (!Array.isArray(parsed.supervised_run_ids) || !Array.isArray(parsed.completed_attempt_keys)) {
+      throw new Error("Supervisor state is missing array fields.");
+    }
+    if (!Array.isArray(parsed.repair_log)) {
+      throw new Error("Supervisor state is missing repair_log.");
+    }
+    return {
+      version: 1,
+      started_at: String(parsed.started_at),
+      updated_at: String(parsed.updated_at),
+      active_run_id:
+        typeof parsed.active_run_id === "string" ? parsed.active_run_id : null,
+      supervised_run_ids: parsed.supervised_run_ids.map((entry) => String(entry)),
+      completed_attempt_keys: parsed.completed_attempt_keys.map((entry) => String(entry)),
+      repair_log: parsed.repair_log.map((entry) => ({
+        ts: String(entry.ts),
+        run_id: String(entry.run_id),
+        action: String(entry.action),
+        detail: String(entry.detail)
+      }))
+    };
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code === "ENOENT") {
+      return null;
+    }
+    throw error;
+  }
+}
+
+async function saveSupervisorState(stateFile: string, state: SupervisorState): Promise<void> {
+  await mkdir(dirname(stateFile), { recursive: true });
+  await writeFile(stateFile, `${JSON.stringify(state, null, 2)}\n`, "utf8");
+}
+
+function createInitialSupervisorState(): SupervisorState {
+  const ts = nowIso();
+  return {
+    version: 1,
+    started_at: ts,
+    updated_at: ts,
+    active_run_id: null,
+    supervised_run_ids: [],
+    completed_attempt_keys: [],
+    repair_log: []
+  };
+}
+
+function recordRepair(
+  state: SupervisorState,
+  runId: string,
+  action: string,
+  detail: string
+): void {
+  state.repair_log.push({
+    ts: nowIso(),
+    run_id: runId,
+    action,
+    detail
+  });
+  if (state.repair_log.length > MAX_REPAIR_LOG_ENTRIES) {
+    state.repair_log.splice(0, state.repair_log.length - MAX_REPAIR_LOG_ENTRIES);
+  }
+}
+
+function trackRun(state: SupervisorState, runId: string): void {
+  if (!state.supervised_run_ids.includes(runId)) {
+    state.supervised_run_ids.push(runId);
+  }
+  state.active_run_id = runId;
+}
+
+function trackCompletedAttempts(state: SupervisorState, snapshot: RunSnapshot): number {
+  for (const attempt of snapshot.attempts) {
+    if (attempt.status !== "completed") {
+      continue;
+    }
+    const key = `${snapshot.run.id}:${attempt.id}`;
+    if (!state.completed_attempt_keys.includes(key)) {
+      state.completed_attempt_keys.push(key);
+    }
+  }
+
+  return state.completed_attempt_keys.length;
+}
+
+async function postJson<TResponse>(
+  apiBaseUrl: string,
+  path: string,
+  body?: unknown
+): Promise<JsonResponse<TResponse>> {
+  const response = await fetch(new URL(path, apiBaseUrl), {
+    method: "POST",
+    headers: body === undefined ? undefined : { "content-type": "application/json" },
+    body: body === undefined ? undefined : JSON.stringify(body)
+  });
+  const text = await response.text();
+  const payload = text.length > 0 ? (JSON.parse(text) as JsonResponse<TResponse>) : ({} as JsonResponse<TResponse>);
+
+  if (!response.ok) {
+    const message =
+      typeof payload.message === "string" && payload.message.length > 0
+        ? payload.message
+        : `HTTP ${response.status} ${response.statusText}`;
+    throw new Error(`${path} failed: ${message}`);
+  }
+
+  return payload;
+}
+
+async function createSelfBootstrapRun(
+  apiBaseUrl: string,
+  options: Pick<CliOptions, "focus" | "ownerId">
+): Promise<string> {
+  const payload = await postJson<{
+    run: Run;
+  }>(apiBaseUrl, "/runs/self-bootstrap", {
+    owner_id: options.ownerId,
+    focus: options.focus,
+    launch: true,
+    seed_steer: true
+  });
+
+  return payload.run.id;
+}
+
+async function launchRun(apiBaseUrl: string, runId: string): Promise<void> {
+  await postJson(apiBaseUrl, `/runs/${runId}/launch`);
+}
+
+async function resolveGitRepoRoot(workspaceRoot: string): Promise<string | null> {
+  return await new Promise((resolve, reject) => {
+    const child = spawn("git", ["-C", workspaceRoot, "rev-parse", "--show-toplevel"], {
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk;
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk;
+    });
+    child.on("error", reject);
+    child.on("close", (exitCode) => {
+      if (exitCode === 0) {
+        resolve(stdout.trim());
+        return;
+      }
+
+      if (stderr.includes("not a git repository")) {
+        resolve(null);
+        return;
+      }
+
+      reject(new Error(`git rev-parse failed for ${workspaceRoot}: ${stderr.trim()}`));
+    });
+  });
+}
+
+async function repairManagedWorkspaceNodeModules(run: Run): Promise<{
+  status: "repaired" | "skipped";
+  detail: string;
+}> {
+  if (!run.managed_workspace_root) {
+    return {
+      status: "skipped",
+      detail: "run 还没有 managed workspace"
+    };
+  }
+
+  const sourceRepoRoot = await resolveGitRepoRoot(run.workspace_root);
+  const managedRepoRoot = await resolveGitRepoRoot(run.managed_workspace_root);
+  if (!sourceRepoRoot || !managedRepoRoot) {
+    throw new Error(`无法解析 run ${run.id} 的 git worktree 根目录`);
+  }
+
+  const sourceNodeModulesPath = join(sourceRepoRoot, "node_modules");
+  const sourceNodeModulesStat = await stat(sourceNodeModulesPath).catch(() => null);
+  if (!sourceNodeModulesStat?.isDirectory()) {
+    throw new Error(`源仓库 ${sourceRepoRoot} 没有可复用的 node_modules`);
+  }
+
+  const managedNodeModulesPath = join(managedRepoRoot, "node_modules");
+  const managedNodeModulesStat = await lstat(managedNodeModulesPath).catch(() => null);
+  if (managedNodeModulesStat) {
+    return {
+      status: "skipped",
+      detail: `${managedNodeModulesPath} 已存在`
+    };
+  }
+
+  await symlink(sourceNodeModulesPath, managedNodeModulesPath, "dir");
+  return {
+    status: "repaired",
+    detail: `已把 ${managedNodeModulesPath} 链接到 ${sourceNodeModulesPath}`
+  };
+}
+
+async function loadRunSnapshot(
+  workspaceRoot: string,
+  runId: string
+): Promise<RunSnapshot> {
+  const workspacePaths = resolveWorkspacePaths(workspaceRoot);
+  const run = await getRun(workspacePaths, runId);
+  const current = await getCurrentDecision(workspacePaths, runId);
+  const attempts = await listAttempts(workspacePaths, runId);
+  const journal = await listRunJournal(workspacePaths, runId);
+  const latestAttempt = attempts.at(-1) ?? null;
+  const latestHeartbeat = latestAttempt
+    ? await getAttemptHeartbeat(workspacePaths, runId, latestAttempt.id)
+    : null;
+  const latestRuntimeState = latestAttempt
+    ? await getAttemptRuntimeState(workspacePaths, runId, latestAttempt.id)
+    : null;
+
+  return {
+    run,
+    current,
+    attempts,
+    journal,
+    latestAttempt,
+    latestHeartbeat,
+    latestRuntimeState
+  };
+}
+
+async function findLatestSelfBootstrapRunId(workspaceRoot: string): Promise<string | null> {
+  const workspacePaths = resolveWorkspacePaths(workspaceRoot);
+  const runs = await listRuns(workspacePaths);
+  const latest = runs.find((run) => isSelfBootstrapRun(run)) ?? null;
+  return latest?.id ?? null;
+}
+
+function lastJournalEvent(snapshot: RunSnapshot, type: string): RunJournalEntry | null {
+  for (let index = snapshot.journal.length - 1; index >= 0; index -= 1) {
+    const entry = snapshot.journal[index]!;
+    if (entry.type === type) {
+      return entry;
+    }
+  }
+  return null;
+}
+
+function getMostRecentActivityTs(snapshot: RunSnapshot): string | null {
+  return (
+    snapshot.latestHeartbeat?.heartbeat_at ??
+    snapshot.latestRuntimeState?.updated_at ??
+    snapshot.latestRuntimeState?.last_event_at ??
+    snapshot.current?.updated_at ??
+    snapshot.latestAttempt?.started_at ??
+    snapshot.run.updated_at
+  );
+}
+
+function ageMs(ts: string | null): number | null {
+  if (!ts) {
+    return null;
+  }
+  const time = Date.parse(ts);
+  if (Number.isNaN(time)) {
+    return null;
+  }
+  return Date.now() - time;
+}
+
+function hasMissingNodeModulesBlocker(snapshot: RunSnapshot): boolean {
+  const blockingReason = snapshot.current?.blocking_reason ?? "";
+  return /local node_modules/i.test(blockingReason);
+}
+
+function hasTransientBlocker(snapshot: RunSnapshot): boolean {
+  const blockingReason = snapshot.current?.blocking_reason ?? "";
+  return /(429|rate limit|timed out|timeout|temporarily unavailable|service unavailable|econnreset|connection reset)/i.test(
+    blockingReason
+  );
+}
+
+function hasHardBoundaryBlocker(snapshot: RunSnapshot): boolean {
+  const blockingReason = snapshot.current?.blocking_reason ?? "";
+  return /超出当前 run 的工作区范围|workspace scope|not a git worktree|记录的隔离工作区不是 git worktree|restart before the next dispatch/i.test(
+    blockingReason
+  );
+}
+
+function shouldRelaunchWaitingRun(
+  snapshot: RunSnapshot,
+  options: Pick<CliOptions, "waitingRelaunchMs">
+): boolean {
+  if (snapshot.current?.run_status !== "waiting_steer") {
+    return false;
+  }
+
+  if (hasHardBoundaryBlocker(snapshot)) {
+    return false;
+  }
+
+  if (hasMissingNodeModulesBlocker(snapshot) || hasTransientBlocker(snapshot)) {
+    return true;
+  }
+
+  if (lastJournalEvent(snapshot, "run.auto_resume.exhausted")) {
+    return true;
+  }
+
+  const waitingAgeMs = ageMs(snapshot.current.updated_at);
+  return waitingAgeMs !== null && waitingAgeMs >= options.waitingRelaunchMs;
+}
+
+function shouldRotateRun(snapshot: RunSnapshot): boolean {
+  if (
+    snapshot.current?.run_status === "completed" ||
+    snapshot.current?.run_status === "failed" ||
+    snapshot.current?.run_status === "cancelled"
+  ) {
+    return true;
+  }
+
+  if (snapshot.current?.run_status !== "waiting_steer") {
+    return false;
+  }
+
+  if (hasMissingNodeModulesBlocker(snapshot) || hasTransientBlocker(snapshot)) {
+    return false;
+  }
+
+  if (hasHardBoundaryBlocker(snapshot)) {
+    return false;
+  }
+
+  return lastJournalEvent(snapshot, "run.auto_resume.exhausted") !== null;
+}
+
+function shouldRelaunchStaleAttempt(
+  snapshot: RunSnapshot,
+  options: Pick<CliOptions, "staleAttemptMs">
+): boolean {
+  if (snapshot.current?.run_status !== "running") {
+    return false;
+  }
+
+  if (snapshot.latestAttempt?.status !== "running") {
+    return false;
+  }
+
+  if (snapshot.latestHeartbeat?.status === "active") {
+    const heartbeatAgeMs = ageMs(snapshot.latestHeartbeat.heartbeat_at);
+    if (heartbeatAgeMs !== null && heartbeatAgeMs < options.staleAttemptMs) {
+      return false;
+    }
+  }
+
+  const mostRecentActivityAgeMs = ageMs(getMostRecentActivityTs(snapshot));
+  return mostRecentActivityAgeMs !== null && mostRecentActivityAgeMs >= options.staleAttemptMs;
+}
+
+function renderSnapshotLine(snapshot: RunSnapshot, completedAttempts: number, target: number): string {
+  const latestAttempt = snapshot.latestAttempt;
+  const current = snapshot.current;
+  return [
+    `run=${snapshot.run.id}`,
+    `status=${current?.run_status ?? "unknown"}`,
+    `latest=${latestAttempt ? `${latestAttempt.attempt_type}/${latestAttempt.status}` : "none"}`,
+    `completed=${completedAttempts}/${target}`,
+    current?.blocking_reason ? `blocker=${current.blocking_reason}` : null
+  ]
+    .filter(Boolean)
+    .join(" | ");
+}
+
+async function ensureActiveRunId(
+  workspaceRoot: string,
+  apiBaseUrl: string,
+  state: SupervisorState,
+  options: Pick<CliOptions, "focus" | "ownerId" | "runId">
+): Promise<string> {
+  const candidates = [options.runId, state.active_run_id].filter(
+    (value): value is string => typeof value === "string" && value.length > 0
+  );
+
+  for (const runId of candidates) {
+    try {
+      await getRun(resolveWorkspacePaths(workspaceRoot), runId);
+      trackRun(state, runId);
+      return runId;
+    } catch {
+      continue;
+    }
+  }
+
+  const latestRunId = await findLatestSelfBootstrapRunId(workspaceRoot);
+  if (latestRunId) {
+    trackRun(state, latestRunId);
+    return latestRunId;
+  }
+
+  const newRunId = await createSelfBootstrapRun(apiBaseUrl, options);
+  trackRun(state, newRunId);
+  recordRepair(state, newRunId, "create_run", "创建新的 self-bootstrap run");
+  logLine(`已创建新的 self-bootstrap run ${newRunId}`);
+  return newRunId;
+}
+
+async function runSupervisorCycle(input: {
+  workspaceRoot: string;
+  apiBaseUrl: string;
+  state: SupervisorState;
+  options: Pick<
+    CliOptions,
+    "focus" | "ownerId" | "runId" | "staleAttemptMs" | "targetCompletedAttempts" | "waitingRelaunchMs"
+  >;
+}): Promise<{
+  snapshot: RunSnapshot;
+  completedAttempts: number;
+  reachedTarget: boolean;
+}> {
+  const runId = await ensureActiveRunId(
+    input.workspaceRoot,
+    input.apiBaseUrl,
+    input.state,
+    input.options
+  );
+  const snapshot = await loadRunSnapshot(input.workspaceRoot, runId);
+  trackRun(input.state, runId);
+  const completedAttempts = trackCompletedAttempts(input.state, snapshot);
+  logLine(renderSnapshotLine(snapshot, completedAttempts, input.options.targetCompletedAttempts));
+
+  if (completedAttempts >= input.options.targetCompletedAttempts) {
+    return {
+      snapshot,
+      completedAttempts,
+      reachedTarget: true
+    };
+  }
+
+  if (hasMissingNodeModulesBlocker(snapshot)) {
+    const repair = await repairManagedWorkspaceNodeModules(snapshot.run);
+    recordRepair(input.state, snapshot.run.id, "repair_node_modules", repair.detail);
+    logLine(`${snapshot.run.id} 修复 toolchain 卡点 ${repair.detail}`);
+    await launchRun(input.apiBaseUrl, snapshot.run.id);
+    recordRepair(input.state, snapshot.run.id, "launch_run", "node_modules 修复后重新启动");
+    logLine(`${snapshot.run.id} 已重新启动`);
+    return {
+      snapshot,
+      completedAttempts,
+      reachedTarget: false
+    };
+  }
+
+  if (shouldRelaunchStaleAttempt(snapshot, input.options)) {
+    await launchRun(input.apiBaseUrl, snapshot.run.id);
+    recordRepair(input.state, snapshot.run.id, "launch_run", "检测到 stale running attempt，已重新启动 run");
+    logLine(`${snapshot.run.id} 检测到 stale attempt，已重新启动`);
+    return {
+      snapshot,
+      completedAttempts,
+      reachedTarget: false
+    };
+  }
+
+  if (shouldRelaunchWaitingRun(snapshot, input.options)) {
+    await launchRun(input.apiBaseUrl, snapshot.run.id);
+    recordRepair(input.state, snapshot.run.id, "launch_run", "waiting_steer 可恢复，已重新启动 run");
+    logLine(`${snapshot.run.id} waiting_steer 可恢复，已重新启动`);
+    return {
+      snapshot,
+      completedAttempts,
+      reachedTarget: false
+    };
+  }
+
+  if (shouldRotateRun(snapshot)) {
+    const newRunId = await createSelfBootstrapRun(input.apiBaseUrl, input.options);
+    trackRun(input.state, newRunId);
+    recordRepair(
+      input.state,
+      snapshot.run.id,
+      "rotate_run",
+      `当前 run 不再值得续跑，已切到 ${newRunId}`
+    );
+    logLine(`${snapshot.run.id} 已轮换到新的 self-bootstrap run ${newRunId}`);
+  }
+
+  return {
+    snapshot,
+    completedAttempts,
+    reachedTarget: false
+  };
+}
+
+async function main(): Promise<void> {
+  const repoRoot = resolveRepositoryRoot();
+  const options = parseArgs(process.argv.slice(2));
+  const stateFile = options.stateFile ?? join(repoRoot, "artifacts", "self-bootstrap-supervisor-state.json");
+  const workspacePaths = resolveWorkspacePaths(repoRoot);
+  await ensureWorkspace(workspacePaths);
+
+  const state = (await loadSupervisorState(stateFile)) ?? createInitialSupervisorState();
+
+  while (true) {
+    const { completedAttempts, reachedTarget } = await runSupervisorCycle({
+      workspaceRoot: repoRoot,
+      apiBaseUrl: options.apiBaseUrl,
+      state,
+      options
+    });
+
+    state.updated_at = nowIso();
+    await saveSupervisorState(stateFile, state);
+
+    if (reachedTarget) {
+      logLine(`已达到目标，累计完成 ${completedAttempts} 次 attempt`);
+      return;
+    }
+
+    if (options.once) {
+      return;
+    }
+
+    await sleep(options.pollMs);
+  }
+}
+
+await main();

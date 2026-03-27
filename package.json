@@ -18,7 +18,8 @@
     "verify:worker-adapter": "node --import tsx scripts/verify-worker-adapter.ts",
     "verify:self-bootstrap": "node --import tsx scripts/verify-self-bootstrap.ts",
     "bootstrap:self": "node --import tsx scripts/bootstrap-self-run.ts",
-    "drive:run": "node --import tsx scripts/drive-run.ts"
+    "drive:run": "node --import tsx scripts/drive-run.ts",
+    "supervise:self-bootstrap": "node --import tsx scripts/supervise-self-bootstrap.ts"
   },
   "dependencies": {
     "@autoresearch/domain": "workspace:*",

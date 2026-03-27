@@ -24,6 +24,7 @@
 - execution 会留下 replayable verification contract、runtime verification、review packet 和工件清单
 - runtime 改到 live 源码时，会显式要求重启，避免旧内存继续派发
 - `bootstrap:self` 可以创建 self-bootstrap run，并把 runtime health snapshot 带进自举入口
+- `supervise:self-bootstrap` 可以盯住 self-bootstrap run，自动修复 `managed worktree` 缺本地 toolchain 这类卡点，并在 run 死路时续起新的自举 run
 
 这意味着它已经不只是一个展示状态的原型，而是一套能自己跑 runtime 回归、自己继续开发自己的最小工作台。
 
@@ -81,6 +82,12 @@ pnpm install
 
 ```bash
 pnpm dev
+```
+
+如果只想让自举 run 在后台自己续跑，可以直接开监督脚本：
+
+```bash
+pnpm supervise:self-bootstrap -- --target-completed-attempts 40
 ```
 
 默认地址：
