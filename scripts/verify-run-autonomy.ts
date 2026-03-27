@@ -1203,7 +1203,23 @@ async function verifyRateLimitedResearchRetriesQuickly(): Promise<void> {
 }
 
 async function verifyRuntimeSourceDriftBlocksAutoResume(): Promise<void> {
-  const { run, workspacePaths } = await bootstrapRun("runtime-source-drift-blocks-auto-resume");
+  const { run, workspacePaths, rootDir } = await bootstrapRun(
+    "runtime-source-drift-blocks-auto-resume"
+  );
+  await writeExecutionWorkspacePackage(rootDir);
+  await initializeGitRepo(rootDir);
+
+  const orchestrator = new Orchestrator(
+    workspacePaths,
+    new RecoveryExecutionAdapter() as never,
+    undefined,
+    60_000,
+    {
+      waitingHumanAutoResumeMs: 30,
+      runtimeSourceDriftAutoResumeMs: 30,
+      maxAutomaticResumeCycles: 2
+    }
+  );
 
   const completedExecution = updateAttempt(
     createAttempt({
@@ -1267,17 +1283,6 @@ async function verifyRuntimeSourceDriftBlocksAutoResume(): Promise<void> {
     })
   );
 
-  const orchestrator = new Orchestrator(
-    workspacePaths,
-    new RecoveryExecutionAdapter() as never,
-    undefined,
-    60_000,
-    {
-      waitingHumanAutoResumeMs: 30,
-      maxAutomaticResumeCycles: 2
-    }
-  );
-
   await wait(40);
   await settle(orchestrator, 6, 80);
 
@@ -1304,6 +1309,122 @@ async function verifyRuntimeSourceDriftBlocksAutoResume(): Promise<void> {
         entry.payload.reason === "runtime_source_drift"
     ),
     "runtime source drift should leave an explicit automatic-resume blocker"
+  );
+}
+
+async function verifyRuntimeSourceDriftAutoResumesAfterRestart(): Promise<void> {
+  const { run, workspacePaths, rootDir } = await bootstrapRun(
+    "runtime-source-drift-auto-resumes-after-restart"
+  );
+  await writeExecutionWorkspacePackage(rootDir);
+  await initializeGitRepo(rootDir);
+
+  const completedExecution = updateAttempt(
+    createAttempt({
+      run_id: run.id,
+      attempt_type: "execution",
+      worker: "fake-codex",
+      objective: "Resume execution after the runtime restarts.",
+      success_criteria: run.success_criteria,
+      workspace_root: run.workspace_root
+    }),
+    {
+      status: "completed",
+      started_at: new Date().toISOString(),
+      ended_at: new Date().toISOString()
+    }
+  );
+
+  const restartMessage = [
+    "Execution changed live runtime source files already loaded by the in-process control-api/orchestrator.",
+    "Restart before the next dispatch. Affected files: packages/orchestrator/src/index.ts"
+  ].join(" ");
+
+  await saveAttempt(workspacePaths, completedExecution);
+  await saveCurrentDecision(
+    workspacePaths,
+    createCurrentDecision({
+      run_id: run.id,
+      run_status: "waiting_steer",
+      latest_attempt_id: completedExecution.id,
+      recommended_next_action: "continue_execution",
+      recommended_attempt_type: "execution",
+      summary: restartMessage,
+      blocking_reason: restartMessage,
+      waiting_for_human: true
+    })
+  );
+  await appendRunJournal(
+    workspacePaths,
+    createRunJournalEntry({
+      run_id: run.id,
+      attempt_id: completedExecution.id,
+      type: "attempt.completed",
+      payload: {
+        recommendation: "continue",
+        goal_progress: 0.75,
+        suggested_attempt_type: "execution"
+      }
+    })
+  );
+  await appendRunJournal(
+    workspacePaths,
+    createRunJournalEntry({
+      run_id: run.id,
+      attempt_id: completedExecution.id,
+      type: "attempt.restart_required",
+      payload: {
+        reason: "runtime_source_drift",
+        message: restartMessage,
+        affected_files: ["packages/orchestrator/src/index.ts"]
+      }
+    })
+  );
+
+  await wait(40);
+
+  const orchestrator = new Orchestrator(
+    workspacePaths,
+    new RecoveryExecutionAdapter() as never,
+    undefined,
+    60_000,
+    {
+      waitingHumanAutoResumeMs: 30,
+      runtimeSourceDriftAutoResumeMs: 30,
+      maxAutomaticResumeCycles: 2
+    }
+  );
+
+  await settleUntil(orchestrator, {
+    workspacePaths,
+    runId: run.id,
+    predicate: (runStatus) => runStatus === "completed",
+    timeoutMs: 20_000,
+    delayMs: 120
+  });
+
+  const current = await getCurrentDecision(workspacePaths, run.id);
+  const attempts = await listAttempts(workspacePaths, run.id);
+  const journal = await listRunJournal(workspacePaths, run.id);
+
+  assert.ok(current, "current decision must exist");
+  assert.equal(current.waiting_for_human, false);
+  assert.equal(current.run_status, "completed");
+  assert.deepEqual(
+    attempts.map((attempt) => attempt.status),
+    ["completed", "completed"]
+  );
+  assert.ok(
+    journal.some(
+      (entry) =>
+        entry.type === "run.auto_resume.scheduled" &&
+        entry.payload.reason === "runtime_restarted_continue_execution"
+    ),
+    "runtime source drift should auto-resume quickly after a fresh restart"
+  );
+  assert.ok(
+    journal.some((entry) => entry.type === "attempt.verification.passed"),
+    "resumed execution should still pass runtime verification after restart"
   );
 }
 
@@ -1336,6 +1457,10 @@ async function main(): Promise<void> {
     {
       id: "runtime_source_drift_blocks_auto_resume",
       run: verifyRuntimeSourceDriftBlocksAutoResume
+    },
+    {
+      id: "runtime_source_drift_auto_resumes_after_restart",
+      run: verifyRuntimeSourceDriftAutoResumesAfterRestart
     },
     {
       id: "recovery_auto_resumes_execution",

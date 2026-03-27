@@ -109,6 +109,7 @@ export interface OrchestratorOptions {
   maxAutomaticResumeCycles?: number;
   providerRateLimitAutoResumeMs?: number;
   maxProviderRateLimitAutoResumeCycles?: number;
+  runtimeSourceDriftAutoResumeMs?: number;
   runWorkspaceScopePolicy?: RunWorkspaceScopePolicy;
 }
 
@@ -123,7 +124,9 @@ export class Orchestrator {
   private readonly maxAutomaticResumeCycles: number;
   private readonly providerRateLimitAutoResumeMs: number;
   private readonly maxProviderRateLimitAutoResumeCycles: number;
+  private readonly runtimeSourceDriftAutoResumeMs: number;
   private readonly runWorkspaceScopePolicy: RunWorkspaceScopePolicy;
+  private readonly instanceStartedAtMs: number;
 
   constructor(
     private readonly workspacePaths: WorkspacePaths,
@@ -146,9 +149,13 @@ export class Orchestrator {
     this.maxProviderRateLimitAutoResumeCycles =
       options.maxProviderRateLimitAutoResumeCycles ??
       readPositiveIntegerEnv("AISA_MAX_PROVIDER_RATE_LIMIT_AUTO_RESUME_CYCLES", 8);
+    this.runtimeSourceDriftAutoResumeMs =
+      options.runtimeSourceDriftAutoResumeMs ??
+      readPositiveIntegerEnv("AISA_RUNTIME_SOURCE_DRIFT_AUTO_RESUME_MS", 1_000);
     this.runWorkspaceScopePolicy =
       options.runWorkspaceScopePolicy ??
       createDefaultRunWorkspaceScopePolicy(this.workspacePaths.rootDir);
+    this.instanceStartedAtMs = Date.now();
   }
 
   start(): void {
@@ -1916,10 +1923,18 @@ export class Orchestrator {
       return null;
     }
 
-    const restartRequiredMessage = this.getAttemptJournalMessage(input.journal, latestAttempt.id, [
-      "attempt.restart_required"
-    ]);
-    if (restartRequiredMessage) {
+    const restartRequiredEntry = this.getLatestAttemptJournalEntry(
+      input.journal,
+      latestAttempt.id,
+      ["attempt.restart_required"]
+    );
+    const restartRequiredMessage = restartRequiredEntry
+      ? this.getReviewPacketFailureMessage(restartRequiredEntry.payload)
+      : null;
+    if (
+      restartRequiredMessage &&
+      !this.hasRuntimeRestartedSinceJournalEntry(restartRequiredEntry?.ts)
+    ) {
       return {
         reason: "runtime_source_drift",
         message: restartRequiredMessage
@@ -1968,6 +1983,25 @@ export class Orchestrator {
         summary: "人工窗口超时，系统自动恢复并重新启动首次研究。",
         blocking_reason: input.current.blocking_reason,
         reason: "no_attempts_yet"
+      };
+    }
+
+    const restartRequiredEntry = this.getLatestAttemptJournalEntry(
+      input.journal,
+      latestAttempt.id,
+      ["attempt.restart_required"]
+    );
+    if (
+      restartRequiredEntry &&
+      this.hasRuntimeRestartedSinceJournalEntry(restartRequiredEntry.ts) &&
+      latestAttempt.attempt_type === "execution"
+    ) {
+      return {
+        next_action: "continue_execution",
+        attempt_type: "execution",
+        summary: "检测到 runtime 已在 source drift 后重启，系统继续上一轮 execution。",
+        blocking_reason: null,
+        reason: "runtime_restarted_continue_execution"
       };
     }
 
@@ -2129,6 +2163,23 @@ export class Orchestrator {
     reasonPrefix?: string;
   } {
     const latestAttempt = this.getLatestAttempt(input.current, input.attempts);
+    const restartRequiredEntry =
+      latestAttempt === null
+        ? null
+        : this.getLatestAttemptJournalEntry(input.journal, latestAttempt.id, [
+            "attempt.restart_required"
+          ]);
+    if (
+      restartRequiredEntry &&
+      this.hasRuntimeRestartedSinceJournalEntry(restartRequiredEntry.ts)
+    ) {
+      return {
+        delayMs: this.runtimeSourceDriftAutoResumeMs,
+        maxCycles: this.maxAutomaticResumeCycles,
+        reasonPrefix: "runtime_restarted_continue_execution"
+      };
+    }
+
     if (!latestAttempt || latestAttempt.status !== "failed") {
       return {
         delayMs: this.waitingHumanAutoResumeMs,
@@ -2170,19 +2221,38 @@ export class Orchestrator {
     attemptId: string,
     entryTypes: string[]
   ): string | null {
+    const entry = this.getLatestAttemptJournalEntry(journal, attemptId, entryTypes);
+    return entry ? this.getReviewPacketFailureMessage(entry.payload) : null;
+  }
+
+  private getLatestAttemptJournalEntry(
+    journal: Awaited<ReturnType<typeof listRunJournal>>,
+    attemptId: string,
+    entryTypes: string[]
+  ): (Awaited<ReturnType<typeof listRunJournal>>)[number] | null {
     for (let index = journal.length - 1; index >= 0; index -= 1) {
       const entry = journal[index];
       if (!entry || entry.attempt_id !== attemptId || !entryTypes.includes(entry.type)) {
         continue;
       }
 
-      const message = this.getReviewPacketFailureMessage(entry.payload);
-      if (message) {
-        return message;
-      }
+      return entry;
     }
 
     return null;
+  }
+
+  private hasRuntimeRestartedSinceJournalEntry(ts: string | null | undefined): boolean {
+    if (!ts) {
+      return false;
+    }
+
+    const entryTsMs = Date.parse(ts);
+    if (Number.isNaN(entryTsMs)) {
+      return false;
+    }
+
+    return this.instanceStartedAtMs > entryTsMs;
   }
 
   private getRunWorkspaceScopeBlockedMessage(
