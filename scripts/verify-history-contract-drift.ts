@@ -1,4 +1,5 @@
-import { relative } from "node:path";
+import { relative, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   getAttemptContract,
   getAttemptReviewPacket,
@@ -8,7 +9,7 @@ import {
   resolveWorkspacePaths
 } from "../packages/state-store/src/index.ts";
 
-type HistoryContractDrift = {
+export type HistoryContractDrift = {
   run_id: string;
   attempt_id: string;
   status: string;
@@ -21,7 +22,7 @@ type HistoryContractDrift = {
   review_packet_file: string;
 };
 
-type HistoryContractDriftReport = {
+export type HistoryContractDriftReport = {
   status: "ok" | "drift_detected";
   summary: string;
   scanned_run_count: number;
@@ -40,7 +41,7 @@ function matchesStringArray(left: string[], right: string[]): boolean {
   );
 }
 
-async function buildHistoryContractDriftReport(
+export async function buildHistoryContractDriftReport(
   rootDir: string
 ): Promise<HistoryContractDriftReport> {
   const workspacePaths = resolveWorkspacePaths(rootDir);
@@ -143,7 +144,13 @@ async function main(): Promise<void> {
   }
 }
 
-main().catch((error) => {
-  console.error(error);
-  process.exitCode = 1;
-});
+const isDirectExecution =
+  typeof process.argv[1] === "string" &&
+  resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+
+if (isDirectExecution) {
+  main().catch((error) => {
+    console.error(error);
+    process.exitCode = 1;
+  });
+}

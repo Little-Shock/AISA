@@ -288,15 +288,15 @@ async function main(): Promise<void> {
   assert.equal(runtimeHealthSnapshot?.verify_runtime.status, "passed");
   assert.equal(
     runtimeHealthSnapshot?.history_contract_drift.status,
-    "drift_detected"
+    "ok"
   );
-  assert.equal(runtimeHealthSnapshot?.history_contract_drift.drift_count, 4);
+  assert.equal(runtimeHealthSnapshot?.history_contract_drift.drift_count, 0);
   assert.ok(
     steers[0]?.content.includes(bootstrapOutput.runtime_health_snapshot),
     "seeded steer should point to the runtime health snapshot path"
   );
   assert.ok(
-    steers[0]?.content.includes("drift_detected"),
+    steers[0]?.content.includes("ok"),
     "seeded steer should carry the history drift status"
   );
   assert.ok(
@@ -312,7 +312,7 @@ async function main(): Promise<void> {
     "first attempt should reference the persisted runtime health snapshot"
   );
   assert.ok(
-    attempts[0]?.objective.includes("drift_detected"),
+    attempts[0]?.objective.includes("ok"),
     "first attempt should carry the runtime drift status from the snapshot"
   );
   assert.deepEqual(
@@ -324,9 +324,9 @@ async function main(): Promise<void> {
         summary: runtimeHealthSnapshot?.verify_runtime.summary
       },
       history_contract_drift: {
-        status: "drift_detected",
+        status: "ok",
         summary: runtimeHealthSnapshot?.history_contract_drift.summary,
-        drift_count: 4
+        drift_count: 0
       },
       created_at: runtimeHealthSnapshot?.created_at
     },

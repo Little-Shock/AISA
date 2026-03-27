@@ -1,7 +1,5 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { readFile } from "node:fs/promises";
-import { join } from "node:path";
 
 type HistoryContractDrift = {
   run_id: string;
@@ -24,12 +22,6 @@ type HistoryContractDriftReport = {
   drift_count: number;
   drifts: HistoryContractDrift[];
   generated_at: string;
-};
-
-type HistoryContractDriftBaseline = {
-  run_id: string;
-  drift_count: number;
-  drifts: HistoryContractDrift[];
 };
 
 type ScriptResult = {
@@ -89,22 +81,6 @@ function formatScriptFailure(label: string, result: ScriptResult): string {
   ].join("\n\n");
 }
 
-function normalizeDriftEntry(entry: HistoryContractDrift) {
-  return {
-    run_id: entry.run_id,
-    attempt_id: entry.attempt_id,
-    status: entry.status,
-    objective_match: entry.objective_match,
-    success_criteria_match: entry.success_criteria_match,
-    review_packet_present: entry.review_packet_present,
-    review_packet_contract_matches_attempt:
-      entry.review_packet_contract_matches_attempt,
-    meta_file: entry.meta_file,
-    contract_file: entry.contract_file,
-    review_packet_file: entry.review_packet_file
-  };
-}
-
 async function assertRunLoopReplay(): Promise<void> {
   const result = await runTsxScript("scripts/verify-run-loop.ts");
   assert.equal(
@@ -152,39 +128,35 @@ async function assertSelfBootstrapReplay(): Promise<void> {
   );
 }
 
-async function assertHistoryContractDriftBaseline(): Promise<HistoryContractDriftReport> {
-  const baselinePath = join(
-    process.cwd(),
-    "Codex",
-    "2026-03-27-run_3374dc3f-contract-drift-baseline.json"
+async function assertHistoryContractDriftRepairReplay(): Promise<void> {
+  const result = await runTsxScript("scripts/verify-history-contract-drift-repair.ts");
+  assert.equal(
+    result.exitCode,
+    0,
+    formatScriptFailure("scripts/verify-history-contract-drift-repair.ts", result)
   );
-  const baseline = JSON.parse(
-    await readFile(baselinePath, "utf8")
-  ) as HistoryContractDriftBaseline;
+}
+
+async function assertHistoryContractDriftClean(): Promise<HistoryContractDriftReport> {
   const result = await runTsxScript("scripts/verify-history-contract-drift.ts");
 
   assert.equal(
     result.exitCode,
-    1,
-    "历史 contract 漂移体检应该先保持非零退出，直到旧现场被显式修复。\n\n" +
+    0,
+    "历史 contract 漂移体检应该已经回到零漂移。\n\n" +
       formatScriptFailure("scripts/verify-history-contract-drift.ts", result)
   );
 
   const report = JSON.parse(result.stdout) as HistoryContractDriftReport;
   assert.equal(
     report.status,
-    "drift_detected",
-    "历史 contract 漂移体检应该明确回报 drift_detected。"
+    "ok",
+    "历史 contract 漂移体检应该明确回报 ok。"
   );
   assert.equal(
     report.drift_count,
-    baseline.drift_count,
-    "历史 contract 漂移数量应该和锁定基线一致。"
-  );
-  assert.deepEqual(
-    report.drifts.map(normalizeDriftEntry),
-    baseline.drifts.map(normalizeDriftEntry),
-    "历史 contract 漂移明细应该和锁定基线一致。"
+    0,
+    "历史 contract 漂移数量应该已经归零。"
   );
 
   return report;
@@ -200,14 +172,15 @@ async function main(): Promise<void> {
   if (!skipSelfBootstrapReplay) {
     await assertSelfBootstrapReplay();
   }
-  const report = await assertHistoryContractDriftBaseline();
+  await assertHistoryContractDriftRepairReplay();
+  const report = await assertHistoryContractDriftClean();
 
   console.log(
     JSON.stringify(
       {
         summary: skipSelfBootstrapReplay
-          ? "runtime 回放通过，嵌套 self-bootstrap 回放已按防递归保护跳过，历史 contract 漂移体检也稳定锁住旧基线。"
-          : "runtime 回放通过，self-bootstrap 主链和历史 contract 漂移体检都稳定锁住了。",
+          ? "runtime 回放通过，嵌套 self-bootstrap 回放已按防递归保护跳过，历史 contract 漂移修复与体检都通过了。"
+          : "runtime 回放通过，self-bootstrap 主链和历史 contract 漂移修复都通过了。",
         run_loop: {
           status: "passed"
         },
@@ -228,7 +201,7 @@ async function main(): Promise<void> {
               status: "passed"
             },
         history_contract_drift: {
-          status: "expected_failure_confirmed",
+          status: report.status,
           drift_count: report.drift_count,
           attempts: report.drifts.map(
             (entry) => `${entry.run_id}/${entry.attempt_id}`
