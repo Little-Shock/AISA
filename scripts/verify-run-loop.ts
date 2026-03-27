@@ -113,12 +113,18 @@ type ScenarioObservation = {
     meta_artifact_exists: boolean;
     has_contract_artifact: boolean;
     contract_artifact_exists: boolean;
+    has_context_artifact: boolean;
+    context_artifact_exists: boolean;
     has_result_artifact: boolean;
     result_artifact_exists: boolean;
     has_evaluation_artifact: boolean;
     evaluation_artifact_exists: boolean;
     has_runtime_verification_artifact: boolean;
     runtime_verification_artifact_exists: boolean;
+    expected_input_context_ref: string;
+    meta_input_context_ref: string | null;
+    review_packet_attempt_input_context_ref: string | null;
+    input_context_ref_matches_expected: boolean;
     runtime_verification_status: string | null;
     runtime_verification_failure_code: string | null;
     runtime_verification_preexisting_git_status: string[];
@@ -1525,6 +1531,10 @@ async function runCommand(rootDir: string, args: string[]): Promise<void> {
   });
 }
 
+function buildExpectedInputContextRef(runId: string, attemptId: string): string {
+  return `runs/${runId}/attempts/${attemptId}/context.json`;
+}
+
 async function collectObservation(
   workspacePaths: ReturnType<typeof resolveWorkspacePaths>,
   runId: string
@@ -1558,9 +1568,11 @@ async function collectObservation(
         );
         const metaArtifact = artifactByKind.get("attempt_meta") ?? null;
         const contractArtifact = artifactByKind.get("attempt_contract") ?? null;
+        const contextArtifact = artifactByKind.get("attempt_context") ?? null;
         const resultArtifact = artifactByKind.get("attempt_result") ?? null;
         const evaluationArtifact = artifactByKind.get("attempt_evaluation") ?? null;
         const runtimeVerificationArtifact = artifactByKind.get("runtime_verification") ?? null;
+        const expectedInputContextRef = buildExpectedInputContextRef(runId, attempt.id);
         const restartRequiredEntry = [...(reviewPacket?.journal ?? [])]
           .reverse()
           .find((entry) => entry.type === "attempt.restart_required");
@@ -1607,12 +1619,21 @@ async function collectObservation(
           meta_artifact_exists: metaArtifact?.exists ?? false,
           has_contract_artifact: contractArtifact !== null,
           contract_artifact_exists: contractArtifact?.exists ?? false,
+          has_context_artifact: contextArtifact !== null,
+          context_artifact_exists: contextArtifact?.exists ?? false,
           has_result_artifact: resultArtifact !== null,
           result_artifact_exists: resultArtifact?.exists ?? false,
           has_evaluation_artifact: evaluationArtifact !== null,
           evaluation_artifact_exists: evaluationArtifact?.exists ?? false,
           has_runtime_verification_artifact: runtimeVerificationArtifact !== null,
           runtime_verification_artifact_exists: runtimeVerificationArtifact?.exists ?? false,
+          expected_input_context_ref: expectedInputContextRef,
+          meta_input_context_ref: attempt.input_context_ref,
+          review_packet_attempt_input_context_ref:
+            reviewPacket?.attempt.input_context_ref ?? null,
+          input_context_ref_matches_expected:
+            attempt.input_context_ref === expectedInputContextRef &&
+            reviewPacket?.attempt.input_context_ref === expectedInputContextRef,
           runtime_verification_status: reviewPacket?.runtime_verification?.status ?? null,
           runtime_verification_failure_code:
             reviewPacket?.runtime_verification?.failure_code ?? null,
@@ -1753,6 +1774,10 @@ function assertCase(scenario: ScenarioCase, observation: ScenarioObservation): v
       `${scenario.id}: review packet missing attempt contract artifact for ${reviewPacket.attempt_id}`
     );
     assert.ok(
+      reviewPacket.has_context_artifact,
+      `${scenario.id}: review packet missing attempt context manifest entry for ${reviewPacket.attempt_id}`
+    );
+    assert.ok(
       reviewPacket.has_result_artifact,
       `${scenario.id}: review packet missing result manifest entry for ${reviewPacket.attempt_id}`
     );
@@ -1798,6 +1823,13 @@ function assertCase(scenario: ScenarioCase, observation: ScenarioObservation): v
       assert.ok(
         reviewPacket.has_failure_context,
         `${scenario.id}: blocker attempt missing failure context for ${reviewPacket.attempt_id}`
+      );
+    }
+
+    if (reviewPacket.context_artifact_exists) {
+      assert.ok(
+        reviewPacket.input_context_ref_matches_expected,
+        `${scenario.id}: input_context_ref should point at ${reviewPacket.expected_input_context_ref} for ${reviewPacket.attempt_id}, got meta=${reviewPacket.meta_input_context_ref ?? "null"} review_packet=${reviewPacket.review_packet_attempt_input_context_ref ?? "null"}`
       );
     }
 

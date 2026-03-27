@@ -784,6 +784,10 @@ export class Orchestrator {
         })
       );
       await saveAttemptContext(this.workspacePaths, runId, attempt.id, context);
+      attempt = updateAttempt(attempt, {
+        input_context_ref: this.buildAttemptContextRef(runId, attempt.id)
+      });
+      await saveAttempt(this.workspacePaths, attempt);
       await this.writeAttemptHeartbeat({
         runId,
         attemptId: attempt.id,
@@ -1054,6 +1058,10 @@ export class Orchestrator {
         }
       })
     );
+  }
+
+  private buildAttemptContextRef(runId: string, attemptId: string): string {
+    return `runs/${runId}/attempts/${attemptId}/context.json`;
   }
 
   private async ensureSettledAttemptReviewPackets(

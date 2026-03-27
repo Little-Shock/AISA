@@ -1,0 +1,48 @@
+{
+  "title": "把 attempt context 接进 run detail API",
+  "summary": "这轮已经把 `input_context_ref` 写成稳定相对路径。下一项最小且更值的后端任务，是把 `/runs/:runId` 的 `attempt_details` 直接补齐 `context`，让 dashboard 和后续自动化直接消费这次尝试真实看到的上下文切片，不再自己拼路径读文件。",
+  "why_now": [
+    "`apps/control-api/src/index.ts` 的 `/runs/:runId` 现在只返回 `contract`、`result`、`evaluation`、`runtime_verification`、日志摘录和 journal，还没有读取 `context.json`。",
+    "`scripts/verify-run-detail-api.ts` 当前也只锁了 result、evaluation 和 runtime verification，没有断言 `input_context_ref` 或 API 返回的 context 载荷。",
+    "`packages/orchestrator/src/index.ts` 这轮已经把 `attempt.input_context_ref` 真正落成 `runs/<run_id>/attempts/<attempt_id>/context.json`。如果 API 还不把 context 暴露出来，调用方还是得靠路径约定自己追文件。"
+  ],
+  "next_attempt_contract": {
+    "attempt_type": "execution",
+    "objective": "扩 `/runs/:runId` 的 `attempt_details`，让它直接返回 attempt `context`，并把 `attempt.input_context_ref` 与 `context.json`、API 载荷的一致性接进 `pnpm verify:run-api`。",
+    "success_criteria": [
+      "`/runs/:runId` 的 `attempt_details[*]` 会直接返回 attempt `context` 或等价的可直接消费字段，调用方不用再自己读 `context.json`。",
+      "`pnpm verify:run-api` 会显式断言 `attempt.input_context_ref` 指向 `runs/<run_id>/attempts/<attempt_id>/context.json`，且 API 返回的 `context` 与落盘内容一致。",
+      "`pnpm typecheck`、`pnpm verify:run-api`、`pnpm verify:runtime` 从仓库根目录回放通过。"
+    ],
+    "required_evidence": [
+      "git 可见改动只触达 run detail API、直接相关的读取链路和最小回归。",
+      "留下一个 run detail API 返回 attempt context 的回放输出或等价断言结果。",
+      "给出 `pnpm typecheck`、`pnpm verify:run-api`、`pnpm verify:runtime` 的回放结果。"
+    ],
+    "forbidden_shortcuts": [
+      "不要只把 `input_context_ref` 原样透传给 API，却不返回真实 `context`。",
+      "不要在 `context.json` 缺失时伪造空对象继续通过。",
+      "不要把回归放宽成只检查字段存在，不检查 ref 和 payload 一致性。"
+    ],
+    "expected_artifacts": [
+      "apps/control-api/src/index.ts",
+      "scripts/verify-run-detail-api.ts"
+    ],
+    "verification_plan": {
+      "commands": [
+        {
+          "purpose": "typecheck the workspace after the change",
+          "command": "pnpm typecheck"
+        },
+        {
+          "purpose": "verify run detail api returns stable attempt context",
+          "command": "pnpm verify:run-api"
+        },
+        {
+          "purpose": "replay the runtime regression suite after the change",
+          "command": "pnpm verify:runtime"
+        }
+      ]
+    }
+  }
+}
