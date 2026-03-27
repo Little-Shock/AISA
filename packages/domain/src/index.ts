@@ -89,6 +89,7 @@ export const RunSchema = z.object({
   constraints: z.array(z.string().min(1)).default([]),
   owner_id: z.string(),
   workspace_root: z.string().min(1),
+  managed_workspace_root: z.string().min(1).nullable().default(null),
   budget: BudgetSchema,
   created_at: z.string().datetime(),
   updated_at: z.string().datetime()
@@ -106,6 +107,7 @@ export const CreateGoalInputSchema = GoalSchema.omit({
 
 export const CreateRunInputSchema = RunSchema.omit({
   id: true,
+  managed_workspace_root: true,
   created_at: true,
   updated_at: true
 }).extend({
@@ -389,6 +391,35 @@ export const AttemptHeartbeatSchema = z.object({
   released_at: z.string().datetime().nullable()
 });
 
+export const AttemptRuntimeStateSchema = z.object({
+  attempt_id: z.string(),
+  run_id: z.string(),
+  running: z.boolean(),
+  phase: z.string().min(1).nullable(),
+  active_since: z.string().datetime().nullable(),
+  last_event_at: z.string().datetime().nullable(),
+  progress_text: z.string().nullable(),
+  recent_activities: z.array(z.string().min(1)).default([]),
+  completed_steps: z.array(z.string().min(1)).default([]),
+  process_content: z.array(z.string().min(1)).default([]),
+  final_output: z.string().nullable(),
+  error: z.string().nullable(),
+  session_id: z.string().nullable(),
+  event_count: z.number().int().nonnegative().default(0),
+  updated_at: z.string().datetime()
+});
+
+export const AttemptRuntimeEventSchema = z.object({
+  id: z.string(),
+  attempt_id: z.string(),
+  run_id: z.string(),
+  seq: z.number().int().nonnegative(),
+  ts: z.string().datetime(),
+  type: z.string().min(1),
+  summary: z.string(),
+  payload: z.unknown().nullable()
+});
+
 export const WorkerWritebackSchema = z.object({
   summary: z.string().min(1),
   findings: z.array(WorkerFindingSchema).default([]),
@@ -514,6 +545,8 @@ export type RuntimeHealthHistoryContractDrift = z.infer<
 export type RuntimeHealthSnapshot = z.infer<typeof RuntimeHealthSnapshotSchema>;
 export type AttemptHeartbeatStatus = z.infer<typeof AttemptHeartbeatStatusSchema>;
 export type AttemptHeartbeat = z.infer<typeof AttemptHeartbeatSchema>;
+export type AttemptRuntimeState = z.infer<typeof AttemptRuntimeStateSchema>;
+export type AttemptRuntimeEvent = z.infer<typeof AttemptRuntimeEventSchema>;
 export type WorkerWriteback = z.infer<typeof WorkerWritebackSchema>;
 export type WorkerArtifact = z.infer<typeof WorkerArtifactSchema>;
 export type ReviewPacketArtifact = z.infer<typeof ReviewPacketArtifactSchema>;
@@ -565,6 +598,7 @@ export function createRun(input: CreateRunInput): Run {
     ...input,
     id: createEntityId("run"),
     workspace_root: input.workspace_root ?? process.cwd(),
+    managed_workspace_root: null,
     budget,
     created_at: now,
     updated_at: now
@@ -690,6 +724,73 @@ export function createAttemptContract(input: {
     expected_artifacts: input.expected_artifacts ?? [],
     verification_plan: input.verification_plan,
     created_at: new Date().toISOString()
+  });
+}
+
+export function createAttemptRuntimeState(input: {
+  attempt_id: string;
+  run_id: string;
+  running?: boolean;
+  phase?: string | null;
+  active_since?: string | null;
+  last_event_at?: string | null;
+  progress_text?: string | null;
+  recent_activities?: string[];
+  completed_steps?: string[];
+  process_content?: string[];
+  final_output?: string | null;
+  error?: string | null;
+  session_id?: string | null;
+  event_count?: number;
+}): AttemptRuntimeState {
+  return AttemptRuntimeStateSchema.parse({
+    attempt_id: input.attempt_id,
+    run_id: input.run_id,
+    running: input.running ?? false,
+    phase: input.phase ?? null,
+    active_since: input.active_since ?? null,
+    last_event_at: input.last_event_at ?? null,
+    progress_text: input.progress_text ?? null,
+    recent_activities: input.recent_activities ?? [],
+    completed_steps: input.completed_steps ?? [],
+    process_content: input.process_content ?? [],
+    final_output: input.final_output ?? null,
+    error: input.error ?? null,
+    session_id: input.session_id ?? null,
+    event_count: input.event_count ?? 0,
+    updated_at: new Date().toISOString()
+  });
+}
+
+export function updateAttemptRuntimeState(
+  state: AttemptRuntimeState,
+  patch: Partial<AttemptRuntimeState>
+): AttemptRuntimeState {
+  return AttemptRuntimeStateSchema.parse({
+    ...state,
+    ...patch,
+    updated_at: new Date().toISOString()
+  });
+}
+
+export function createAttemptRuntimeEvent(input: {
+  attempt_id: string;
+  run_id: string;
+  seq: number;
+  type: string;
+  summary?: string;
+  payload?: unknown;
+  ts?: string;
+}): AttemptRuntimeEvent {
+  return AttemptRuntimeEventSchema.parse({
+    id: createEntityId("arte"),
+    attempt_id: input.attempt_id,
+    run_id: input.run_id,
+    seq: input.seq,
+    ts: input.ts ?? new Date().toISOString(),
+    type: input.type,
+    summary: input.summary ?? "",
+    payload: input.payload ?? null
   });
 }
 

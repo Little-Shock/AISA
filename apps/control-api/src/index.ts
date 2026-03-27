@@ -33,9 +33,11 @@ import {
   getAttemptContext,
   ensureWorkspace,
   getAttemptEvaluation,
+  getAttemptHeartbeat,
   getAttemptReviewPacket,
   getAttemptLogExcerpt,
   getAttemptResult,
+  getAttemptRuntimeState,
   getAttemptRuntimeVerification,
   getCurrentDecision,
   getBranch,
@@ -46,6 +48,7 @@ import {
   getRun,
   getRunReport,
   getWriteback,
+  listAttemptRuntimeEvents,
   listAttempts,
   listBranches,
   listGoals,
@@ -150,6 +153,130 @@ export async function buildServer(
     }
   });
 
+  const buildAttemptDetail = async (input: {
+    runId: string;
+    attempt: Awaited<ReturnType<typeof listAttempts>>[number];
+    journal: Awaited<ReturnType<typeof listRunJournal>>;
+  }) => {
+    const { runId, attempt, journal } = input;
+    const [
+      contract,
+      context,
+      reviewPacket,
+      result,
+      evaluation,
+      runtimeVerification,
+      runtimeState,
+      runtimeEvents,
+      heartbeat,
+      stdoutExcerpt,
+      stderrExcerpt
+    ] = await Promise.all([
+      getAttemptContract(workspacePaths, runId, attempt.id),
+      getAttemptContext(workspacePaths, runId, attempt.id),
+      getAttemptReviewPacket(workspacePaths, runId, attempt.id),
+      getAttemptResult(workspacePaths, runId, attempt.id),
+      getAttemptEvaluation(workspacePaths, runId, attempt.id),
+      getAttemptRuntimeVerification(workspacePaths, runId, attempt.id),
+      getAttemptRuntimeState(workspacePaths, runId, attempt.id),
+      listAttemptRuntimeEvents(workspacePaths, runId, attempt.id, 80),
+      getAttemptHeartbeat(workspacePaths, runId, attempt.id),
+      getAttemptLogExcerpt(workspacePaths, runId, attempt.id, "stdout"),
+      getAttemptLogExcerpt(workspacePaths, runId, attempt.id, "stderr")
+    ]);
+
+    return {
+      attempt,
+      contract,
+      context,
+      failure_context: reviewPacket?.failure_context ?? null,
+      result,
+      evaluation,
+      runtime_verification: runtimeVerification,
+      runtime_state: runtimeState,
+      runtime_events: runtimeEvents,
+      heartbeat,
+      stdout_excerpt: stdoutExcerpt,
+      stderr_excerpt: stderrExcerpt,
+      journal: journal.filter((entry) => entry.attempt_id === attempt.id)
+    };
+  };
+
+  const buildRunDetailPayload = async (runId: string) => {
+    const [run, current, attempts, steers, journal, report] = await Promise.all([
+      getRun(workspacePaths, runId),
+      getCurrentDecision(workspacePaths, runId),
+      listAttempts(workspacePaths, runId),
+      listRunSteers(workspacePaths, runId),
+      listRunJournal(workspacePaths, runId),
+      getRunReport(workspacePaths, runId)
+    ]);
+    const attemptDetails = await Promise.all(
+      attempts.map((attempt) =>
+        buildAttemptDetail({
+          runId,
+          attempt,
+          journal
+        })
+      )
+    );
+
+    return {
+      run,
+      current,
+      attempts,
+      attempt_details: attemptDetails,
+      steers,
+      journal,
+      report
+    };
+  };
+
+  const buildRunSummaryItem = async (run: Awaited<ReturnType<typeof listRuns>>[number]) => {
+    const [current, attempts] = await Promise.all([
+      getCurrentDecision(workspacePaths, run.id),
+      listAttempts(workspacePaths, run.id)
+    ]);
+    const latestAttempt =
+      attempts.find((attempt) => attempt.id === current?.latest_attempt_id) ??
+      attempts.at(-1) ??
+      null;
+    const [latestContract, latestRuntimeState, latestHeartbeat] = await Promise.all([
+      latestAttempt
+        ? getAttemptContract(workspacePaths, run.id, latestAttempt.id)
+        : Promise.resolve(null),
+      latestAttempt
+        ? getAttemptRuntimeState(workspacePaths, run.id, latestAttempt.id)
+        : Promise.resolve(null),
+      latestAttempt
+        ? getAttemptHeartbeat(workspacePaths, run.id, latestAttempt.id)
+        : Promise.resolve(null)
+    ]);
+
+    return {
+      run,
+      current,
+      attempt_count: attempts.length,
+      latest_attempt: latestAttempt
+        ? {
+            id: latestAttempt.id,
+            attempt_type: latestAttempt.attempt_type,
+            status: latestAttempt.status,
+            worker: latestAttempt.worker,
+            objective: latestAttempt.objective,
+            created_at: latestAttempt.created_at,
+            started_at: latestAttempt.started_at,
+            ended_at: latestAttempt.ended_at
+          }
+        : null,
+      latest_attempt_runtime_state: latestRuntimeState,
+      latest_attempt_heartbeat: latestHeartbeat,
+      task_focus: latestContract?.objective ?? latestAttempt?.objective ?? run.description,
+      verification_command_count:
+        latestContract?.verification_plan?.commands.length ?? 0
+    };
+  };
+
   app.get("/health", async () => ({
     status: "ok",
     codex_command: process.env.CODEX_CLI_COMMAND ?? "codex",
@@ -159,42 +286,7 @@ export async function buildServer(
 
   app.get("/runs", async () => {
     const runs = await listRuns(workspacePaths);
-    const data = await Promise.all(
-      runs.map(async (run) => {
-        const [current, attempts] = await Promise.all([
-          getCurrentDecision(workspacePaths, run.id),
-          listAttempts(workspacePaths, run.id)
-        ]);
-        const latestAttempt =
-          attempts.find((attempt) => attempt.id === current?.latest_attempt_id) ??
-          attempts.at(-1) ??
-          null;
-        const latestContract = latestAttempt
-          ? await getAttemptContract(workspacePaths, run.id, latestAttempt.id)
-          : null;
-
-        return {
-          run,
-          current,
-          attempt_count: attempts.length,
-          latest_attempt: latestAttempt
-            ? {
-                id: latestAttempt.id,
-                attempt_type: latestAttempt.attempt_type,
-                status: latestAttempt.status,
-                worker: latestAttempt.worker,
-                objective: latestAttempt.objective,
-                created_at: latestAttempt.created_at,
-                started_at: latestAttempt.started_at,
-                ended_at: latestAttempt.ended_at
-              }
-            : null,
-          task_focus: latestContract?.objective ?? latestAttempt?.objective ?? run.description,
-          verification_command_count:
-            latestContract?.verification_plan?.commands.length ?? 0
-        };
-      })
-    );
+    const data = await Promise.all(runs.map((run) => buildRunSummaryItem(run)));
 
     return { runs: data };
   });
@@ -203,63 +295,86 @@ export async function buildServer(
     const { runId } = request.params as { runId: string };
 
     try {
-      const [run, current, attempts, steers, journal, report] = await Promise.all([
-        getRun(workspacePaths, runId),
-        getCurrentDecision(workspacePaths, runId),
-        listAttempts(workspacePaths, runId),
-        listRunSteers(workspacePaths, runId),
-        listRunJournal(workspacePaths, runId),
-        getRunReport(workspacePaths, runId)
-      ]);
-      const attemptDetails = await Promise.all(
-        attempts.map(async (attempt) => {
-          const [
-            contract,
-            context,
-            reviewPacket,
-            result,
-            evaluation,
-            runtimeVerification,
-            stdoutExcerpt,
-            stderrExcerpt
-          ] = await Promise.all([
-            getAttemptContract(workspacePaths, runId, attempt.id),
-            getAttemptContext(workspacePaths, runId, attempt.id),
-            getAttemptReviewPacket(workspacePaths, runId, attempt.id),
-            getAttemptResult(workspacePaths, runId, attempt.id),
-            getAttemptEvaluation(workspacePaths, runId, attempt.id),
-            getAttemptRuntimeVerification(workspacePaths, runId, attempt.id),
-            getAttemptLogExcerpt(workspacePaths, runId, attempt.id, "stdout"),
-            getAttemptLogExcerpt(workspacePaths, runId, attempt.id, "stderr")
-          ]);
-
-          return {
-            attempt,
-            contract,
-            context,
-            failure_context: reviewPacket?.failure_context ?? null,
-            result,
-            evaluation,
-            runtime_verification: runtimeVerification,
-            stdout_excerpt: stdoutExcerpt,
-            stderr_excerpt: stderrExcerpt,
-            journal: journal.filter((entry) => entry.attempt_id === attempt.id)
-          };
-        })
-      );
-
-      return {
-        run,
-        current,
-        attempts,
-        attempt_details: attemptDetails,
-        steers,
-        journal,
-        report
-      };
+      return await buildRunDetailPayload(runId);
     } catch {
       return reply.code(404).send({ message: `Run ${runId} not found` });
     }
+  });
+
+  app.get("/runs/:runId/stream", async (request, reply) => {
+    const { runId } = request.params as { runId: string };
+
+    try {
+      await getRun(workspacePaths, runId);
+    } catch {
+      return reply.code(404).send({ message: `Run ${runId} not found` });
+    }
+
+    reply.hijack();
+    reply.raw.writeHead(200, {
+      "content-type": "text/event-stream; charset=utf-8",
+      "cache-control": "no-store",
+      connection: "keep-alive",
+      "x-accel-buffering": "no"
+    });
+    reply.raw.write(": connected\n\n");
+
+    let closed = false;
+    let lastSnapshot = "";
+    let snapshotTimer: NodeJS.Timeout | null = null;
+    let keepAliveTimer: NodeJS.Timeout | null = null;
+
+    const closeStream = () => {
+      if (closed) {
+        return;
+      }
+
+      closed = true;
+      if (snapshotTimer) {
+        clearInterval(snapshotTimer);
+      }
+      if (keepAliveTimer) {
+        clearInterval(keepAliveTimer);
+      }
+      reply.raw.end();
+    };
+
+    const pushSnapshot = async () => {
+      if (closed) {
+        return;
+      }
+
+      try {
+        const snapshot = await buildRunDetailPayload(runId);
+        const serialized = JSON.stringify(snapshot);
+        if (serialized === lastSnapshot) {
+          return;
+        }
+
+        lastSnapshot = serialized;
+        reply.raw.write(`event: snapshot\ndata: ${serialized}\n\n`);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        reply.raw.write(
+          `event: error\ndata: ${JSON.stringify({ message })}\n\n`
+        );
+      }
+    };
+
+    request.raw.on("close", closeStream);
+    request.raw.on("end", closeStream);
+
+    snapshotTimer = setInterval(() => {
+      void pushSnapshot();
+    }, 1000);
+    keepAliveTimer = setInterval(() => {
+      if (!closed) {
+        reply.raw.write(`: keepalive ${Date.now()}\n\n`);
+      }
+    }, 15_000);
+
+    await pushSnapshot();
+    return reply;
   });
 
   app.post("/runs", async (request, reply) => {

@@ -6,12 +6,15 @@ import {
   createAttempt,
   createAttemptContract,
   createCurrentDecision,
+  createAttemptRuntimeEvent,
+  createAttemptRuntimeState,
   createRun,
   createRunJournalEntry,
   updateAttempt
 } from "../packages/domain/src/index.ts";
 import {
   appendRunJournal,
+  appendAttemptRuntimeEvent,
   ensureWorkspace,
   listAttempts,
   resolveAttemptPaths,
@@ -20,8 +23,10 @@ import {
   saveAttemptContract,
   saveAttemptContext,
   saveAttemptEvaluation,
+  saveAttemptHeartbeat,
   saveAttemptReviewPacket,
   saveAttemptResult,
+  saveAttemptRuntimeState,
   saveAttemptRuntimeVerification,
   saveCurrentDecision,
   saveRun
@@ -185,6 +190,64 @@ async function main(): Promise<void> {
       }
     ],
     created_at: new Date().toISOString()
+  });
+  await saveAttemptRuntimeState(
+    workspacePaths,
+    createAttemptRuntimeState({
+      attempt_id: attempt.id,
+      run_id: run.id,
+      running: false,
+      phase: "completed",
+      active_since: attempt.started_at,
+      last_event_at: new Date().toISOString(),
+      progress_text: "执行完成",
+      recent_activities: [
+        "会话已建立：sess_run_detail",
+        "命令：pnpm verify:runtime"
+      ],
+      completed_steps: ["命令：pnpm verify:runtime"],
+      process_content: ["先把运行态证据返回给控制 API。"],
+      final_output: "{\"summary\":\"Execution left a replayable verification plan.\"}",
+      session_id: "sess_run_detail",
+      event_count: 2
+    })
+  );
+  await appendAttemptRuntimeEvent(
+    workspacePaths,
+    createAttemptRuntimeEvent({
+      attempt_id: attempt.id,
+      run_id: run.id,
+      seq: 1,
+      type: "thread.started",
+      summary: "会话已建立：sess_run_detail",
+      payload: {
+        thread_id: "sess_run_detail"
+      }
+    })
+  );
+  await appendAttemptRuntimeEvent(
+    workspacePaths,
+    createAttemptRuntimeEvent({
+      attempt_id: attempt.id,
+      run_id: run.id,
+      seq: 2,
+      type: "response_item",
+      summary: "命令：pnpm verify:runtime",
+      payload: {
+        type: "local_shell_call",
+        status: "completed",
+        command: "pnpm verify:runtime"
+      }
+    })
+  );
+  await saveAttemptHeartbeat(workspacePaths, {
+    attempt_id: attempt.id,
+    run_id: run.id,
+    owner_id: "control-api-test",
+    status: "active",
+    started_at: attempt.started_at ?? new Date().toISOString(),
+    heartbeat_at: new Date().toISOString(),
+    released_at: null
   });
   await appendRunJournal(
     workspacePaths,
@@ -431,6 +494,14 @@ async function main(): Promise<void> {
         result: { summary: string; verification_plan?: { commands: Array<{ command: string }> } } | null;
         evaluation: { verification_status: string } | null;
         runtime_verification: { status: string; changed_files: string[] } | null;
+        runtime_state: {
+          phase: string | null;
+          session_id: string | null;
+          event_count: number;
+          recent_activities: string[];
+        } | null;
+        runtime_events: Array<{ type: string; summary: string }>;
+        heartbeat: { status: string } | null;
         stdout_excerpt: string;
         stderr_excerpt: string;
         journal: Array<{ type: string }>;
@@ -468,6 +539,17 @@ async function main(): Promise<void> {
     );
     assert.equal(completedDetail?.evaluation?.verification_status, "passed");
     assert.equal(completedDetail?.runtime_verification?.status, "passed");
+    assert.equal(completedDetail?.runtime_state?.phase, "completed");
+    assert.equal(completedDetail?.runtime_state?.session_id, "sess_run_detail");
+    assert.equal(completedDetail?.runtime_state?.event_count, 2);
+    assert.deepEqual(completedDetail?.runtime_state?.recent_activities, [
+      "会话已建立：sess_run_detail",
+      "命令：pnpm verify:runtime"
+    ]);
+    assert.equal(completedDetail?.runtime_events.length, 2);
+    assert.equal(completedDetail?.runtime_events[0]?.type, "thread.started");
+    assert.equal(completedDetail?.runtime_events[1]?.summary, "命令：pnpm verify:runtime");
+    assert.equal(completedDetail?.heartbeat?.status, "active");
     assert.deepEqual(completedDetail?.runtime_verification?.changed_files, [
       "packages/orchestrator/src/index.ts"
     ]);
@@ -495,10 +577,27 @@ async function main(): Promise<void> {
     assert.equal(blockerDetail?.context, null);
     assert.equal(blockerDetail?.result, null);
     assert.equal(blockerDetail?.runtime_verification, null);
+    assert.equal(blockerDetail?.runtime_state, null);
+    assert.deepEqual(blockerDetail?.runtime_events, []);
+    assert.equal(blockerDetail?.heartbeat, null);
     assert.deepEqual(
       blockerDetail?.journal.map((entry) => entry.type),
       ["attempt.created", "attempt.started", "attempt.recovery_required"]
     );
+
+    const runsResponse = await app.inject({
+      method: "GET",
+      url: "/runs"
+    });
+    assert.equal(runsResponse.statusCode, 200);
+    const runsPayload = runsResponse.json() as {
+      runs: Array<{
+        run: { id: string };
+        latest_attempt_runtime_state: { session_id: string | null } | null;
+      }>;
+    };
+    const runSummary = runsPayload.runs.find((item) => item.run.id === run.id);
+    assert.equal(runSummary?.latest_attempt_runtime_state, null);
 
     console.log(
       JSON.stringify(

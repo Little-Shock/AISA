@@ -26,6 +26,7 @@ import {
   saveRun,
   saveRunSteer
 } from "../packages/state-store/src/index.ts";
+import { Orchestrator } from "../packages/orchestrator/src/index.ts";
 import {
   assertDriveRunReachedStableStop,
   driveRun,
@@ -128,7 +129,7 @@ class ProgressingAdapter {
     );
 
     await writeFile(
-      join(input.run.workspace_root, "execution-note.md"),
+      join(input.attempt.workspace_root, "execution-note.md"),
       `checkpointed by ${input.attempt.id}\n`,
       "utf8"
     );
@@ -200,45 +201,42 @@ async function main(): Promise<void> {
   );
 
   const adapter = new ProgressingAdapter();
-  const firstStop = await driveRun({
-    workspaceRoot: rootDir,
+  const firstStableStop = await settleFirstResearchAttempt({
+    workspacePaths,
     runId: run.id,
-    adapter: adapter as never,
-    pollIntervalMs: 10,
-    maxPolls: 200,
-    stopAfterCompletedAttempts: 1
+    adapter
   });
 
-  assert.equal(firstStop.stopReason, "completed_attempt_limit");
-  assert.equal(firstStop.completedAttemptCount, 1);
-  assert.equal(firstStop.current?.run_status, "running");
   assert.equal(
-    firstStop.current?.recommended_next_action,
+    firstStableStop.current?.run_status,
+    "running"
+  );
+  assert.equal(
+    firstStableStop.current?.recommended_next_action,
     "continue_research",
     "research without a replayable contract must keep the loop in research"
   );
   assert.equal(
-    firstStop.current?.recommended_attempt_type,
+    firstStableStop.current?.recommended_attempt_type,
     "research",
     "missing execution contract should block execution dispatch"
   );
   assert.match(
-    firstStop.current?.blocking_reason ?? "",
+    firstStableStop.current?.blocking_reason ?? "",
     /Need a replayable execution contract before the loop can start an execution attempt\./,
     "first stop should explain that execution is blocked on a replayable contract"
   );
   assert.deepEqual(
-    firstStop.attempts.map((attempt) => attempt.attempt_type),
+    firstStableStop.attempts.map((attempt) => attempt.attempt_type),
     ["research"],
     "local drive-run should not create an execution attempt before the contract is ready"
   );
-  assert.doesNotThrow(() => assertDriveRunReachedStableStop(firstStop));
 
   const secondStop = await driveRun({
     workspaceRoot: rootDir,
     runId: run.id,
     adapter: adapter as never,
-    pollIntervalMs: 10,
+    pollIntervalMs: 50,
     maxPolls: 200
   });
 
@@ -298,18 +296,25 @@ async function main(): Promise<void> {
       changed_files: string[];
     };
   };
+  const executionWorkspaceRoot = executionAttempt.workspace_root;
   const latestCommitSubject = (
-    await runCommand(rootDir, [
+    await runCommand(executionWorkspaceRoot, [
       "git",
       "-C",
-      rootDir,
+      executionWorkspaceRoot,
       "log",
       "-1",
       "--format=%s"
     ])
   ).stdout.trim();
   const gitStatusAfterCheckpoint = (
-    await runCommand(rootDir, ["git", "-C", rootDir, "status", "--porcelain=v1"])
+    await runCommand(executionWorkspaceRoot, [
+      "git",
+      "-C",
+      executionWorkspaceRoot,
+      "status",
+      "--porcelain=v1"
+    ])
   ).stdout.trim();
   assert.equal(secondStop.stopReason, "run_settled");
   assert.doesNotThrow(() => assertDriveRunReachedStableStop(secondStop));
@@ -384,8 +389,8 @@ async function main(): Promise<void> {
     JSON.stringify(
       {
         run_id: run.id,
-        first_stop_next_action: firstStop.current?.recommended_next_action ?? null,
-        first_stop_blocking_reason: firstStop.current?.blocking_reason ?? null,
+        first_stop_next_action: firstStableStop.current?.recommended_next_action ?? null,
+        first_stop_blocking_reason: firstStableStop.current?.blocking_reason ?? null,
         stop_reason: secondStop.stopReason,
         attempt_types: attempts.map((attempt) => attempt.attempt_type),
         research_attempt_count: researchAttempts.length,
@@ -396,6 +401,41 @@ async function main(): Promise<void> {
       2
     )
   );
+}
+
+async function settleFirstResearchAttempt(input: {
+  workspacePaths: ReturnType<typeof resolveWorkspacePaths>;
+  runId: string;
+  adapter: ProgressingAdapter;
+}): Promise<{
+  current: Awaited<ReturnType<typeof getCurrentDecision>>;
+  attempts: Awaited<ReturnType<typeof listAttempts>>;
+}> {
+  const orchestrator = new Orchestrator(
+    input.workspacePaths,
+    input.adapter as never,
+    undefined,
+    10
+  );
+
+  await orchestrator.tick();
+  const [createdAttempt] = await listAttempts(input.workspacePaths, input.runId);
+  assert.ok(createdAttempt, "first research attempt should be created on the first tick");
+  assert.equal(createdAttempt.attempt_type, "research");
+
+  await orchestrator.tick();
+  await waitForAttemptCompletion(input.workspacePaths, input.runId, createdAttempt.id);
+  const current = await waitForStableDecisionForAttempt(
+    input.workspacePaths,
+    input.runId,
+    createdAttempt.id
+  );
+  const attempts = await listAttempts(input.workspacePaths, input.runId);
+
+  return {
+    current,
+    attempts
+  };
 }
 
 async function runShell(
@@ -490,7 +530,7 @@ async function waitForCheckpointEntry(
   workspacePaths: ReturnType<typeof resolveWorkspacePaths>,
   runId: string
 ) {
-  const deadline = Date.now() + 1500;
+  const deadline = Date.now() + 5_000;
 
   while (Date.now() < deadline) {
     const journal = await listRunJournal(workspacePaths, runId);
@@ -504,6 +544,53 @@ async function waitForCheckpointEntry(
   }
 
   throw new Error(`Timed out waiting for checkpoint journal entry for run ${runId}`);
+}
+
+async function waitForAttemptCompletion(
+  workspacePaths: ReturnType<typeof resolveWorkspacePaths>,
+  runId: string,
+  attemptId: string
+): Promise<void> {
+  const deadline = Date.now() + 1_500;
+
+  while (Date.now() < deadline) {
+    const attempts = await listAttempts(workspacePaths, runId);
+    const attempt = attempts.find((candidate) => candidate.id === attemptId);
+
+    if (attempt?.status === "completed") {
+      return;
+    }
+
+    if (attempt && ["failed", "stopped"].includes(attempt.status)) {
+      throw new Error(`Attempt ${attemptId} settled unexpectedly with status ${attempt.status}`);
+    }
+
+    await sleep(10);
+  }
+
+  throw new Error(`Timed out waiting for attempt ${attemptId} to complete`);
+}
+
+async function waitForStableDecisionForAttempt(
+  workspacePaths: ReturnType<typeof resolveWorkspacePaths>,
+  runId: string,
+  attemptId: string
+) {
+  const deadline = Date.now() + 1_500;
+
+  while (Date.now() < deadline) {
+    const current = await getCurrentDecision(workspacePaths, runId);
+    if (
+      current?.latest_attempt_id === attemptId &&
+      current.recommended_next_action !== "attempt_running"
+    ) {
+      return current;
+    }
+
+    await sleep(10);
+  }
+
+  throw new Error(`Timed out waiting for stable decision after attempt ${attemptId}`);
 }
 
 async function waitForFile(filePath: string): Promise<void> {

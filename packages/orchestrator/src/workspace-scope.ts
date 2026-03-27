@@ -4,6 +4,7 @@ import { isAbsolute, relative, resolve } from "node:path";
 
 export type RunWorkspaceScopePolicy = {
   allowedRoots: string[];
+  managedWorkspaceRoot: string;
 };
 
 export type LockedWorkspaceRoot = {
@@ -16,7 +17,10 @@ type RunWorkspaceScopeErrorCode =
   | "workspace_missing"
   | "workspace_not_directory"
   | "workspace_outside_allowed_scope"
-  | "attempt_workspace_outside_run_scope";
+  | "attempt_workspace_outside_run_scope"
+  | "managed_workspace_create_failed"
+  | "managed_workspace_not_git_repo"
+  | "managed_workspace_layout_invalid";
 
 export class RunWorkspaceScopeError extends Error {
   constructor(
@@ -45,8 +49,13 @@ export function parseRunWorkspaceScopeRoots(
 export function createDefaultRunWorkspaceScopePolicy(
   runtimeRoot: string
 ): RunWorkspaceScopePolicy {
+  const normalizedRuntimeRoot = normalizeExistingScopeRoot(runtimeRoot);
+  const managedWorkspaceRoot = normalizeDerivedManagedWorkspaceRoot(
+    normalizedRuntimeRoot
+  );
   return {
-    allowedRoots: [normalizeExistingScopeRoot(runtimeRoot)]
+    allowedRoots: sortScopeRoots([normalizedRuntimeRoot, managedWorkspaceRoot]),
+    managedWorkspaceRoot
   };
 }
 
@@ -55,20 +64,23 @@ export async function createRunWorkspaceScopePolicy(input: {
   allowedRoots?: string[];
   envValue?: string;
 }): Promise<RunWorkspaceScopePolicy> {
+  const normalizedRuntimeRoot = await normalizeScopeRoot(input.runtimeRoot);
   const configuredRoots =
     input.allowedRoots && input.allowedRoots.length > 0
       ? input.allowedRoots
       : parseRunWorkspaceScopeRoots(input.envValue);
   const rawRoots =
-    configuredRoots.length > 0 ? configuredRoots : [input.runtimeRoot];
+    configuredRoots.length > 0 ? configuredRoots : [normalizedRuntimeRoot];
   const normalizedRoots = await Promise.all(
     rawRoots.map(async (root) => normalizeScopeRoot(root))
   );
+  const managedWorkspaceRoot = normalizeDerivedManagedWorkspaceRoot(
+    normalizedRuntimeRoot
+  );
 
   return {
-    allowedRoots: [...new Set(normalizedRoots)].sort(
-      (left, right) => right.length - left.length || left.localeCompare(right)
-    )
+    allowedRoots: sortScopeRoots([...normalizedRoots, managedWorkspaceRoot]),
+    managedWorkspaceRoot
   };
 }
 
@@ -125,23 +137,37 @@ export async function lockRunWorkspaceRoot(
 
 export async function assertAttemptWorkspaceWithinRunScope(input: {
   runWorkspaceRoot: string;
+  managedRunWorkspaceRoot?: string | null;
   attemptWorkspaceRoot: string;
   policy: RunWorkspaceScopePolicy;
 }): Promise<void> {
-  const [runLock, attemptLock] = await Promise.all([
+  const [runLock, managedRunLock, attemptLock] = await Promise.all([
     lockRunWorkspaceRoot(input.runWorkspaceRoot, input.policy),
+    input.managedRunWorkspaceRoot
+      ? lockRunWorkspaceRoot(input.managedRunWorkspaceRoot, input.policy)
+      : Promise.resolve(null),
     lockRunWorkspaceRoot(input.attemptWorkspaceRoot, input.policy)
   ]);
 
-  if (isPathInsideScope(runLock.resolvedRoot, attemptLock.resolvedRoot)) {
+  const allowedRunScopes = [runLock.resolvedRoot];
+  if (managedRunLock) {
+    allowedRunScopes.push(managedRunLock.resolvedRoot);
+  }
+
+  if (
+    allowedRunScopes.some((scopeRoot) =>
+      isPathInsideScope(scopeRoot, attemptLock.resolvedRoot)
+    )
+  ) {
     return;
   }
 
   throw new RunWorkspaceScopeError(
     "attempt_workspace_outside_run_scope",
-    `Attempt 工作区超出当前 run 的工作区范围：${attemptLock.resolvedRoot} 不在 ${runLock.resolvedRoot} 内`,
+    `Attempt 工作区超出当前 run 的工作区范围：${attemptLock.resolvedRoot} 不在 ${allowedRunScopes.join(" 或 ")} 内`,
     {
       run_workspace_root: runLock.resolvedRoot,
+      managed_run_workspace_root: managedRunLock?.resolvedRoot ?? null,
       attempt_workspace_root: attemptLock.resolvedRoot,
       allowed_roots: input.policy.allowedRoots
     }
@@ -172,4 +198,14 @@ function normalizeExistingScopeRoot(root: string): string {
   } catch {
     return resolvedRoot;
   }
+}
+
+function normalizeDerivedManagedWorkspaceRoot(runtimeRoot: string): string {
+  return resolve(runtimeRoot, "..", ".aisa-run-worktrees");
+}
+
+function sortScopeRoots(roots: string[]): string[] {
+  return [...new Set(roots)].sort(
+    (left, right) => right.length - left.length || left.localeCompare(right)
+  );
 }

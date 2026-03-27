@@ -15,6 +15,7 @@ import { join } from "node:path";
 import type {
   Attempt,
   AttemptContract,
+  AttemptRuntimeState,
   Branch,
   ContextSnapshot,
   Goal,
@@ -24,12 +25,17 @@ import type {
 import {
   WorkerArtifactTypeValues,
   WorkerFindingTypeValues,
+  createAttemptRuntimeEvent,
+  createAttemptRuntimeState,
+  updateAttemptRuntimeState,
   WorkerWritebackSchema
 } from "@autoresearch/domain";
 import type { WorkspacePaths } from "@autoresearch/state-store";
 import {
+  appendAttemptRuntimeEvent,
   resolveAttemptPaths,
   resolveBranchArtifactPaths,
+  saveAttemptRuntimeState,
   writeJsonFile,
   writeTextFile
 } from "@autoresearch/state-store";
@@ -236,6 +242,959 @@ function hasErrorCode(error: unknown, code: string): boolean {
   );
 }
 
+const RUNTIME_RECENT_ACTIVITIES_MAX = 8;
+const RUNTIME_COMPLETED_STEPS_MAX = 8;
+const RUNTIME_PROCESS_CONTENT_MAX = 6;
+const RUNTIME_PREVIEW_CHARS = 240;
+
+function normalizeWhitespace(value: unknown): string {
+  return String(value ?? "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function truncatePreview(value: string, maxChars = RUNTIME_PREVIEW_CHARS): string {
+  if (value.length <= maxChars) {
+    return value;
+  }
+
+  return `${value.slice(0, Math.max(0, maxChars - 3)).trimEnd()}...`;
+}
+
+function normalizeRuntimeEventType(value: unknown): string {
+  return normalizeWhitespace(value).toLowerCase().replace(/[./-]/g, "_");
+}
+
+function appendUniqueTail(list: string[], rawValue: unknown, maxItems: number): void {
+  const value = truncatePreview(normalizeWhitespace(rawValue));
+  if (!value) {
+    return;
+  }
+
+  const key = value.toLowerCase();
+  const existingIndex = list.findIndex(
+    (entry) => normalizeWhitespace(entry).toLowerCase() === key
+  );
+  if (existingIndex >= 0) {
+    list.splice(existingIndex, 1);
+  }
+
+  list.push(value);
+
+  if (list.length > maxItems) {
+    list.splice(0, list.length - maxItems);
+  }
+}
+
+function collectTextParts(value: unknown, depth = 0): string[] {
+  if (depth > 4 || value === null || value === undefined) {
+    return [];
+  }
+
+  if (typeof value === "string") {
+    const text = normalizeWhitespace(value);
+    return text ? [text] : [];
+  }
+
+  if (Array.isArray(value)) {
+    return value.flatMap((item) => collectTextParts(item, depth + 1));
+  }
+
+  if (typeof value !== "object") {
+    return [];
+  }
+
+  const record = value as Record<string, unknown>;
+  return [
+    ...collectTextParts(record.text, depth + 1),
+    ...collectTextParts(record.message, depth + 1),
+    ...collectTextParts(record.summary, depth + 1),
+    ...collectTextParts(record.content, depth + 1),
+    ...collectTextParts(record.output_text, depth + 1),
+    ...collectTextParts(record.input_text, depth + 1),
+    ...collectTextParts(record.delta, depth + 1),
+    ...collectTextParts(record.reasoning_text, depth + 1)
+  ];
+}
+
+function pickFirstText(value: unknown): string {
+  return truncatePreview(collectTextParts(value)[0] ?? "");
+}
+
+function extractRawEventPayload(
+  event: Record<string, unknown>
+): Record<string, unknown> | null {
+  const payload = event.payload;
+  if (payload && typeof payload === "object" && !Array.isArray(payload)) {
+    return payload as Record<string, unknown>;
+  }
+
+  const message = event.message;
+  if (message && typeof message === "object" && !Array.isArray(message)) {
+    return message as Record<string, unknown>;
+  }
+
+  return null;
+}
+
+function unwrapRuntimeEvent(rawEvent: unknown): Record<string, unknown> | null {
+  let current =
+    rawEvent && typeof rawEvent === "object" && !Array.isArray(rawEvent)
+      ? ({ ...(rawEvent as Record<string, unknown>) } as Record<string, unknown>)
+      : null;
+
+  for (let depth = 0; depth < 4 && current; depth += 1) {
+    const eventType = normalizeRuntimeEventType(current.type);
+    if (eventType === "event_msg") {
+      const payload = extractRawEventPayload(current);
+      if (!payload || typeof payload.type !== "string") {
+        return current;
+      }
+      current = {
+        ...payload,
+        type: payload.type,
+        session_id:
+          normalizeWhitespace(current.session_id) ||
+          normalizeWhitespace(payload.session_id) ||
+          null
+      };
+      continue;
+    }
+
+    if (eventType === "stream_event") {
+      const nested = current.event;
+      if (!nested || typeof nested !== "object" || Array.isArray(nested)) {
+        return current;
+      }
+      const nestedRecord = nested as Record<string, unknown>;
+      current = {
+        ...nestedRecord,
+        type: nestedRecord.type,
+        session_id:
+          normalizeWhitespace(current.session_id) ||
+          normalizeWhitespace(nestedRecord.session_id) ||
+          null
+      };
+      continue;
+    }
+
+    return current;
+  }
+
+  return current;
+}
+
+function extractSessionIdFromEvent(event: Record<string, unknown>): string | null {
+  const candidates = [
+    event.thread_id,
+    event.session_id,
+    event.sessionId,
+    extractRawEventPayload(event)?.thread_id,
+    extractRawEventPayload(event)?.session_id
+  ];
+
+  for (const candidate of candidates) {
+    const value = normalizeWhitespace(candidate);
+    if (value) {
+      return value;
+    }
+  }
+
+  return null;
+}
+
+function extractStopReason(event: Record<string, unknown>): string {
+  const payload = extractRawEventPayload(event);
+  const candidates = [
+    event.stop_reason,
+    event.stopReason,
+    payload?.stop_reason,
+    payload?.stopReason
+  ];
+
+  for (const candidate of candidates) {
+    const value = normalizeRuntimeEventType(candidate);
+    if (value) {
+      return value;
+    }
+  }
+
+  return "";
+}
+
+function extractRuntimeItem(
+  event: Record<string, unknown>
+): Record<string, unknown> | null {
+  if (event.item && typeof event.item === "object" && !Array.isArray(event.item)) {
+    return event.item as Record<string, unknown>;
+  }
+
+  const payload = extractRawEventPayload(event);
+  if (payload?.item && typeof payload.item === "object" && !Array.isArray(payload.item)) {
+    return payload.item as Record<string, unknown>;
+  }
+
+  return null;
+}
+
+function unwrapShellCommand(rawCommand: unknown): string {
+  const command = normalizeWhitespace(rawCommand);
+  if (!command) {
+    return "";
+  }
+
+  const match = command.match(/^(?:\/bin\/)?(?:zsh|bash|sh)\s+-lc\s+([\s\S]+)$/u);
+  if (!match) {
+    return command;
+  }
+
+  const wrapped = normalizeWhitespace(match[1]);
+  if (
+    (wrapped.startsWith("\"") && wrapped.endsWith("\"")) ||
+    (wrapped.startsWith("'") && wrapped.endsWith("'"))
+  ) {
+    return wrapped.slice(1, -1);
+  }
+
+  return wrapped;
+}
+
+function summarizePathTail(rawPath: unknown): string {
+  const normalized = normalizeWhitespace(rawPath).replace(/\\/g, "/");
+  if (!normalized) {
+    return "";
+  }
+
+  const segments = normalized.split("/").filter(Boolean);
+  if (segments.length <= 3) {
+    return truncatePreview(normalized);
+  }
+
+  return truncatePreview(segments.slice(-3).join("/"));
+}
+
+function summarizeCommandPreview(rawCommand: unknown): string {
+  return truncatePreview(unwrapShellCommand(rawCommand));
+}
+
+function inferCommandPhase(rawCommand: unknown): string {
+  const command = unwrapShellCommand(rawCommand).toLowerCase();
+  if (
+    /\b(verify|test|typecheck|lint|pytest|jest|vitest|mocha|playwright)\b/u.test(command)
+  ) {
+    return "verifying";
+  }
+
+  return "tool";
+}
+
+function getTodoItems(item: Record<string, unknown>): Array<{
+  text: string;
+  completed: boolean;
+}> {
+  if (!Array.isArray(item.items)) {
+    return [];
+  }
+
+  return item.items
+    .filter(
+      (candidate) => candidate && typeof candidate === "object" && !Array.isArray(candidate)
+    )
+    .map((candidate) => {
+      const record = candidate as Record<string, unknown>;
+      return {
+        text: normalizeWhitespace(record.text),
+        completed: Boolean(record.completed)
+      };
+    })
+    .filter((candidate) => candidate.text);
+}
+
+function summarizeTodoProgress(item: Record<string, unknown>): string {
+  const todos = getTodoItems(item);
+  if (todos.length === 0) {
+    return "计划更新";
+  }
+
+  const completedCount = todos.filter((todo) => todo.completed).length;
+  return `计划更新：${completedCount}/${todos.length} 已完成`;
+}
+
+function summarizeTodoProcessContent(item: Record<string, unknown>): string {
+  const todos = getTodoItems(item);
+  if (todos.length === 0) {
+    return "";
+  }
+
+  const preview = todos
+    .slice(0, 3)
+    .map((todo) => `${todo.completed ? "已完成" : "待做"} ${todo.text}`)
+    .join("；");
+
+  return truncatePreview(`计划内容：${preview}`);
+}
+
+function summarizeCommandFailureOutput(item: Record<string, unknown>): string {
+  const exitCode = Number(item.exit_code);
+  if (!Number.isFinite(exitCode) || exitCode === 0) {
+    return "";
+  }
+
+  const lines = String(item.aggregated_output ?? "")
+    .split(/\r?\n/u)
+    .map((line) => normalizeWhitespace(line))
+    .filter(Boolean);
+  if (lines.length === 0) {
+    return "";
+  }
+
+  const preferred =
+    lines.find((line) =>
+      /AssertionError|Error:|failed|ELIFECYCLE|unexpected status/i.test(line)
+    ) ?? lines.at(-1);
+
+  return preferred ? `命令报错：${truncatePreview(preferred)}` : "";
+}
+
+function summarizeCommandExecutionEvent(
+  item: Record<string, unknown>,
+  eventType: string
+): string {
+  const command = summarizeCommandPreview(item.command);
+  const exitCode = Number(item.exit_code);
+  const status = normalizeRuntimeEventType(item.status);
+
+  if (eventType === "item_started" || status === "in_progress") {
+    return command ? `执行命令：${command}` : "执行命令";
+  }
+
+  if (Number.isFinite(exitCode) && exitCode !== 0) {
+    return command ? `命令失败(${exitCode})：${command}` : `命令失败(${exitCode})`;
+  }
+
+  if (eventType === "item_completed" || status === "completed") {
+    return command ? `命令完成：${command}` : "命令完成";
+  }
+
+  return command ? `命令更新：${command}` : "命令更新";
+}
+
+function summarizeFileChangeEvent(item: Record<string, unknown>): string {
+  const changes = Array.isArray(item.changes)
+    ? item.changes.filter(
+        (candidate) =>
+          candidate && typeof candidate === "object" && !Array.isArray(candidate)
+      )
+    : [];
+
+  if (changes.length === 0) {
+    return "修改文件";
+  }
+
+  const firstChange = changes[0] as Record<string, unknown>;
+  const firstPath = summarizePathTail(firstChange.path ?? firstChange.file_path);
+  if (changes.length === 1) {
+    return firstPath ? `修改文件：${firstPath}` : "修改文件";
+  }
+
+  return firstPath
+    ? `修改文件：${firstPath} 等 ${changes.length} 个`
+    : `修改文件：${changes.length} 个`;
+}
+
+function summarizeAgentMessageEvent(item: Record<string, unknown>): string {
+  const text = pickFirstText(item);
+  return text ? `进展：${text}` : "进展更新";
+}
+
+function summarizeRuntimeItemEvent(
+  item: Record<string, unknown>,
+  eventType: string
+): string {
+  const itemType = normalizeRuntimeEventType(item.type);
+  if (itemType === "command_execution") {
+    return summarizeCommandExecutionEvent(item, eventType);
+  }
+
+  if (itemType === "todo_list") {
+    return summarizeTodoProgress(item);
+  }
+
+  if (itemType === "agent_message") {
+    return summarizeAgentMessageEvent(item);
+  }
+
+  if (itemType === "file_change") {
+    return summarizeFileChangeEvent(item);
+  }
+
+  return "";
+}
+
+function extractRuntimeItemCompletedStep(
+  item: Record<string, unknown>,
+  eventType: string
+): string {
+  const itemType = normalizeRuntimeEventType(item.type);
+  if (itemType === "command_execution") {
+    const exitCode = Number(item.exit_code);
+    if (Number.isFinite(exitCode) && exitCode !== 0) {
+      return "";
+    }
+    return eventType === "item_completed"
+      ? summarizeCommandExecutionEvent(item, eventType)
+      : "";
+  }
+
+  if (itemType === "file_change" && eventType === "item_completed") {
+    return summarizeFileChangeEvent(item);
+  }
+
+  if (itemType === "todo_list") {
+    const todos = getTodoItems(item);
+    if (todos.length > 0 && todos.every((todo) => todo.completed)) {
+      return `计划完成：${todos.length}/${todos.length} 已完成`;
+    }
+  }
+
+  return "";
+}
+
+function extractRuntimeItemProcessContent(
+  item: Record<string, unknown>,
+  eventType: string
+): string {
+  const itemType = normalizeRuntimeEventType(item.type);
+  if (itemType === "agent_message") {
+    return pickFirstText(item);
+  }
+
+  if (itemType === "todo_list") {
+    return summarizeTodoProcessContent(item);
+  }
+
+  if (itemType === "command_execution" && eventType === "item_completed") {
+    return summarizeCommandFailureOutput(item);
+  }
+
+  return "";
+}
+
+function summarizeWebSearchCall(action: Record<string, unknown>): string {
+  const query = normalizeWhitespace(action.query ?? action.q);
+  const url = normalizeWhitespace(action.url);
+  const pattern = normalizeWhitespace(action.pattern);
+  const actionType = normalizeRuntimeEventType(action.type);
+
+  if (actionType === "search" || query) {
+    return query ? `搜索：${truncatePreview(query)}` : "搜索";
+  }
+
+  if (actionType === "open_page" || url) {
+    return url ? `打开页面：${truncatePreview(url)}` : "打开页面";
+  }
+
+  if (actionType === "find" || pattern) {
+    return pattern ? `查找：${truncatePreview(pattern)}` : "页面查找";
+  }
+
+  return "网页工具";
+}
+
+function summarizeToolArgs(args: Record<string, unknown> | null): string {
+  if (!args) {
+    return "";
+  }
+
+  const command = normalizeWhitespace(args.command ?? args.cmd);
+  if (command) {
+    return `命令：${truncatePreview(command)}`;
+  }
+
+  const query = normalizeWhitespace(args.query ?? args.q);
+  if (query) {
+    return `查询：${truncatePreview(query)}`;
+  }
+
+  const path = normalizeWhitespace(args.path ?? args.file_path);
+  if (path) {
+    return `路径：${truncatePreview(path)}`;
+  }
+
+  return "";
+}
+
+function summarizeResponsePayload(payload: Record<string, unknown>): string {
+  const payloadType = normalizeRuntimeEventType(payload.type);
+  if (payloadType === "web_search_call") {
+    const action =
+      payload.action && typeof payload.action === "object" && !Array.isArray(payload.action)
+        ? (payload.action as Record<string, unknown>)
+        : payload;
+    return summarizeWebSearchCall(action);
+  }
+
+  if (payloadType === "local_shell_call") {
+    const command = normalizeWhitespace(payload.command ?? payload.cmd);
+    return command ? `命令：${truncatePreview(command)}` : "执行命令";
+  }
+
+  if (payloadType === "function_call" || payloadType === "custom_tool_call") {
+    const toolName = normalizeWhitespace(
+      payload.tool_name ?? payload.name ?? (payload.call as Record<string, unknown> | undefined)?.name
+    );
+    const detail = summarizeToolArgs(
+      payload.call &&
+        typeof payload.call === "object" &&
+        !Array.isArray(payload.call) &&
+        (payload.call as Record<string, unknown>).arguments &&
+        typeof (payload.call as Record<string, unknown>).arguments === "object" &&
+        !Array.isArray((payload.call as Record<string, unknown>).arguments)
+        ? ((payload.call as Record<string, unknown>).arguments as Record<string, unknown>)
+        : null
+    );
+    if (toolName && detail) {
+      return `工具 ${toolName} · ${detail}`;
+    }
+    if (toolName) {
+      return `工具 ${toolName}`;
+    }
+  }
+
+  if (payloadType === "reasoning" || payloadType === "agent_reasoning") {
+    const text = pickFirstText(payload.summary ?? payload);
+    return text ? `思考：${text}` : "思考中";
+  }
+
+  if (payloadType === "message" || payloadType === "agent_message") {
+    const text = pickFirstText(payload);
+    return text ? `输出：${text}` : "输出内容";
+  }
+
+  return "";
+}
+
+function summarizeRuntimeEvent(rawEvent: Record<string, unknown>): string {
+  const event = unwrapRuntimeEvent(rawEvent) ?? rawEvent;
+  const eventType = normalizeRuntimeEventType(event.type);
+
+  if (
+    eventType === "thread_started" ||
+    eventType === "thread_created" ||
+    eventType === "thread_resumed"
+  ) {
+    const sessionId = extractSessionIdFromEvent(event);
+    return sessionId ? `会话已建立：${sessionId}` : "会话已建立";
+  }
+
+  if (eventType === "turn_started") {
+    return "本轮开始";
+  }
+
+  const runtimeItem = extractRuntimeItem(event);
+  if (runtimeItem) {
+    const itemSummary = summarizeRuntimeItemEvent(runtimeItem, eventType);
+    if (itemSummary) {
+      return itemSummary;
+    }
+  }
+
+  if (eventType === "response_item") {
+    const payload = extractRawEventPayload(event);
+    if (payload) {
+      const summary = summarizeResponsePayload(payload);
+      if (summary) {
+        return summary;
+      }
+    }
+  }
+
+  if (eventType === "reasoning" || eventType === "agent_reasoning") {
+    const text = pickFirstText(event.summary ?? event);
+    return text ? `思考：${text}` : "思考中";
+  }
+
+  if (
+    eventType === "assistant_message" ||
+    eventType === "assistant" ||
+    eventType === "message" ||
+    eventType === "agent_message"
+  ) {
+    const text = pickFirstText(event);
+    return text ? `输出：${text}` : "输出内容";
+  }
+
+  if (eventType === "turn_completed") {
+    return "本轮完成";
+  }
+
+  const fallbackText = pickFirstText(event);
+  if (fallbackText) {
+    return fallbackText;
+  }
+
+  return normalizeWhitespace(
+    String(event.type ?? "收到运行事件").replace(/[._-]+/g, " ")
+  );
+}
+
+function extractCompletedStep(rawEvent: Record<string, unknown>): string {
+  const event = unwrapRuntimeEvent(rawEvent) ?? rawEvent;
+  const eventType = normalizeRuntimeEventType(event.type);
+  const runtimeItem = extractRuntimeItem(event);
+
+  if (runtimeItem) {
+    const itemStep = extractRuntimeItemCompletedStep(runtimeItem, eventType);
+    if (itemStep) {
+      return itemStep;
+    }
+  }
+
+  if (eventType === "response_item") {
+    const payload = extractRawEventPayload(event);
+    const status = normalizeRuntimeEventType(payload?.status);
+    if (payload && (status === "completed" || !status)) {
+      const payloadType = normalizeRuntimeEventType(payload.type);
+      if (
+        payloadType === "web_search_call" ||
+        payloadType === "local_shell_call" ||
+        payloadType === "function_call" ||
+        payloadType === "custom_tool_call"
+      ) {
+        return summarizeResponsePayload(payload);
+      }
+    }
+  }
+
+  if (eventType === "item_completed") {
+    const item =
+      event.item && typeof event.item === "object" && !Array.isArray(event.item)
+        ? (event.item as Record<string, unknown>)
+        : null;
+    if (!item) {
+      return "";
+    }
+
+    const itemType = normalizeRuntimeEventType(item.type);
+    if (
+      itemType === "web_search_call" ||
+      itemType === "local_shell_call" ||
+      itemType === "function_call" ||
+      itemType === "custom_tool_call"
+    ) {
+      return summarizeResponsePayload(item);
+    }
+  }
+
+  return "";
+}
+
+function extractProcessContent(rawEvent: Record<string, unknown>): string {
+  const event = unwrapRuntimeEvent(rawEvent) ?? rawEvent;
+  const eventType = normalizeRuntimeEventType(event.type);
+  const stopReason = extractStopReason(event);
+  const phase = normalizeRuntimeEventType(event.phase);
+  const role = normalizeRuntimeEventType(
+    event.role ?? extractRawEventPayload(event)?.role
+  );
+
+  if (phase === "final_answer" || stopReason === "end_turn") {
+    return "";
+  }
+
+  if (eventType === "reasoning" || eventType === "agent_reasoning") {
+    return pickFirstText(event.summary ?? event);
+  }
+
+  if (
+    eventType === "assistant_message" ||
+    eventType === "assistant" ||
+    eventType === "agent_message" ||
+    (eventType === "message" && (!role || role === "assistant"))
+  ) {
+    return pickFirstText(event);
+  }
+
+  const runtimeItem = extractRuntimeItem(event);
+  if (runtimeItem) {
+    return extractRuntimeItemProcessContent(runtimeItem, eventType);
+  }
+
+  if (eventType === "response_item") {
+    const payload = extractRawEventPayload(event);
+    if (!payload) {
+      return "";
+    }
+
+    const payloadType = normalizeRuntimeEventType(payload.type);
+    if (payloadType === "reasoning" || payloadType === "agent_reasoning") {
+      return pickFirstText(payload.summary ?? payload);
+    }
+    if (
+      payloadType === "message" ||
+      payloadType === "assistant_message" ||
+      payloadType === "agent_message"
+    ) {
+      const payloadRole = normalizeRuntimeEventType(payload.role);
+      if (payloadRole && payloadRole !== "assistant") {
+        return "";
+      }
+      return pickFirstText(payload);
+    }
+  }
+
+  return "";
+}
+
+function inferRuntimePhase(
+  rawEvent: Record<string, unknown>,
+  currentPhase: string | null
+): string {
+  const event = unwrapRuntimeEvent(rawEvent) ?? rawEvent;
+  const eventType = normalizeRuntimeEventType(event.type);
+
+  if (
+    eventType === "thread_started" ||
+    eventType === "thread_created" ||
+    eventType === "thread_resumed"
+  ) {
+    return "starting";
+  }
+
+  if (eventType === "turn_started") {
+    return "running";
+  }
+
+  if (eventType === "turn_completed") {
+    return "completed";
+  }
+
+  const runtimeItem = extractRuntimeItem(event);
+  if (runtimeItem) {
+    const itemType = normalizeRuntimeEventType(runtimeItem.type);
+    if (itemType === "command_execution") {
+      return inferCommandPhase(runtimeItem.command);
+    }
+    if (itemType === "todo_list") {
+      return "planning";
+    }
+    if (itemType === "agent_message") {
+      return "message";
+    }
+    if (itemType === "file_change") {
+      return "writing";
+    }
+  }
+
+  if (eventType === "reasoning" || eventType === "agent_reasoning") {
+    return "reasoning";
+  }
+
+  if (eventType === "response_item") {
+    const payload = extractRawEventPayload(event);
+    const payloadType = normalizeRuntimeEventType(payload?.type);
+    if (payloadType === "reasoning" || payloadType === "agent_reasoning") {
+      return "reasoning";
+    }
+    if (
+      payloadType === "web_search_call" ||
+      payloadType === "local_shell_call" ||
+      payloadType === "function_call" ||
+      payloadType === "custom_tool_call"
+    ) {
+      return "tool";
+    }
+    if (
+      payloadType === "message" ||
+      payloadType === "assistant_message" ||
+      payloadType === "agent_message"
+    ) {
+      return "message";
+    }
+  }
+
+  if (
+    eventType === "assistant_message" ||
+    eventType === "assistant" ||
+    eventType === "message" ||
+    eventType === "agent_message"
+  ) {
+    return "message";
+  }
+
+  if (eventType === "item_completed") {
+    return currentPhase ?? "running";
+  }
+
+  return currentPhase ?? "running";
+}
+
+function createAttemptRuntimeTracker(input: {
+  workspacePaths: WorkspacePaths;
+  runId: string;
+  attemptId: string;
+}) {
+  let state = createAttemptRuntimeState({
+    run_id: input.runId,
+    attempt_id: input.attemptId,
+    running: true,
+    phase: "starting",
+    active_since: new Date().toISOString(),
+    progress_text: "已启动 Codex"
+  });
+  let stdoutBuffer = "";
+  let persistQueue = saveAttemptRuntimeState(input.workspacePaths, state);
+
+  const enqueue = (task: () => Promise<void>): void => {
+    persistQueue = persistQueue.then(task);
+  };
+
+  const appendEvent = (rawEvent: unknown, fallbackType = "stdout.json"): void => {
+    enqueue(async () => {
+      const normalizedEvent =
+        rawEvent && typeof rawEvent === "object" && !Array.isArray(rawEvent)
+          ? (rawEvent as Record<string, unknown>)
+          : {
+              type: fallbackType,
+              payload: rawEvent
+            };
+      const ts =
+        normalizeWhitespace((normalizedEvent as Record<string, unknown>).timestamp) ||
+        normalizeWhitespace((normalizedEvent as Record<string, unknown>).ts) ||
+        new Date().toISOString();
+      const summary = summarizeRuntimeEvent(normalizedEvent);
+      const completedStep = extractCompletedStep(normalizedEvent);
+      const processContent = extractProcessContent(normalizedEvent);
+      const recentActivities = [...state.recent_activities];
+      const completedSteps = [...state.completed_steps];
+      const processLines = [...state.process_content];
+      if (summary) {
+        appendUniqueTail(recentActivities, summary, RUNTIME_RECENT_ACTIVITIES_MAX);
+      }
+      if (completedStep) {
+        appendUniqueTail(completedSteps, completedStep, RUNTIME_COMPLETED_STEPS_MAX);
+      }
+      if (processContent) {
+        appendUniqueTail(processLines, processContent, RUNTIME_PROCESS_CONTENT_MAX);
+      }
+
+      const runtimeEvent = createAttemptRuntimeEvent({
+        run_id: input.runId,
+        attempt_id: input.attemptId,
+        seq: state.event_count + 1,
+        type:
+          normalizeWhitespace((normalizedEvent as Record<string, unknown>).type) ||
+          fallbackType,
+        summary,
+        payload: rawEvent,
+        ts
+      });
+
+      state = updateAttemptRuntimeState(state, {
+        phase: inferRuntimePhase(normalizedEvent, state.phase),
+        last_event_at: runtimeEvent.ts,
+        progress_text: summary || state.progress_text,
+        recent_activities: recentActivities,
+        completed_steps: completedSteps,
+        process_content: processLines,
+        session_id: extractSessionIdFromEvent(normalizedEvent) ?? state.session_id,
+        event_count: runtimeEvent.seq
+      });
+
+      await Promise.all([
+        appendAttemptRuntimeEvent(input.workspacePaths, runtimeEvent),
+        saveAttemptRuntimeState(input.workspacePaths, state)
+      ]);
+    });
+  };
+
+  const appendUnparsedStdoutLine = (line: string): void => {
+    appendEvent(
+      {
+        type: "stdout.unparsed",
+        text: truncatePreview(line)
+      },
+      "stdout.unparsed"
+    );
+  };
+
+  const processLine = (line: string): void => {
+    const trimmed = line.trim();
+    if (!trimmed) {
+      return;
+    }
+
+    try {
+      appendEvent(JSON.parse(trimmed), "stdout.json");
+    } catch {
+      appendUnparsedStdoutLine(trimmed);
+    }
+  };
+
+  const ingestStdoutChunk = (chunk: Buffer | string): void => {
+    stdoutBuffer += chunk.toString();
+
+    while (true) {
+      const newlineIndex = stdoutBuffer.indexOf("\n");
+      if (newlineIndex < 0) {
+        break;
+      }
+
+      const line = stdoutBuffer.slice(0, newlineIndex);
+      stdoutBuffer = stdoutBuffer.slice(newlineIndex + 1);
+      processLine(line);
+    }
+  };
+
+  const flushStdoutRemainder = (): void => {
+    const remainder = stdoutBuffer.trim();
+    stdoutBuffer = "";
+    if (remainder) {
+      processLine(remainder);
+    }
+  };
+
+  const saveStatePatch = (patch: Partial<AttemptRuntimeState>): void => {
+    enqueue(async () => {
+      state = updateAttemptRuntimeState(state, patch);
+      await saveAttemptRuntimeState(input.workspacePaths, state);
+    });
+  };
+
+  const finalizeSuccess = (finalOutput: string): void => {
+    saveStatePatch({
+      running: false,
+      phase: "completed",
+      progress_text: "执行完成",
+      final_output: finalOutput.trim() || null,
+      error: null
+    });
+  };
+
+  const finalizeFailure = (errorMessage: string, finalOutput?: string | null): void => {
+    saveStatePatch({
+      running: false,
+      phase: "failed",
+      progress_text: "执行失败",
+      final_output: finalOutput ?? state.final_output,
+      error: errorMessage
+    });
+  };
+
+  const waitForIdle = async (): Promise<void> => {
+    await persistQueue;
+  };
+
+  return {
+    ingestStdoutChunk,
+    flushStdoutRemainder,
+    saveStatePatch,
+    finalizeSuccess,
+    finalizeFailure,
+    waitForIdle
+  };
+}
+
 export class CodexCliWorkerAdapter {
   readonly type = "codex";
 
@@ -393,6 +1352,7 @@ export class CodexCliWorkerAdapter {
       attempt.workspace_root,
       "-s",
       sandbox,
+      "--json",
       "--output-last-message",
       outputFile
     ];
@@ -424,59 +1384,89 @@ export class CodexCliWorkerAdapter {
       })).env;
     }
 
-    const exitCode = await new Promise<number>((resolve, reject) => {
-      const child = spawn(this.config.command, args, {
-        cwd: workspacePaths.rootDir,
-        env,
-        stdio: ["pipe", "pipe", "pipe"],
-        shell: false
-      });
-
-      child.stdout.on("data", (chunk) => {
-        stdoutStream.write(chunk);
-      });
-
-      child.stderr.on("data", (chunk) => {
-        stderrStream.write(chunk);
-      });
-
-      child.on("error", (error) => {
-        reject(error);
-      });
-
-      child.on("close", (code) => {
-        resolve(code ?? 1);
-      });
-
-      child.stdin.write(prompt);
-      child.stdin.end();
+    const runtimeTracker = createAttemptRuntimeTracker({
+      workspacePaths,
+      runId: run.id,
+      attemptId: attempt.id
     });
 
-    await Promise.all([closeStream(stdoutStream), closeStream(stderrStream)]);
+    let exitCode: number;
+    try {
+      exitCode = await new Promise<number>((resolve, reject) => {
+        const child = spawn(this.config.command, args, {
+          cwd: workspacePaths.rootDir,
+          env,
+          stdio: ["pipe", "pipe", "pipe"],
+          shell: false
+        });
 
-    if (exitCode !== 0) {
-      throw new Error(
-        await buildCodexFailureMessage({
+        child.stdout.on("data", (chunk) => {
+          stdoutStream.write(chunk);
+          runtimeTracker.ingestStdoutChunk(chunk);
+        });
+
+        child.stderr.on("data", (chunk) => {
+          stderrStream.write(chunk);
+        });
+
+        child.on("error", (error) => {
+          reject(error);
+        });
+
+        child.on("close", (code) => {
+          resolve(code ?? 1);
+        });
+
+        child.stdin.write(prompt);
+        child.stdin.end();
+      });
+
+      runtimeTracker.flushStdoutRemainder();
+      await Promise.all([closeStream(stdoutStream), closeStream(stderrStream)]);
+      await runtimeTracker.waitForIdle();
+
+      if (exitCode !== 0) {
+        const errorMessage = await buildCodexFailureMessage({
           stderrFile: attemptPaths.stderrFile,
           defaultMessage: `Codex CLI exited with code ${exitCode} for attempt ${attempt.id}`
-        })
-      );
+        });
+        runtimeTracker.finalizeFailure(errorMessage);
+        await runtimeTracker.waitForIdle();
+        throw new Error(errorMessage);
+      }
+
+      const rawOutput = await readFile(outputFile, "utf8");
+      runtimeTracker.saveStatePatch({
+        phase: "finalizing",
+        progress_text: "正在整理最终输出",
+        final_output: rawOutput.trim() || null
+      });
+      await runtimeTracker.waitForIdle();
+
+      const parsed = parseWritebackFromText(rawOutput);
+      const reportMarkdown = buildAttemptReportMarkdown(run, attempt, parsed);
+
+      await Promise.all([
+        writeJsonFile(attemptPaths.resultFile, parsed),
+        writeTextFile(join(attemptPaths.attemptDir, "report.md"), reportMarkdown)
+      ]);
+
+      runtimeTracker.finalizeSuccess(rawOutput);
+      await runtimeTracker.waitForIdle();
+
+      return {
+        writeback: parsed,
+        reportMarkdown,
+        exitCode
+      };
+    } catch (error) {
+      runtimeTracker.flushStdoutRemainder();
+      await Promise.allSettled([closeStream(stdoutStream), closeStream(stderrStream)]);
+      const message = error instanceof Error ? error.message : String(error);
+      runtimeTracker.finalizeFailure(message);
+      await runtimeTracker.waitForIdle();
+      throw error;
     }
-
-    const rawOutput = await readFile(outputFile, "utf8");
-    const parsed = parseWritebackFromText(rawOutput);
-    const reportMarkdown = buildAttemptReportMarkdown(run, attempt, parsed);
-
-    await Promise.all([
-      writeJsonFile(attemptPaths.resultFile, parsed),
-      writeTextFile(join(attemptPaths.attemptDir, "report.md"), reportMarkdown)
-    ]);
-
-    return {
-      writeback: parsed,
-      reportMarkdown,
-      exitCode
-    };
   }
 }
 
@@ -576,7 +1566,10 @@ function buildCodexAttemptPrompt(
     "Run:",
     `- Title: ${run.title}`,
     `- Description: ${run.description}`,
-    `- Workspace Root: ${run.workspace_root}`,
+    `- Workspace Root: ${attempt.workspace_root}`,
+    ...(run.managed_workspace_root && run.managed_workspace_root !== run.workspace_root
+      ? [`- Source Workspace Root: ${run.workspace_root}`]
+      : []),
     "",
     "Attempt:",
     `- Attempt ID: ${attempt.id}`,

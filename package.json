@@ -12,6 +12,7 @@
     "verify:runtime": "node --import tsx scripts/verify-runtime.ts",
     "verify:drive-run": "node --import tsx scripts/verify-drive-run.ts",
     "verify:run-api": "node --import tsx scripts/verify-run-detail-api.ts",
+    "verify:run-stream": "node --import tsx scripts/verify-run-stream.ts",
     "verify:run-loop": "node --import tsx scripts/verify-run-loop.ts",
     "verify:run-autonomy": "node --import tsx scripts/verify-run-autonomy.ts",
     "verify:worker-adapter": "node --import tsx scripts/verify-worker-adapter.ts",

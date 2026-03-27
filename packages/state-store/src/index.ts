@@ -4,6 +4,8 @@ import type {
   Attempt,
   AttemptContract,
   AttemptHeartbeat,
+  AttemptRuntimeEvent,
+  AttemptRuntimeState,
   AttemptEvaluation,
   AttemptReviewPacket,
   AttemptRuntimeVerification,
@@ -27,6 +29,8 @@ import {
   AttemptSchema,
   AttemptContractSchema,
   AttemptHeartbeatSchema,
+  AttemptRuntimeEventSchema,
+  AttemptRuntimeStateSchema,
   AttemptEvaluationSchema,
   AttemptReviewPacketSchema,
   AttemptRuntimeVerificationSchema,
@@ -96,6 +100,8 @@ export interface AttemptPaths {
   reviewPacketFile: string;
   runtimeVerificationFile: string;
   heartbeatFile: string;
+  runtimeStateFile: string;
+  runtimeEventsFile: string;
   stdoutFile: string;
   stderrFile: string;
   artifactsDir: string;
@@ -150,6 +156,8 @@ export function resolveAttemptPaths(
     reviewPacketFile: join(attemptDir, "review_packet.json"),
     runtimeVerificationFile: join(attemptDir, "artifacts", "runtime-verification.json"),
     heartbeatFile: join(attemptDir, "artifacts", "heartbeat.json"),
+    runtimeStateFile: join(attemptDir, "artifacts", "runtime-state.json"),
+    runtimeEventsFile: join(attemptDir, "artifacts", "runtime-events.ndjson"),
     stdoutFile: join(attemptDir, "stdout.log"),
     stderrFile: join(attemptDir, "stderr.log"),
     artifactsDir: join(attemptDir, "artifacts")
@@ -533,6 +541,65 @@ export async function getAttemptHeartbeat(
     return AttemptHeartbeatSchema.parse(heartbeat);
   } catch {
     return null;
+  }
+}
+
+export async function saveAttemptRuntimeState(
+  paths: WorkspacePaths,
+  state: AttemptRuntimeState
+): Promise<void> {
+  const attemptPaths = await ensureAttemptDirectories(paths, state.run_id, state.attempt_id);
+  await writeJsonFile(attemptPaths.runtimeStateFile, state);
+}
+
+export async function getAttemptRuntimeState(
+  paths: WorkspacePaths,
+  runId: string,
+  attemptId: string
+): Promise<AttemptRuntimeState | null> {
+  try {
+    const state = await readJsonFile<AttemptRuntimeState>(
+      resolveAttemptPaths(paths, runId, attemptId).runtimeStateFile
+    );
+    return AttemptRuntimeStateSchema.parse(state);
+  } catch {
+    return null;
+  }
+}
+
+export async function appendAttemptRuntimeEvent(
+  paths: WorkspacePaths,
+  event: AttemptRuntimeEvent
+): Promise<void> {
+  const attemptPaths = await ensureAttemptDirectories(paths, event.run_id, event.attempt_id);
+  await appendFile(attemptPaths.runtimeEventsFile, `${JSON.stringify(event)}\n`, "utf8");
+}
+
+export async function listAttemptRuntimeEvents(
+  paths: WorkspacePaths,
+  runId: string,
+  attemptId: string,
+  limit?: number
+): Promise<AttemptRuntimeEvent[]> {
+  try {
+    const raw = await readFile(
+      resolveAttemptPaths(paths, runId, attemptId).runtimeEventsFile,
+      "utf8"
+    );
+    const parsed = raw
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .map((line) => AttemptRuntimeEventSchema.parse(JSON.parse(line)))
+      .sort((a, b) => a.seq - b.seq);
+
+    if (typeof limit === "number" && limit > 0 && parsed.length > limit) {
+      return parsed.slice(-limit);
+    }
+
+    return parsed;
+  } catch {
+    return [];
   }
 }
 

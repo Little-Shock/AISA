@@ -1,0 +1,403 @@
+import { createHash } from "node:crypto";
+import { cp, mkdir, stat } from "node:fs/promises";
+import { spawn } from "node:child_process";
+import { basename, dirname, join, relative, resolve } from "node:path";
+import { updateRun, type Run } from "@autoresearch/domain";
+import {
+  lockRunWorkspaceRoot,
+  RunWorkspaceScopeError,
+  type RunWorkspaceScopePolicy
+} from "./workspace-scope.js";
+
+const BASELINE_AUTHOR_NAME = "AISA";
+const BASELINE_AUTHOR_EMAIL = "aisa@local";
+
+type GitCommandResult = {
+  stdout: string;
+  stderr: string;
+  exitCode: number;
+};
+
+export function getEffectiveRunWorkspaceRoot(
+  run: Pick<Run, "workspace_root" | "managed_workspace_root">
+): string {
+  return run.managed_workspace_root ?? run.workspace_root;
+}
+
+export async function ensureRunManagedWorkspace(input: {
+  run: Run;
+  policy: RunWorkspaceScopePolicy;
+}): Promise<Run> {
+  const sourceLock = await lockRunWorkspaceRoot(
+    input.run.workspace_root,
+    input.policy
+  );
+  const sourceWorkspaceRoot = sourceLock.resolvedRoot;
+  const sourceRepoRoot = await resolveGitRepoRoot(sourceWorkspaceRoot);
+
+  if (!sourceRepoRoot) {
+    if (input.run.managed_workspace_root) {
+      throw new RunWorkspaceScopeError(
+        "managed_workspace_not_git_repo",
+        `运行记录了隔离工作区，但源工作区不是 git 仓库：${sourceWorkspaceRoot}`,
+        {
+          workspace_root: sourceWorkspaceRoot,
+          managed_workspace_root: input.run.managed_workspace_root
+        }
+      );
+    }
+
+    return updateRun(input.run, {
+      workspace_root: sourceWorkspaceRoot,
+      managed_workspace_root: null
+    });
+  }
+
+  const workspaceSubpath = relative(sourceRepoRoot, sourceWorkspaceRoot);
+  if (
+    workspaceSubpath.startsWith("..") ||
+    workspaceSubpath.startsWith(`..${"/"}`)
+  ) {
+    throw new RunWorkspaceScopeError(
+      "managed_workspace_layout_invalid",
+      `运行工作区不在源 git 仓库内，无法建立隔离 worktree：${sourceWorkspaceRoot}`,
+      {
+        workspace_root: sourceWorkspaceRoot,
+        repo_root: sourceRepoRoot
+      }
+    );
+  }
+
+  if (input.run.managed_workspace_root) {
+    const validatedManagedWorkspaceRoot = await validateManagedWorkspace({
+      sourceRepoRoot,
+      sourceWorkspaceRoot,
+      managedWorkspaceRoot: input.run.managed_workspace_root,
+      policy: input.policy
+    });
+
+    return updateRun(input.run, {
+      workspace_root: sourceWorkspaceRoot,
+      managed_workspace_root: validatedManagedWorkspaceRoot
+    });
+  }
+
+  const worktreeRepoRoot = buildManagedWorktreeRepoRoot(
+    input.policy.managedWorkspaceRoot,
+    sourceRepoRoot,
+    input.run.id
+  );
+  const managedWorkspaceRoot =
+    workspaceSubpath.length === 0
+      ? worktreeRepoRoot
+      : join(worktreeRepoRoot, workspaceSubpath);
+
+  const existingWorktree = await stat(worktreeRepoRoot).catch(() => null);
+  if (existingWorktree) {
+    const validatedManagedWorkspaceRoot = await validateManagedWorkspace({
+      sourceRepoRoot,
+      sourceWorkspaceRoot,
+      managedWorkspaceRoot,
+      expectedWorktreeRepoRoot: worktreeRepoRoot,
+      policy: input.policy
+    });
+
+    return updateRun(input.run, {
+      workspace_root: sourceWorkspaceRoot,
+      managed_workspace_root: validatedManagedWorkspaceRoot
+    });
+  }
+
+  await createManagedWorkspace({
+    runId: input.run.id,
+    sourceRepoRoot,
+    worktreeRepoRoot
+  });
+  const validatedManagedWorkspaceRoot = await validateManagedWorkspace({
+    sourceRepoRoot,
+    sourceWorkspaceRoot,
+    managedWorkspaceRoot,
+    expectedWorktreeRepoRoot: worktreeRepoRoot,
+    policy: input.policy
+  });
+
+  return updateRun(input.run, {
+    workspace_root: sourceWorkspaceRoot,
+    managed_workspace_root: validatedManagedWorkspaceRoot
+  });
+}
+
+async function createManagedWorkspace(input: {
+  runId: string;
+  sourceRepoRoot: string;
+  worktreeRepoRoot: string;
+}): Promise<void> {
+  await mkdir(dirname(input.worktreeRepoRoot), { recursive: true });
+
+  const worktreeResult = await runGit(input.sourceRepoRoot, [
+    "worktree",
+    "add",
+    "--detach",
+    input.worktreeRepoRoot,
+    "HEAD"
+  ]);
+  if (worktreeResult.exitCode !== 0) {
+    throw new RunWorkspaceScopeError(
+      "managed_workspace_create_failed",
+      `无法创建 run 隔离 worktree：${extractGitError(worktreeResult.stderr)}`,
+      {
+        source_repo_root: input.sourceRepoRoot,
+        managed_workspace_root: input.worktreeRepoRoot
+      }
+    );
+  }
+
+  const trackedDiffResult = await runGit(input.sourceRepoRoot, [
+    "diff",
+    "--binary",
+    "HEAD"
+  ]);
+  if (trackedDiffResult.exitCode !== 0) {
+    throw new RunWorkspaceScopeError(
+      "managed_workspace_create_failed",
+      `无法读取源仓库当前快照：${extractGitError(trackedDiffResult.stderr)}`,
+      {
+        source_repo_root: input.sourceRepoRoot
+      }
+    );
+  }
+
+  if (trackedDiffResult.stdout.length > 0) {
+    const applyResult = await runGit(
+      input.worktreeRepoRoot,
+      ["apply", "--binary", "--index", "-"],
+      {},
+      trackedDiffResult.stdout
+    );
+    if (applyResult.exitCode !== 0) {
+      throw new RunWorkspaceScopeError(
+        "managed_workspace_create_failed",
+        `无法把源仓库变更同步到 run worktree：${extractGitError(applyResult.stderr)}`,
+        {
+          source_repo_root: input.sourceRepoRoot,
+          managed_workspace_root: input.worktreeRepoRoot
+        }
+      );
+    }
+  }
+
+  const untrackedPaths = await listUntrackedPaths(input.sourceRepoRoot);
+  for (const relativePath of untrackedPaths) {
+    const sourcePath = join(input.sourceRepoRoot, relativePath);
+    const destinationPath = join(input.worktreeRepoRoot, relativePath);
+    await mkdir(dirname(destinationPath), { recursive: true });
+    await cp(sourcePath, destinationPath, {
+      recursive: true,
+      force: true
+    });
+  }
+
+  const statusBeforeBaselineCommit = await readGitStatus(input.worktreeRepoRoot);
+  if (statusBeforeBaselineCommit.length === 0) {
+    return;
+  }
+
+  const addResult = await runGit(input.worktreeRepoRoot, ["add", "-A"]);
+  if (addResult.exitCode !== 0) {
+    throw new RunWorkspaceScopeError(
+      "managed_workspace_create_failed",
+      `无法暂存 run worktree 基线快照：${extractGitError(addResult.stderr)}`,
+      {
+        managed_workspace_root: input.worktreeRepoRoot
+      }
+    );
+  }
+
+  const commitResult = await runGit(
+    input.worktreeRepoRoot,
+    ["commit", "-m", `AISA baseline: ${input.runId}`],
+    {
+      GIT_AUTHOR_NAME: BASELINE_AUTHOR_NAME,
+      GIT_AUTHOR_EMAIL: BASELINE_AUTHOR_EMAIL,
+      GIT_COMMITTER_NAME: BASELINE_AUTHOR_NAME,
+      GIT_COMMITTER_EMAIL: BASELINE_AUTHOR_EMAIL
+    }
+  );
+  if (commitResult.exitCode !== 0) {
+    throw new RunWorkspaceScopeError(
+      "managed_workspace_create_failed",
+      `无法提交 run worktree 基线快照：${extractGitError(commitResult.stderr)}`,
+      {
+        managed_workspace_root: input.worktreeRepoRoot
+      }
+    );
+  }
+}
+
+async function validateManagedWorkspace(input: {
+  sourceRepoRoot: string;
+  sourceWorkspaceRoot: string;
+  managedWorkspaceRoot: string;
+  expectedWorktreeRepoRoot?: string;
+  policy: RunWorkspaceScopePolicy;
+}): Promise<string> {
+  const managedLock = await lockRunWorkspaceRoot(
+    input.managedWorkspaceRoot,
+    input.policy
+  );
+  const managedRepoRoot = await resolveGitRepoRoot(managedLock.resolvedRoot);
+  if (!managedRepoRoot) {
+    throw new RunWorkspaceScopeError(
+      "managed_workspace_not_git_repo",
+      `记录的隔离工作区不是 git worktree：${managedLock.resolvedRoot}`,
+      {
+        managed_workspace_root: managedLock.resolvedRoot
+      }
+    );
+  }
+
+  if (
+    input.expectedWorktreeRepoRoot &&
+    resolve(managedRepoRoot) !== resolve(input.expectedWorktreeRepoRoot)
+  ) {
+    throw new RunWorkspaceScopeError(
+      "managed_workspace_layout_invalid",
+      `记录的隔离 worktree 根目录不匹配：${managedRepoRoot}`,
+      {
+        managed_workspace_root: managedLock.resolvedRoot,
+        expected_worktree_repo_root: input.expectedWorktreeRepoRoot,
+        actual_worktree_repo_root: managedRepoRoot
+      }
+    );
+  }
+
+  const workspaceSubpath = relative(
+    input.sourceRepoRoot,
+    input.sourceWorkspaceRoot
+  );
+  const expectedManagedWorkspaceRoot =
+    workspaceSubpath.length === 0
+      ? managedRepoRoot
+      : join(managedRepoRoot, workspaceSubpath);
+  if (resolve(expectedManagedWorkspaceRoot) !== managedLock.resolvedRoot) {
+    throw new RunWorkspaceScopeError(
+      "managed_workspace_layout_invalid",
+      `记录的隔离工作区路径与源工作区子路径不匹配：${managedLock.resolvedRoot}`,
+      {
+        managed_workspace_root: managedLock.resolvedRoot,
+        expected_managed_workspace_root: expectedManagedWorkspaceRoot,
+        source_workspace_root: input.sourceWorkspaceRoot,
+        source_repo_root: input.sourceRepoRoot
+      }
+    );
+  }
+
+  return managedLock.resolvedRoot;
+}
+
+function buildManagedWorktreeRepoRoot(
+  managedWorkspaceBaseRoot: string,
+  sourceRepoRoot: string,
+  runId: string
+): string {
+  const sourceRepoHash = createHash("sha1")
+    .update(sourceRepoRoot)
+    .digest("hex")
+    .slice(0, 8);
+
+  return join(
+    managedWorkspaceBaseRoot,
+    `${basename(sourceRepoRoot)}-${sourceRepoHash}`,
+    runId
+  );
+}
+
+async function listUntrackedPaths(repoRoot: string): Promise<string[]> {
+  const result = await runGit(repoRoot, [
+    "ls-files",
+    "--others",
+    "--exclude-standard",
+    "-z"
+  ]);
+  if (result.exitCode !== 0) {
+    throw new RunWorkspaceScopeError(
+      "managed_workspace_create_failed",
+      `无法列出源仓库未跟踪文件：${extractGitError(result.stderr)}`,
+      {
+        source_repo_root: repoRoot
+      }
+    );
+  }
+
+  return result.stdout
+    .split("\0")
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0);
+}
+
+async function resolveGitRepoRoot(workspaceRoot: string): Promise<string | null> {
+  const result = await runGit(workspaceRoot, ["rev-parse", "--show-toplevel"]);
+  return result.exitCode === 0 ? result.stdout.trim() : null;
+}
+
+async function readGitStatus(repoRoot: string): Promise<string[]> {
+  const result = await runGit(repoRoot, ["status", "--short"]);
+  if (result.exitCode !== 0) {
+    throw new RunWorkspaceScopeError(
+      "managed_workspace_create_failed",
+      `无法读取 worktree git 状态：${extractGitError(result.stderr)}`,
+      {
+        repo_root: repoRoot
+      }
+    );
+  }
+
+  return result.stdout
+    .split("\n")
+    .map((line) => line.trimEnd())
+    .filter((line) => line.length > 0);
+}
+
+async function runGit(
+  cwd: string,
+  args: string[],
+  env: Record<string, string> = {},
+  stdin = ""
+): Promise<GitCommandResult> {
+  return await new Promise<GitCommandResult>((resolvePromise, reject) => {
+    const child = spawn("git", ["-C", cwd, ...args], {
+      env: {
+        ...process.env,
+        ...env
+      },
+      stdio: ["pipe", "pipe", "pipe"]
+    });
+
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => {
+      stdout += String(chunk);
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += String(chunk);
+    });
+    child.on("error", reject);
+    child.on("close", (code) => {
+      resolvePromise({
+        stdout,
+        stderr,
+        exitCode: code ?? 1
+      });
+    });
+
+    if (stdin.length > 0) {
+      child.stdin.write(stdin);
+    }
+    child.stdin.end();
+  });
+}
+
+function extractGitError(stderr: string): string {
+  const trimmed = stderr.trim();
+  return trimmed.length > 0 ? trimmed : "git 命令失败";
+}

@@ -67,6 +67,37 @@ type GoalDetail = {
   }>;
 };
 
+type AttemptRuntimeState = {
+  running: boolean;
+  phase: string | null;
+  active_since: string | null;
+  last_event_at: string | null;
+  progress_text: string | null;
+  recent_activities: string[];
+  completed_steps: string[];
+  process_content: string[];
+  final_output: string | null;
+  error: string | null;
+  session_id: string | null;
+  event_count: number;
+  updated_at: string;
+};
+
+type AttemptRuntimeEvent = {
+  id: string;
+  ts: string;
+  type: string;
+  summary: string;
+  seq: number;
+};
+
+type AttemptHeartbeat = {
+  status: string;
+  started_at: string;
+  heartbeat_at: string;
+  released_at: string | null;
+};
+
 type RunSummaryItem = {
   run: {
     id: string;
@@ -96,6 +127,8 @@ type RunSummaryItem = {
     started_at: string | null;
     ended_at: string | null;
   } | null;
+  latest_attempt_runtime_state: AttemptRuntimeState | null;
+  latest_attempt_heartbeat: AttemptHeartbeat | null;
   task_focus: string;
   verification_command_count: number;
 };
@@ -194,6 +227,9 @@ type RunDetail = {
         expected_exit_code: number;
       }>;
     } | null;
+    runtime_state: AttemptRuntimeState | null;
+    runtime_events: AttemptRuntimeEvent[];
+    heartbeat: AttemptHeartbeat | null;
     stdout_excerpt: string;
     stderr_excerpt: string;
     journal: Array<{
@@ -314,6 +350,8 @@ export default function Page() {
       null
     );
   }, [runDetail]);
+  const selectedRunRuntimeState = selectedRunAttemptDetail?.runtime_state ?? null;
+  const selectedRunHeartbeat = selectedRunAttemptDetail?.heartbeat ?? null;
 
   const overviewStats = useMemo(() => {
     const runningGoals = goals.filter((item) => item.goal.status === "running").length;
@@ -411,10 +449,53 @@ export default function Page() {
         "加载运行详情失败"
       );
       setRunDetail(payload);
+      syncRunSummaryFromDetail(payload);
       setError(null);
     } catch (cause) {
       setError(formatLoadError("加载运行详情失败", cause));
     }
+  }
+
+  function syncRunSummaryFromDetail(nextDetail: RunDetail) {
+    const latestDetail =
+      nextDetail.attempt_details.find(
+        (detailItem) => detailItem.attempt.id === nextDetail.current?.latest_attempt_id
+      ) ??
+      nextDetail.attempt_details.at(-1) ??
+      null;
+
+    setRuns((currentRuns) =>
+      currentRuns.map((item) =>
+        item.run.id === nextDetail.run.id
+          ? {
+              ...item,
+              current: nextDetail.current
+                ? {
+                    run_status: nextDetail.current.run_status,
+                    latest_attempt_id: nextDetail.current.latest_attempt_id,
+                    recommended_next_action: nextDetail.current.recommended_next_action,
+                    recommended_attempt_type: nextDetail.current.recommended_attempt_type,
+                    summary: nextDetail.current.summary,
+                    blocking_reason: nextDetail.current.blocking_reason,
+                    waiting_for_human: nextDetail.current.waiting_for_human,
+                    updated_at: nextDetail.current.updated_at
+                  }
+                : null,
+              attempt_count: nextDetail.attempts.length,
+              latest_attempt: latestDetail?.attempt ?? null,
+              latest_attempt_runtime_state: latestDetail?.runtime_state ?? null,
+              latest_attempt_heartbeat: latestDetail?.heartbeat ?? null,
+              task_focus:
+                latestDetail?.contract?.objective ??
+                latestDetail?.attempt.objective ??
+                item.task_focus,
+              verification_command_count:
+                latestDetail?.contract?.verification_plan?.commands.length ??
+                item.verification_command_count
+            }
+          : item
+      )
+    );
   }
 
   async function refreshDashboard(options?: {
@@ -489,6 +570,55 @@ export default function Page() {
       refreshInFlightRef.current = false;
     }
   }
+
+  useEffect(() => {
+    if (!selectedRunId) {
+      return;
+    }
+
+    const eventSource = new EventSource(`${apiBaseUrl}/runs/${selectedRunId}/stream`);
+
+    const handleSnapshot = (event: MessageEvent<string>) => {
+      try {
+        const payload = JSON.parse(event.data) as RunDetail;
+        startTransition(() => {
+          setRunDetail(payload);
+          syncRunSummaryFromDetail(payload);
+        });
+        setError(null);
+        setRefreshState((current) => ({
+          ...current,
+          isRefreshing: false,
+          lastSuccessAt: Date.now(),
+          lastErrorAt: null,
+          lastErrorMessage: null
+        }));
+      } catch (cause) {
+        const message = formatLoadError("解析运行实时流失败", cause);
+        setRefreshState((current) => ({
+          ...current,
+          lastErrorAt: Date.now(),
+          lastErrorMessage: message
+        }));
+      }
+    };
+
+    const handleError = () => {
+      setRefreshState((current) => ({
+        ...current,
+        lastErrorAt: Date.now(),
+        lastErrorMessage: "运行实时流暂时断开，正在等待自动重连。"
+      }));
+    };
+
+    eventSource.addEventListener("snapshot", handleSnapshot as EventListener);
+    eventSource.onerror = handleError;
+
+    return () => {
+      eventSource.removeEventListener("snapshot", handleSnapshot as EventListener);
+      eventSource.close();
+    };
+  }, [selectedRunId]);
 
   async function createGoal() {
     setBusy("create");
@@ -682,7 +812,7 @@ export default function Page() {
           <div className="live-strip-metrics">
             <div className="live-strip-metric">
               <span>刷新节奏</span>
-              <strong>每 4 秒</strong>
+              <strong>总览 4 秒 / 详情实时</strong>
             </div>
             <div className="live-strip-metric">
               <span>数据年龄</span>
@@ -710,6 +840,7 @@ export default function Page() {
                   ) : (
                     runs.map((item) => {
                       const selected = item.run.id === selectedRunId;
+                      const runtimeState = item.latest_attempt_runtime_state;
                       const taskFocus = truncateText(
                         localizeUiText(item.task_focus || item.run.description),
                         120
@@ -732,6 +863,14 @@ export default function Page() {
                         item.latest_attempt?.status === "running"
                           ? item.latest_attempt.started_at
                           : null;
+                      const liveProgress = truncateText(
+                        localizeUiText(
+                          runtimeState?.progress_text ??
+                            runtimeState?.recent_activities.at(-1) ??
+                            ""
+                        ),
+                        110
+                      );
                       return (
                         <button
                           key={item.run.id}
@@ -767,6 +906,11 @@ export default function Page() {
                                 {item.latest_attempt.id}
                               </span>
                             ) : null}
+                            {runtimeState?.phase ? (
+                              <span className="run-card-chip">
+                                阶段 {runtimePhaseLabel(runtimeState.phase)}
+                              </span>
+                            ) : null}
                             {runningSince ? (
                               <span className="run-card-chip run-card-chip-live">
                                 已运行 {formatElapsed(runningSince, nowTs)}
@@ -784,6 +928,9 @@ export default function Page() {
                             ) : null}
                           </div>
                           <p className="run-card-summary">{taskSummary}</p>
+                          {liveProgress ? (
+                            <p className="run-card-summary">{liveProgress}</p>
+                          ) : null}
                           <div className="goal-card-meta">
                             {workspaceLabel} · 最近变化 {formatRelativeTime(latestRunSignalAt, nowTs)}
                             {item.latest_attempt?.started_at
@@ -959,6 +1106,26 @@ export default function Page() {
                       />
                       <InfoCard label="负责人" value={runDetail.run.owner_id} />
                       <InfoCard label="工作区" value={runDetail.run.workspace_root} />
+                      <InfoCard
+                        label="实时阶段"
+                        value={runtimePhaseLabel(selectedRunRuntimeState?.phase)}
+                      />
+                      <InfoCard
+                        label="会话"
+                        value={selectedRunRuntimeState?.session_id ?? "暂无"}
+                      />
+                      <InfoCard
+                        label="事件数"
+                        value={String(selectedRunRuntimeState?.event_count ?? 0)}
+                      />
+                      <InfoCard
+                        label="心跳"
+                        value={
+                          selectedRunHeartbeat?.heartbeat_at
+                            ? `最近 ${formatRelativeTime(selectedRunHeartbeat.heartbeat_at, nowTs)}`
+                            : "暂无"
+                        }
+                      />
                     </div>
 
                     <div className="dual-grid">
@@ -989,6 +1156,22 @@ export default function Page() {
                           }
                         />
                         <SectionList
+                          title="最近活动"
+                          items={selectedRunRuntimeState?.recent_activities ?? []}
+                        />
+                        <SectionList
+                          title="已完成步骤"
+                          items={selectedRunRuntimeState?.completed_steps ?? []}
+                        />
+                        <CodeBlock
+                          title="过程内容"
+                          value={
+                            selectedRunRuntimeState?.process_content.length
+                              ? selectedRunRuntimeState.process_content.join("\n")
+                              : "还没有过程内容。"
+                          }
+                        />
+                        <SectionList
                           title="运行层约定"
                           items={[
                             localizeUiText(runDetail.run.description),
@@ -1009,7 +1192,10 @@ export default function Page() {
                             `运行状态：${statusLabel(runDetail.current?.run_status ?? "draft")}`,
                             `建议的尝试类型：${runDetail.current?.recommended_attempt_type ? attemptTypeLabel(runDetail.current.recommended_attempt_type) : "暂无"}`,
                             `等待人工：${runDetail.current?.waiting_for_human ? "是" : "否"}`,
-                            `最新尝试：${runDetail.current?.latest_attempt_id ?? "暂无"}`
+                            `最新尝试：${runDetail.current?.latest_attempt_id ?? "暂无"}`,
+                            `实时阶段：${runtimePhaseLabel(selectedRunRuntimeState?.phase)}`,
+                            `最近事件：${selectedRunRuntimeState?.last_event_at ? formatRelativeTime(selectedRunRuntimeState.last_event_at, nowTs) : "暂无"}`,
+                            `事件总数：${String(selectedRunRuntimeState?.event_count ?? 0)}`
                           ]}
                         />
                         <SectionList
@@ -1022,6 +1208,15 @@ export default function Page() {
                         {runDetail.current?.blocking_reason ? (
                           <Callout tone="rose" title="当前卡点">
                             {localizeUiText(runDetail.current.blocking_reason)}
+                          </Callout>
+                        ) : null}
+                        <CodeBlock
+                          title="最终输出"
+                          value={selectedRunRuntimeState?.final_output || "还没有最终输出。"}
+                        />
+                        {selectedRunRuntimeState?.error ? (
+                          <Callout tone="rose" title="当前错误">
+                            {localizeUiText(selectedRunRuntimeState.error)}
                           </Callout>
                         ) : null}
                       </SubPanel>
@@ -1280,6 +1475,10 @@ function AttemptCard({
           value={formatAttemptElapsed(detail.attempt.started_at, detail.attempt.ended_at)}
         />
         <MiniMetric
+          label="阶段"
+          value={runtimePhaseLabel(detail.runtime_state?.phase)}
+        />
+        <MiniMetric
           label="判断"
           value={statusLabel(detail.evaluation?.recommendation ?? "未判断")}
         />
@@ -1306,6 +1505,14 @@ function AttemptCard({
           />
           <SectionList title="期望产物" items={detail.contract?.expected_artifacts ?? []} />
           <SectionList title="契约回放命令" items={contractCommands} />
+          <SectionList
+            title="最近活动"
+            items={detail.runtime_state?.recent_activities ?? []}
+          />
+          <SectionList
+            title="已完成步骤"
+            items={detail.runtime_state?.completed_steps ?? []}
+          />
         </div>
 
         <div className="attempt-section">
@@ -1325,9 +1532,24 @@ function AttemptCard({
             title="运行时回放"
             items={replayCommands}
           />
+          <SectionList
+            title="实时运行态"
+            items={[
+              `阶段：${runtimePhaseLabel(detail.runtime_state?.phase)}`,
+              `会话：${detail.runtime_state?.session_id ?? "暂无"}`,
+              `事件总数：${String(detail.runtime_state?.event_count ?? 0)}`,
+              `最近事件：${detail.runtime_state?.last_event_at ? formatDateTime(detail.runtime_state.last_event_at) : "暂无"}`,
+              `心跳：${detail.heartbeat?.heartbeat_at ? formatDateTime(detail.heartbeat.heartbeat_at) : "暂无"}`
+            ]}
+          />
           {detail.runtime_verification?.failure_reason ? (
             <Callout tone="rose" title="回放失败原因">
               {localizeUiText(detail.runtime_verification.failure_reason)}
+            </Callout>
+          ) : null}
+          {detail.runtime_state?.error ? (
+            <Callout tone="rose" title="运行错误">
+              {localizeUiText(detail.runtime_state.error)}
             </Callout>
           ) : null}
           <SectionList
@@ -1363,8 +1585,26 @@ function AttemptCard({
         <div className="attempt-section">
           <div className="attempt-section-title">辅助输出</div>
           <CodeBlock
+            title="过程内容"
+            value={
+              detail.runtime_state?.process_content.length
+                ? detail.runtime_state.process_content.join("\n")
+                : "暂无过程内容。"
+            }
+          />
+          <CodeBlock
+            title="最终输出"
+            value={detail.runtime_state?.final_output || "暂无最终输出。"}
+          />
+          <CodeBlock
             title="标准输出"
             value={detail.stdout_excerpt || "暂无标准输出。"}
+          />
+          <SectionList
+            title="事件流"
+            items={detail.runtime_events.map(
+              (event) => `${formatDateTime(event.ts)} · ${event.summary || event.type}`
+            )}
           />
           <SectionList
             title="尝试时间线"
@@ -1414,6 +1654,35 @@ function abbreviateWorkspace(value: string): string {
   }
 
   return `.../${segments.slice(-3).join("/")}`;
+}
+
+function runtimePhaseLabel(value: string | null | undefined): string {
+  switch (value) {
+    case "starting":
+      return "启动中";
+    case "running":
+      return "运行中";
+    case "reasoning":
+      return "思考中";
+    case "planning":
+      return "规划中";
+    case "tool":
+      return "调用工具";
+    case "verifying":
+      return "验证中";
+    case "writing":
+      return "写入改动";
+    case "message":
+      return "生成内容";
+    case "finalizing":
+      return "整理输出";
+    case "completed":
+      return "已完成";
+    case "failed":
+      return "已失败";
+    default:
+      return value ? localizeUiText(value) : "暂无";
+  }
 }
 
 function formatDateTime(value: string | null | undefined): string {

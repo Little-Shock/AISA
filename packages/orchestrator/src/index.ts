@@ -76,6 +76,7 @@ import {
   saveEvalResult,
   saveGoal,
   saveReport,
+  saveRun,
   saveRunReport,
   saveRunSteer,
   saveSteer,
@@ -101,6 +102,10 @@ import {
   RunWorkspaceScopeError,
   type RunWorkspaceScopePolicy
 } from "./workspace-scope.js";
+import {
+  ensureRunManagedWorkspace,
+  getEffectiveRunWorkspaceRoot
+} from "./run-workspace.js";
 
 export interface OrchestratorOptions {
   attemptHeartbeatIntervalMs?: number;
@@ -473,13 +478,32 @@ export class Orchestrator {
   private async tickRuns(): Promise<void> {
     const runs = await listRuns(this.workspacePaths);
 
-    for (const run of runs) {
+    for (const persistedRun of runs) {
+      let run = persistedRun;
       const current = await getCurrentDecision(this.workspacePaths, run.id);
       const attempts = await listAttempts(this.workspacePaths, run.id);
       await this.ensureSettledAttemptReviewPackets(run.id, current, attempts);
 
       if (!current) {
         continue;
+      }
+
+      try {
+        const ensuredRun = await this.ensureRunWorkspaceReady(run);
+        if (
+          ensuredRun.workspace_root !== run.workspace_root ||
+          ensuredRun.managed_workspace_root !== run.managed_workspace_root
+        ) {
+          run = ensuredRun;
+          await saveRun(this.workspacePaths, run);
+        }
+      } catch (error) {
+        if (error instanceof RunWorkspaceScopeError) {
+          await this.persistRunWorkspaceScopeBlocked(run, current, error);
+          continue;
+        }
+
+        throw error;
       }
 
       const workspaceScopeError = await this.getRunWorkspaceScopeError(run);
@@ -507,7 +531,19 @@ export class Orchestrator {
             continue;
           }
 
-          await this.recoverRunningAttempt(run.id, runningAttempt, current);
+          const refreshedAttempt = await getAttempt(
+            this.workspacePaths,
+            run.id,
+            runningAttempt.id
+          );
+          if (refreshedAttempt.status !== "running") {
+            continue;
+          }
+          if (await this.isAttemptHeartbeatFresh(run.id, runningAttempt.id)) {
+            continue;
+          }
+
+          await this.recoverRunningAttempt(run.id, refreshedAttempt, current);
         }
         continue;
       }
@@ -517,10 +553,14 @@ export class Orchestrator {
       );
 
       if (pendingAttempt) {
+        const alignedAttempt = await this.ensureAttemptUsesRunWorkspace(
+          run,
+          pendingAttempt
+        );
         const activeKey = this.getActiveAttemptKey(run.id, pendingAttempt.id);
         if (!this.activeAttempts.has(activeKey)) {
           this.activeAttempts.add(activeKey);
-          void this.executeAttempt(run.id, pendingAttempt.id).finally(() => {
+          void this.executeAttempt(run.id, alignedAttempt.id).finally(() => {
             this.activeAttempts.delete(activeKey);
           });
         }
@@ -632,7 +672,7 @@ export class Orchestrator {
             queuedSteers.map((runSteer) => runSteer.content)
           ),
           success_criteria: run.success_criteria,
-          workspace_root: run.workspace_root
+          workspace_root: getEffectiveRunWorkspaceRoot(run)
         });
         return {
           attempt,
@@ -646,7 +686,7 @@ export class Orchestrator {
         worker: this.adapter.type,
         objective: `Understand the repository and surface the best next step for goal: ${run.title}`,
         success_criteria: run.success_criteria,
-        workspace_root: run.workspace_root
+        workspace_root: getEffectiveRunWorkspaceRoot(run)
       });
       return {
         attempt,
@@ -688,7 +728,7 @@ export class Orchestrator {
         attemptType === "execution" && nextExecutionDraft?.success_criteria
           ? nextExecutionDraft.success_criteria
           : run.success_criteria,
-      workspace_root: run.workspace_root
+      workspace_root: getEffectiveRunWorkspaceRoot(run)
     });
     return {
       attempt,
@@ -705,6 +745,7 @@ export class Orchestrator {
   private async executeAttempt(runId: string, attemptId: string): Promise<void> {
     const run = await getRun(this.workspacePaths, runId);
     let attempt = await getAttempt(this.workspacePaths, runId, attemptId);
+    attempt = await this.ensureAttemptUsesRunWorkspace(run, attempt);
     const attemptContract = await getAttemptContract(
       this.workspacePaths,
       runId,
@@ -741,7 +782,12 @@ export class Orchestrator {
         description: run.description,
         success_criteria: run.success_criteria,
         constraints: run.constraints,
-        workspace_root: run.workspace_root
+        workspace_root: attempt.workspace_root,
+        ...(run.managed_workspace_root
+          ? {
+              source_workspace_root: run.workspace_root
+            }
+          : {})
       },
       current_decision: current,
       queued_steers: steers
@@ -1747,7 +1793,7 @@ export class Orchestrator {
         : null;
       const inferredVerificationPlan =
         reusableExecutionContract?.verification_plan ??
-        (await this.inferDefaultExecutionVerificationPlan(run.workspace_root));
+        (await this.inferDefaultExecutionVerificationPlan(attempt.workspace_root));
       return createAttemptContract({
         attempt_id: attempt.id,
         run_id: run.id,
@@ -2474,6 +2520,12 @@ export class Orchestrator {
   ): Promise<RunWorkspaceScopeError | null> {
     try {
       await lockRunWorkspaceRoot(run.workspace_root, this.runWorkspaceScopePolicy);
+      if (run.managed_workspace_root) {
+        await lockRunWorkspaceRoot(
+          run.managed_workspace_root,
+          this.runWorkspaceScopePolicy
+        );
+      }
       return null;
     } catch (error) {
       if (error instanceof RunWorkspaceScopeError) {
@@ -2490,9 +2542,40 @@ export class Orchestrator {
   ): Promise<void> {
     await assertAttemptWorkspaceWithinRunScope({
       runWorkspaceRoot: run.workspace_root,
+      managedRunWorkspaceRoot: run.managed_workspace_root,
       attemptWorkspaceRoot: attempt.workspace_root,
       policy: this.runWorkspaceScopePolicy
     });
+  }
+
+  private async ensureRunWorkspaceReady(run: Run): Promise<Run> {
+    return await ensureRunManagedWorkspace({
+      run,
+      policy: this.runWorkspaceScopePolicy
+    });
+  }
+
+  private async ensureAttemptUsesRunWorkspace(
+    run: Run,
+    attempt: Attempt
+  ): Promise<Attempt> {
+    if (!run.managed_workspace_root) {
+      return attempt;
+    }
+
+    if (attempt.workspace_root !== run.workspace_root) {
+      return attempt;
+    }
+
+    if (!["created", "queued"].includes(attempt.status)) {
+      return attempt;
+    }
+
+    const nextAttempt = updateAttempt(attempt, {
+      workspace_root: run.managed_workspace_root
+    });
+    await saveAttempt(this.workspacePaths, nextAttempt);
+    return nextAttempt;
   }
 
   private async persistRunWorkspaceScopeBlocked(

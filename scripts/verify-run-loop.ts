@@ -78,6 +78,9 @@ type ScenarioCase = {
 
 type ScenarioObservation = {
   run_id: string;
+  run_workspace_root: string;
+  managed_workspace_root: string | null;
+  source_workspace_git_status: string[];
   run_status: string | null;
   waiting_for_human: boolean;
   recommended_next_action: string | null;
@@ -433,13 +436,13 @@ class ScenarioAdapter {
     ) {
       if (this.driver === "execution_runtime_source_drift_requires_restart") {
         await writeFile(
-          join(input.run.workspace_root, "packages", "orchestrator", "src", "index.ts"),
+          join(input.attempt.workspace_root, "packages", "orchestrator", "src", "index.ts"),
           `export const runtimeMarker = "${input.attempt.id}";\n`,
           "utf8"
         );
       } else {
         await writeFile(
-          join(input.run.workspace_root, "execution-change.md"),
+          join(input.attempt.workspace_root, "execution-change.md"),
           `execution change from ${input.attempt.id}\n`,
           "utf8"
         );
@@ -1531,6 +1534,55 @@ async function runCommand(rootDir: string, args: string[]): Promise<void> {
   });
 }
 
+async function readGitStatusOrEmpty(rootDir: string): Promise<string[]> {
+  const result = await runCommandCapture(rootDir, [
+    "git",
+    "-C",
+    rootDir,
+    "status",
+    "--short"
+  ]);
+  if (result.exitCode !== 0) {
+    return [];
+  }
+
+  return result.stdout
+    .split("\n")
+    .map((line) => line.trimEnd())
+    .filter((line) => line.length > 0);
+}
+
+async function runCommandCapture(
+  rootDir: string,
+  args: string[]
+): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+  return await new Promise((resolve, reject) => {
+    const [command, ...commandArgs] = args;
+    const child = spawn(command!, commandArgs, {
+      cwd: rootDir,
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => {
+      stdout += String(chunk);
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += String(chunk);
+    });
+    child.on("error", (error) => {
+      reject(error);
+    });
+    child.on("close", (code) => {
+      resolve({
+        stdout,
+        stderr,
+        exitCode: code ?? 1
+      });
+    });
+  });
+}
+
 function buildExpectedInputContextRef(runId: string, attemptId: string): string {
   return `runs/${runId}/attempts/${attemptId}/context.json`;
 }
@@ -1539,9 +1591,11 @@ async function collectObservation(
   workspacePaths: ReturnType<typeof resolveWorkspacePaths>,
   runId: string
 ): Promise<ScenarioObservation> {
+  const run = await getRun(workspacePaths, runId);
   const attempts = await listAttempts(workspacePaths, runId);
   const current = await getCurrentDecision(workspacePaths, runId);
   const journal = await listRunJournal(workspacePaths, runId);
+  const sourceWorkspaceGitStatus = await readGitStatusOrEmpty(run.workspace_root);
   const verificationStatuses = (
     await Promise.all(
       attempts.map(async (attempt) => (await getAttemptEvaluation(workspacePaths, runId, attempt.id))?.verification_status ?? null)
@@ -1654,6 +1708,9 @@ async function collectObservation(
 
   return {
     run_id: runId,
+    run_workspace_root: run.workspace_root,
+    managed_workspace_root: run.managed_workspace_root,
+    source_workspace_git_status: sourceWorkspaceGitStatus,
     run_status: current?.run_status ?? null,
     waiting_for_human: current?.waiting_for_human ?? false,
     recommended_next_action: current?.recommended_next_action ?? null,
@@ -1870,8 +1927,22 @@ function assertCase(scenario: ScenarioCase, observation: ScenarioObservation): v
       `${scenario.id}: expected a completed execution review packet with runtime verification`
     );
     assert.ok(
-      executionPacket.runtime_verification_preexisting_git_status.includes(" M README.md"),
-      `${scenario.id}: runtime verification should keep the preexisting dirty baseline`
+      observation.managed_workspace_root,
+      `${scenario.id}: expected the run to provision a managed workspace`
+    );
+    assert.notEqual(
+      observation.managed_workspace_root,
+      observation.run_workspace_root,
+      `${scenario.id}: managed workspace should differ from the source workspace`
+    );
+    assert.ok(
+      observation.source_workspace_git_status.includes(" M README.md"),
+      `${scenario.id}: source workspace should stay dirty so the isolation is real`
+    );
+    assert.deepEqual(
+      executionPacket.runtime_verification_preexisting_git_status,
+      [],
+      `${scenario.id}: runtime verification should start from a clean managed baseline`
     );
     assert.deepEqual(
       executionPacket.runtime_verification_new_git_status,
@@ -1899,8 +1970,13 @@ function assertCase(scenario: ScenarioCase, observation: ScenarioObservation): v
       `${scenario.id}: dirty workspace without new delta should fail as no_git_changes`
     );
     assert.ok(
-      executionPacket.runtime_verification_preexisting_git_status.includes(" M README.md"),
-      `${scenario.id}: runtime verification should keep the dirty baseline`
+      observation.source_workspace_git_status.includes(" M README.md"),
+      `${scenario.id}: source workspace should stay dirty while managed verification runs elsewhere`
+    );
+    assert.deepEqual(
+      executionPacket.runtime_verification_preexisting_git_status,
+      [],
+      `${scenario.id}: managed verification baseline should start clean`
     );
     assert.deepEqual(
       executionPacket.runtime_verification_new_git_status,

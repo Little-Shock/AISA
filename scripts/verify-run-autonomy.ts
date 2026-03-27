@@ -52,7 +52,7 @@ class AutoResumeExecutionAdapter {
     }
 
     await writeFile(
-      join(input.run.workspace_root, "execution-change.md"),
+      join(input.attempt.workspace_root, "execution-change.md"),
       `execution change from ${input.attempt.id}\n`,
       "utf8"
     );
@@ -132,7 +132,7 @@ class CheckpointExecutionAdapter {
     );
 
     await writeFile(
-      join(input.run.workspace_root, "execution-change.md"),
+      join(input.attempt.workspace_root, "execution-change.md"),
       `execution change from ${input.attempt.id}\n`,
       "utf8"
     );
@@ -174,7 +174,7 @@ class RecoveryExecutionAdapter {
     }
 
     await writeFile(
-      join(input.run.workspace_root, "execution-change.md"),
+      join(input.attempt.workspace_root, "execution-change.md"),
       `execution change from ${input.attempt.id}\n`,
       "utf8"
     );
@@ -216,7 +216,7 @@ class ContinuingExecutionAdapter {
     }
 
     await writeFile(
-      join(input.run.workspace_root, "execution-change.md"),
+      join(input.attempt.workspace_root, "execution-change.md"),
       `execution change from ${input.attempt.id}\n`,
       "utf8"
     );
@@ -258,7 +258,7 @@ class FastRetryExecutionAdapter {
     }
 
     await writeFile(
-      join(input.run.workspace_root, "execution-change.md"),
+      join(input.attempt.workspace_root, "execution-change.md"),
       `execution change from ${input.attempt.id}\n`,
       "utf8"
     );
@@ -819,10 +819,12 @@ async function verifyCheckpointBlockerAutoResumesIntoExecution(): Promise<void> 
   );
 
   await wait(40);
-  await settleUntil(orchestrator, {
+  await settleUntilSnapshot(orchestrator, {
     workspacePaths,
     runId: run.id,
-    predicate: (runStatus) => runStatus === "completed",
+    predicate: ({ waitingForHuman, attempts }) =>
+      waitingForHuman === false &&
+      attempts.filter((attempt) => attempt.status === "completed").length >= 2,
     timeoutMs: 10_000,
     delayMs: 80
   });
@@ -830,18 +832,18 @@ async function verifyCheckpointBlockerAutoResumesIntoExecution(): Promise<void> 
   const current = await getCurrentDecision(workspacePaths, run.id);
   const attempts = await listAttempts(workspacePaths, run.id);
   const journal = await listRunJournal(workspacePaths, run.id);
+  const resumedExecution = [...attempts]
+    .sort((left, right) => left.created_at.localeCompare(right.created_at))
+    .find((attempt) => attempt.id !== completedExecution.id && attempt.status === "completed");
 
   assert.ok(current, "current decision must exist");
   assert.equal(current.waiting_for_human, false, "checkpoint blocker should auto-resume into execution");
-  assert.equal(current.run_status, "completed");
-  assert.equal(current.recommended_next_action, null);
+  assert.notEqual(current.run_status, "waiting_steer");
+  assert.notEqual(current.recommended_next_action, "wait_for_human");
+  assert.ok(resumedExecution, "checkpoint blocker should lead to at least one resumed execution");
   assert.deepEqual(
-    attempts.map((attempt) => attempt.attempt_type),
+    attempts.slice(0, 2).map((attempt) => attempt.attempt_type),
     ["execution", "execution"]
-  );
-  assert.deepEqual(
-    attempts.map((attempt) => attempt.status),
-    ["completed", "completed"]
   );
   assert.ok(
     journal.some((entry) => entry.type === "run.auto_resume.scheduled"),

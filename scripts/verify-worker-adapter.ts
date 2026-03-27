@@ -10,6 +10,8 @@ import {
 } from "../packages/domain/src/index.ts";
 import {
   ensureWorkspace,
+  getAttemptRuntimeState,
+  listAttemptRuntimeEvents,
   resolveAttemptPaths,
   resolveWorkspacePaths
 } from "../packages/state-store/src/index.ts";
@@ -25,6 +27,7 @@ async function createFakeCodexScript(input: {
   exitCode?: number;
   stderrMessage?: string;
   jsonPayload?: string;
+  jsonEvents?: string[];
 }): Promise<string> {
   const scriptPath = join(input.rootDir, input.fileName);
   const lines =
@@ -32,19 +35,32 @@ async function createFakeCodexScript(input: {
       ? [
           "#!/bin/sh",
           "OUTPUT=\"\"",
+          "SAW_JSON=0",
           "while [ \"$#\" -gt 0 ]; do",
+          "  if [ \"$1\" = \"--json\" ]; then",
+          "    SAW_JSON=1",
+          "    shift",
+          "    continue",
+          "  fi",
           "  if [ \"$1\" = \"--output-last-message\" ]; then",
           "    OUTPUT=\"$2\"",
           "    shift 2",
-          "    continue",
+            "    continue",
           "  fi",
           "  shift",
           "done",
           "cat >/dev/null",
+          "if [ \"$SAW_JSON\" -ne 1 ]; then",
+          "  echo \"missing --json\" >&2",
+          "  exit 3",
+          "fi",
           "if [ -z \"$OUTPUT\" ]; then",
           "  echo \"missing --output-last-message\" >&2",
           "  exit 2",
           "fi",
+          ...(input.jsonEvents && input.jsonEvents.length > 0
+            ? ["cat <<'EOF'", ...input.jsonEvents, "EOF"]
+            : []),
           "cat <<'EOF' > \"$OUTPUT\"",
           input.jsonPayload,
           "EOF",
@@ -52,7 +68,20 @@ async function createFakeCodexScript(input: {
         ]
       : [
           "#!/bin/sh",
+          "SAW_JSON=0",
+          "while [ \"$#\" -gt 0 ]; do",
+          "  if [ \"$1\" = \"--json\" ]; then",
+          "    SAW_JSON=1",
+          "    shift",
+          "    continue",
+          "  fi",
+          "  shift",
+          "done",
           "cat >/dev/null",
+          "if [ \"$SAW_JSON\" -ne 1 ]; then",
+          "  echo \"missing --json\" >&2",
+          "  exit 3",
+          "fi",
           `echo ${JSON.stringify(
             input.stderrMessage ?? "unexpected status 401 Unauthorized: invalid token"
           )} >&2`,
@@ -273,6 +302,201 @@ async function main(): Promise<void> {
     skipGitRepoCheck: false
   });
 
+  const runtimeFixture = createExecutionAttemptFixture({
+    runId: run.id,
+    workspaceRoot: rootDir,
+    objective: "验证运行时事件流会被落盘并归一化。"
+  });
+  const changedRuntimeFile = join(rootDir, "scripts", "verify-runtime.ts");
+  const runtimeEventsPayload = JSON.stringify(
+    {
+      summary: "事件流已落盘。",
+      findings: [
+        {
+          type: "fact",
+          content: "运行时状态文件已写入。",
+          evidence: ["artifacts/runtime-state.json"]
+        }
+      ],
+      questions: [],
+      recommended_next_steps: ["继续用回放验证保护运行时链路。"],
+      confidence: 0.88,
+      verification_plan: {
+        commands: [
+          {
+            purpose: "replay runtime suite",
+            command: "pnpm verify:runtime"
+          }
+        ]
+      },
+      artifacts: [
+        {
+          type: "log",
+          path: "runs/<run_id>/attempts/<attempt_id>/artifacts/runtime-events.ndjson"
+        }
+      ]
+    },
+    null,
+    2
+  );
+  const runtimeCodex = await createFakeCodexScript({
+    rootDir,
+    fileName: "fake-codex-runtime-events.sh",
+    jsonPayload: runtimeEventsPayload,
+    jsonEvents: [
+      JSON.stringify({
+        type: "thread.started",
+        thread_id: "sess_runtime_test"
+      }),
+      JSON.stringify({
+        type: "turn.started"
+      }),
+      JSON.stringify({
+        type: "item.started",
+        item: {
+          id: "item_plan",
+          type: "todo_list",
+          items: [
+            {
+              text: "先跑验证",
+              completed: true
+            },
+            {
+              text: "整理结果",
+              completed: false
+            }
+          ]
+        }
+      }),
+      JSON.stringify({
+        type: "item.started",
+        item: {
+          id: "item_command",
+          type: "command_execution",
+          command: "/bin/zsh -lc 'pnpm verify:runtime'",
+          aggregated_output: "",
+          exit_code: null,
+          status: "in_progress"
+        }
+      }),
+      JSON.stringify({
+        type: "item.completed",
+        item: {
+          id: "item_command",
+          type: "command_execution",
+          command: "/bin/zsh -lc 'pnpm verify:runtime'",
+          aggregated_output: "runtime ok",
+          exit_code: 0,
+          status: "completed"
+        }
+      }),
+      JSON.stringify({
+        type: "item.completed",
+        item: {
+          id: "item_message",
+          type: "agent_message",
+          text: "先检查运行时链路，再整理验证结果。"
+        }
+      }),
+      JSON.stringify({
+        type: "item.updated",
+        item: {
+          id: "item_plan",
+          type: "todo_list",
+          items: [
+            {
+              text: "先跑验证",
+              completed: true
+            },
+            {
+              text: "整理结果",
+              completed: true
+            }
+          ]
+        }
+      }),
+      JSON.stringify({
+        type: "item.completed",
+        item: {
+          id: "item_file",
+          type: "file_change",
+          changes: [
+            {
+              path: changedRuntimeFile,
+              kind: "update"
+            }
+          ],
+          status: "completed"
+        }
+      }),
+      JSON.stringify({
+        type: "turn.completed"
+      })
+    ]
+  });
+  const runtimeAdapter = new CodexCliWorkerAdapter({
+    command: runtimeCodex,
+    sandbox: "workspace-write",
+    skipGitRepoCheck: true
+  });
+  const runtimeResult = await runtimeAdapter.runAttemptTask({
+    run,
+    attempt: runtimeFixture.attempt,
+    attemptContract: runtimeFixture.attemptContract,
+    context: {},
+    workspacePaths
+  });
+  assert.equal(runtimeResult.writeback.summary, "事件流已落盘。");
+
+  const runtimeState = await getAttemptRuntimeState(
+    workspacePaths,
+    run.id,
+    runtimeFixture.attempt.id
+  );
+  const runtimeEvents = await listAttemptRuntimeEvents(
+    workspacePaths,
+    run.id,
+    runtimeFixture.attempt.id
+  );
+  assert.ok(runtimeState, "runtime state should be persisted");
+  assert.equal(runtimeState?.running, false);
+  assert.equal(runtimeState?.phase, "completed");
+  assert.equal(runtimeState?.session_id, "sess_runtime_test");
+  assert.equal(runtimeState?.event_count, 9);
+  assert.match(runtimeState?.progress_text ?? "", /执行完成/);
+  assert.ok(
+    runtimeState?.recent_activities.some((item) => item.includes("执行命令：pnpm verify:runtime"))
+  );
+  assert.ok(
+    runtimeState?.completed_steps.some((item) =>
+      item.includes("命令完成：pnpm verify:runtime")
+    )
+  );
+  assert.ok(
+    runtimeState?.completed_steps.some((item) =>
+      item.includes("修改文件：") && item.includes("verify-runtime.ts")
+    )
+  );
+  assert.ok(
+    runtimeState?.recent_activities.some((item) =>
+      item.includes("计划更新：2/2 已完成")
+    )
+  );
+  assert.ok(
+    runtimeState?.process_content.some((item) =>
+      item.includes("先检查运行时链路")
+    )
+  );
+  assert.ok(
+    runtimeState?.process_content.some((item) => item.includes("整理结果"))
+  );
+  assert.match(runtimeState?.final_output ?? "", /事件流已落盘/);
+  assert.equal(runtimeEvents.length, 9);
+  assert.equal(runtimeEvents[0]?.type, "thread.started");
+  assert.equal(runtimeEvents[2]?.summary, "计划更新：1/2 已完成");
+  assert.equal(runtimeEvents[3]?.summary, "执行命令：pnpm verify:runtime");
+  assert.equal(runtimeEvents[4]?.summary, "命令完成：pnpm verify:runtime");
+
   const invalidFindingPayload = JSON.stringify(
     {
       summary: "坏 finding 类型不该被吞掉。",
@@ -429,6 +653,7 @@ async function main(): Promise<void> {
         attempt_id: attempt.id,
         research_shell_reentry: "passed",
         blocked_command_exit_code: blockedProbe.exitCode,
+        runtime_event_stream: "passed",
         malformed_findings_guard: "passed",
         malformed_artifacts_guard: "passed",
         status: "passed"

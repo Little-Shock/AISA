@@ -132,6 +132,15 @@ async function assertRunDetailApiReplay(): Promise<void> {
   );
 }
 
+async function assertRunStreamReplay(): Promise<void> {
+  const result = await runTsxScript("scripts/verify-run-stream.ts");
+  assert.equal(
+    result.exitCode,
+    0,
+    formatScriptFailure("scripts/verify-run-stream.ts", result)
+  );
+}
+
 async function assertSelfBootstrapReplay(): Promise<void> {
   const result = await runTsxScript("scripts/verify-self-bootstrap.ts", {
     [SKIP_SELF_BOOTSTRAP_ENV]: "1"
@@ -185,6 +194,7 @@ async function main(): Promise<void> {
   await assertRunLoopReplay();
   await assertControlApiSupervisorReplay();
   await assertRunDetailApiReplay();
+  await assertRunStreamReplay();
   const skipSelfBootstrapReplay = process.env[SKIP_SELF_BOOTSTRAP_ENV] === "1";
 
   if (!skipSelfBootstrapReplay) {
@@ -205,6 +215,9 @@ async function main(): Promise<void> {
           status: "passed"
         },
         run_detail_api: {
+          status: "passed"
+        },
+        run_stream: {
           status: "passed"
         },
         self_bootstrap: skipSelfBootstrapReplay
