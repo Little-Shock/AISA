@@ -566,6 +566,7 @@ function buildCodexAttemptPrompt(
     "",
     "Rules:",
     ...buildAttemptModeRules(attempt.attempt_type),
+    "- The run is locked to the workspace root shown below. Do not read or write outside that root.",
     "- Use local repository evidence whenever possible.",
     "- If evidence is weak or missing, say so explicitly.",
     "- Write all user-facing natural language fields in concise Chinese.",

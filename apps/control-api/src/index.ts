@@ -20,7 +20,12 @@ import {
 } from "@autoresearch/domain";
 import { ContextManager } from "@autoresearch/context-manager";
 import { appendEvent, listEvents } from "@autoresearch/event-log";
-import { Orchestrator } from "@autoresearch/orchestrator";
+import {
+  createRunWorkspaceScopePolicy,
+  lockRunWorkspaceRoot,
+  Orchestrator,
+  RunWorkspaceScopeError
+} from "@autoresearch/orchestrator";
 import { buildSelfBootstrapRunTemplate, generateInitialPlan } from "@autoresearch/planner";
 import {
   appendRunJournal,
@@ -66,13 +71,21 @@ export async function buildServer(
   options: {
     workspaceRoot?: string;
     startOrchestrator?: boolean;
+    allowedRunWorkspaceRoots?: string[];
   } = {}
 ) {
   const runtimeRoot = options.workspaceRoot ?? repositoryRoot;
   const workspacePaths = resolveWorkspacePaths(runtimeRoot);
   const contextManager = new ContextManager();
   const adapter = new CodexCliWorkerAdapter(loadCodexCliConfig(process.env));
-  const orchestrator = new Orchestrator(workspacePaths, adapter);
+  const runWorkspaceScopePolicy = await createRunWorkspaceScopePolicy({
+    runtimeRoot,
+    allowedRoots: options.allowedRunWorkspaceRoots,
+    envValue: process.env.AISA_ALLOWED_WORKSPACE_ROOTS
+  });
+  const orchestrator = new Orchestrator(workspacePaths, adapter, undefined, undefined, {
+    runWorkspaceScopePolicy
+  });
   const app = Fastify({
     logger: true
   });
@@ -103,7 +116,8 @@ export async function buildServer(
   app.get("/health", async () => ({
     status: "ok",
     codex_command: process.env.CODEX_CLI_COMMAND ?? "codex",
-    codex_model: process.env.CODEX_MODEL ?? null
+    codex_model: process.env.CODEX_MODEL ?? null,
+    allowed_run_workspace_roots: runWorkspaceScopePolicy.allowedRoots
   }));
 
   app.get("/runs", async () => {
@@ -202,29 +216,42 @@ export async function buildServer(
   });
 
   app.post("/runs", async (request, reply) => {
-    const input = CreateRunInputSchema.parse(request.body);
-    const run = createRun(input);
-    const current = createCurrentDecision({
-      run_id: run.id,
-      run_status: "draft",
-      summary: "Run created. Waiting for first attempt."
-    });
-
-    await saveRun(workspacePaths, run);
-    await saveCurrentDecision(workspacePaths, current);
-    await appendRunJournal(
-      workspacePaths,
-      createRunJournalEntry({
+    try {
+      const input = CreateRunInputSchema.parse(request.body);
+      const lockedWorkspaceRoot = await lockWorkspaceRootOrThrow(
+        input.workspace_root ?? runtimeRoot
+      );
+      const run = createRun({
+        ...input,
+        workspace_root: lockedWorkspaceRoot
+      });
+      const current = createCurrentDecision({
         run_id: run.id,
-        type: "run.created",
-        payload: {
-          title: run.title,
-          owner_id: run.owner_id
-        }
-      })
-    );
+        run_status: "draft",
+        summary: "Run created. Waiting for first attempt."
+      });
 
-    return reply.code(201).send({ run, current });
+      await saveRun(workspacePaths, run);
+      await saveCurrentDecision(workspacePaths, current);
+      await appendRunJournal(
+        workspacePaths,
+        createRunJournalEntry({
+          run_id: run.id,
+          type: "run.created",
+          payload: {
+            title: run.title,
+            owner_id: run.owner_id,
+            workspace_root: run.workspace_root
+          }
+        })
+      );
+
+      return reply.code(201).send({ run, current });
+    } catch (error) {
+      return reply.code(400).send({
+        message: describeWorkspaceScopeError(error)
+      });
+    }
   });
 
   app.post("/runs/self-bootstrap", async (request, reply) => {
@@ -244,7 +271,20 @@ export async function buildServer(
       ownerId: body.owner_id,
       focus: body.focus
     });
-    const run = createRun(template.runInput);
+    let run;
+    try {
+      const lockedWorkspaceRoot = await lockWorkspaceRootOrThrow(
+        template.runInput.workspace_root ?? runtimeRoot
+      );
+      run = createRun({
+        ...template.runInput,
+        workspace_root: lockedWorkspaceRoot
+      });
+    } catch (error) {
+      return reply.code(400).send({
+        message: describeWorkspaceScopeError(error)
+      });
+    }
     let current = createCurrentDecision({
       run_id: run.id,
       run_status: "draft",
@@ -320,7 +360,8 @@ export async function buildServer(
     const { runId } = request.params as { runId: string };
 
     try {
-      await getRun(workspacePaths, runId);
+      const run = await getRun(workspacePaths, runId);
+      await lockWorkspaceRootOrThrow(run.workspace_root);
       const current =
         (await getCurrentDecision(workspacePaths, runId)) ??
         createCurrentDecision({
@@ -353,7 +394,10 @@ export async function buildServer(
       );
 
       return { current: nextCurrent };
-    } catch {
+    } catch (error) {
+      if (error instanceof RunWorkspaceScopeError) {
+        return reply.code(400).send({ message: error.message });
+      }
       return reply.code(404).send({ message: `Run ${runId} not found` });
     }
   });
@@ -673,6 +717,28 @@ export async function buildServer(
       return reply.code(404).send({ message: `Goal ${goalId} not found` });
     }
   });
+
+  async function lockWorkspaceRootOrThrow(
+    workspaceRoot: string
+  ): Promise<string> {
+    const lockedWorkspace = await lockRunWorkspaceRoot(
+      workspaceRoot,
+      runWorkspaceScopePolicy
+    );
+    return lockedWorkspace.resolvedRoot;
+  }
+
+  function describeWorkspaceScopeError(error: unknown): string {
+    if (error instanceof RunWorkspaceScopeError) {
+      return error.message;
+    }
+
+    if (error instanceof Error) {
+      return error.message;
+    }
+
+    return String(error);
+  }
 
   return app;
 }

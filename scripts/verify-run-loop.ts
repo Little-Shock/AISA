@@ -10,6 +10,7 @@ import {
   createCurrentDecision,
   createRun,
   createRunJournalEntry,
+  updateRun,
   updateAttempt,
   WorkerWritebackSchema,
   type Attempt,
@@ -50,7 +51,8 @@ type ScenarioDriver =
   | "execution_missing_verification_plan"
   | "execution_parse_failure"
   | "orphaned_running_attempt"
-  | "execution_retry_after_recovery_preserves_contract";
+  | "execution_retry_after_recovery_preserves_contract"
+  | "attempt_workspace_escapes_run_scope";
 
 type ScenarioExpectation = {
   run_status: string;
@@ -362,6 +364,10 @@ class ScenarioAdapter {
   }> {
     if (this.driver === "orphaned_running_attempt") {
       throw new Error("Orphaned running attempt case must not dispatch adapter work.");
+    }
+
+    if (this.driver === "attempt_workspace_escapes_run_scope") {
+      throw new Error("Workspace scope breach case must be blocked before worker dispatch.");
     }
 
     const key = input.run.id;
@@ -979,6 +985,78 @@ async function seedExecutionRetryAfterRecoveryCase(input: {
   );
 }
 
+async function seedAttemptWorkspaceEscapeCase(input: {
+  rootDir: string;
+  run: Run;
+  workspacePaths: ReturnType<typeof resolveWorkspacePaths>;
+}): Promise<void> {
+  const runWorkspaceRoot = join(input.rootDir, "projects", "project-a");
+  const escapedWorkspaceRoot = join(input.rootDir, "projects", "project-b");
+  await mkdir(runWorkspaceRoot, { recursive: true });
+  await mkdir(escapedWorkspaceRoot, { recursive: true });
+
+  const scopedRun = updateRun(input.run, {
+    workspace_root: runWorkspaceRoot
+  });
+  await saveRun(input.workspacePaths, scopedRun);
+
+  const escapedAttempt = createAttempt({
+    run_id: scopedRun.id,
+    attempt_type: "execution",
+    worker: "fake-codex",
+    objective: "This attempt should be blocked before it can leave the run workspace.",
+    success_criteria: scopedRun.success_criteria,
+    workspace_root: escapedWorkspaceRoot
+  });
+  await saveAttempt(input.workspacePaths, escapedAttempt);
+  await saveAttemptContract(
+    input.workspacePaths,
+    createAttemptContract({
+      attempt_id: escapedAttempt.id,
+      run_id: scopedRun.id,
+      attempt_type: escapedAttempt.attempt_type,
+      objective: escapedAttempt.objective,
+      success_criteria: escapedAttempt.success_criteria,
+      required_evidence: [
+        "keep the attempt workspace inside the run workspace root"
+      ],
+      expected_artifacts: ["execution-change.md"],
+      verification_plan: {
+        commands: [
+          {
+            purpose: "confirm the execution change was written",
+            command:
+              'test -f execution-change.md && rg -n "^execution change from" execution-change.md'
+          }
+        ]
+      }
+    })
+  );
+  await saveCurrentDecision(
+    input.workspacePaths,
+    createCurrentDecision({
+      run_id: scopedRun.id,
+      run_status: "running",
+      latest_attempt_id: escapedAttempt.id,
+      recommended_next_action: "continue_execution",
+      recommended_attempt_type: "execution",
+      summary: "Prepared to verify run workspace boundaries."
+    })
+  );
+  await appendRunJournal(
+    input.workspacePaths,
+    createRunJournalEntry({
+      run_id: scopedRun.id,
+      attempt_id: escapedAttempt.id,
+      type: "attempt.created",
+      payload: {
+        attempt_type: escapedAttempt.attempt_type,
+        objective: escapedAttempt.objective
+      }
+    })
+  );
+}
+
 function parseYamlScalar(rawValue: string): unknown {
   if (
     (rawValue.startsWith('"') && rawValue.endsWith('"')) ||
@@ -1177,6 +1255,14 @@ async function runCase(scenario: ScenarioCase): Promise<ScenarioObservation> {
       run,
       workspacePaths,
       driver: scenario.driver
+    });
+  }
+
+  if (scenario.driver === "attempt_workspace_escapes_run_scope") {
+    await seedAttemptWorkspaceEscapeCase({
+      rootDir,
+      run,
+      workspacePaths
     });
   }
 

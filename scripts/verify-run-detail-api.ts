@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -28,6 +28,10 @@ import { buildServer } from "../apps/control-api/src/index.ts";
 
 async function main(): Promise<void> {
   const rootDir = await mkdtemp(join(tmpdir(), "aisa-run-detail-api-"));
+  const projectScopeDir = await mkdtemp(join(tmpdir(), "aisa-run-scope-"));
+  const projectRoot = join(projectScopeDir, "project-a");
+  await mkdir(projectRoot, { recursive: true });
+  const resolvedRootDir = await realpath(rootDir);
   const workspacePaths = resolveWorkspacePaths(rootDir);
   await ensureWorkspace(workspacePaths);
 
@@ -37,7 +41,7 @@ async function main(): Promise<void> {
     success_criteria: ["Expose attempt result, evaluation, and runtime verification."],
     constraints: [],
     owner_id: "test-owner",
-    workspace_root: rootDir
+    workspace_root: projectRoot
   });
   const current = createCurrentDecision({
     run_id: run.id,
@@ -54,7 +58,7 @@ async function main(): Promise<void> {
       worker: "fake-codex",
       objective: "Make a small backend change and verify it.",
       success_criteria: run.success_criteria,
-      workspace_root: rootDir
+      workspace_root: projectRoot
     }),
     {
       status: "completed",
@@ -220,10 +224,55 @@ async function main(): Promise<void> {
 
   const app = await buildServer({
     workspaceRoot: rootDir,
-    startOrchestrator: false
+    startOrchestrator: false,
+    allowedRunWorkspaceRoots: [rootDir, projectScopeDir]
   });
 
   try {
+    const managedExternalRoot = join(projectScopeDir, "managed-project");
+    await mkdir(managedExternalRoot, { recursive: true });
+    const createManagedRunResponse = await app.inject({
+      method: "POST",
+      url: "/runs",
+      payload: {
+        title: "Managed external workspace",
+        description: "Ensure control-api can lock a run to an explicitly allowed workspace.",
+        success_criteria: ["create the run"],
+        constraints: [],
+        owner_id: "test-owner",
+        workspace_root: managedExternalRoot
+      }
+    });
+    assert.equal(createManagedRunResponse.statusCode, 201);
+    const managedExternalRun = createManagedRunResponse.json() as {
+      run: {
+        workspace_root: string;
+      };
+    };
+    assert.equal(
+      managedExternalRun.run.workspace_root,
+      await realpath(managedExternalRoot)
+    );
+
+    const outsideWorkspaceDir = await mkdtemp(join(tmpdir(), "aisa-run-outside-scope-"));
+    const createBlockedRunResponse = await app.inject({
+      method: "POST",
+      url: "/runs",
+      payload: {
+        title: "Blocked workspace root",
+        description: "Ensure control-api rejects workspaces outside the allowed roots.",
+        success_criteria: ["reject the run"],
+        constraints: [],
+        owner_id: "test-owner",
+        workspace_root: outsideWorkspaceDir
+      }
+    });
+    assert.equal(createBlockedRunResponse.statusCode, 400);
+    assert.match(
+      createBlockedRunResponse.body,
+      /工作区超出允许范围/u
+    );
+
     const selfBootstrapResponse = await app.inject({
       method: "POST",
       url: "/runs/self-bootstrap",
@@ -238,7 +287,31 @@ async function main(): Promise<void> {
         workspace_root: string;
       };
     };
-    assert.equal(selfBootstrap.run.workspace_root, rootDir);
+    assert.equal(selfBootstrap.run.workspace_root, resolvedRootDir);
+
+    const blockedRun = createRun({
+      title: "Blocked launch workspace",
+      description: "Ensure launch refuses a run whose workspace escaped the allowed roots.",
+      success_criteria: ["launch should fail"],
+      constraints: [],
+      owner_id: "test-owner",
+      workspace_root: outsideWorkspaceDir
+    });
+    await saveRun(workspacePaths, blockedRun);
+    await saveCurrentDecision(
+      workspacePaths,
+      createCurrentDecision({
+        run_id: blockedRun.id,
+        run_status: "draft",
+        summary: "Blocked launch fixture"
+      })
+    );
+    const blockedLaunchResponse = await app.inject({
+      method: "POST",
+      url: `/runs/${blockedRun.id}/launch`
+    });
+    assert.equal(blockedLaunchResponse.statusCode, 400);
+    assert.match(blockedLaunchResponse.body, /工作区超出允许范围/u);
 
     const response = await app.inject({
       method: "GET",

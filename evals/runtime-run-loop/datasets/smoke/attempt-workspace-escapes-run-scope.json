@@ -1,0 +1,26 @@
+{
+  "id": "attempt-workspace-escapes-run-scope",
+  "description": "A pending attempt whose workspace escapes the run workspace root must be blocked before worker dispatch.",
+  "driver": "attempt_workspace_escapes_run_scope",
+  "max_ticks": 4,
+  "expected": {
+    "run_status": "waiting_steer",
+    "waiting_for_human": true,
+    "recommended_next_action": "wait_for_human",
+    "attempt_types": ["execution"],
+    "attempt_statuses": ["failed"],
+    "verification_statuses": [],
+    "required_journal_types": [
+      "attempt.created",
+      "attempt.failed",
+      "run.workspace_scope.blocked"
+    ],
+    "required_journal_counts": {
+      "attempt.created": 1,
+      "attempt.started": 0,
+      "attempt.failed": 1,
+      "run.workspace_scope.blocked": 1
+    },
+    "blocking_reason_includes": "超出当前 run 的工作区范围"
+  }
+}

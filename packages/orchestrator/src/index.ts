@@ -92,6 +92,13 @@ import {
   runAttemptRuntimeVerification,
   type AttemptRuntimeVerificationOutcome
 } from "./runtime-verification.js";
+import {
+  assertAttemptWorkspaceWithinRunScope,
+  createDefaultRunWorkspaceScopePolicy,
+  lockRunWorkspaceRoot,
+  RunWorkspaceScopeError,
+  type RunWorkspaceScopePolicy
+} from "./workspace-scope.js";
 
 export interface OrchestratorOptions {
   attemptHeartbeatIntervalMs?: number;
@@ -100,6 +107,7 @@ export interface OrchestratorOptions {
   maxAutomaticResumeCycles?: number;
   providerRateLimitAutoResumeMs?: number;
   maxProviderRateLimitAutoResumeCycles?: number;
+  runWorkspaceScopePolicy?: RunWorkspaceScopePolicy;
 }
 
 export class Orchestrator {
@@ -113,6 +121,7 @@ export class Orchestrator {
   private readonly maxAutomaticResumeCycles: number;
   private readonly providerRateLimitAutoResumeMs: number;
   private readonly maxProviderRateLimitAutoResumeCycles: number;
+  private readonly runWorkspaceScopePolicy: RunWorkspaceScopePolicy;
 
   constructor(
     private readonly workspacePaths: WorkspacePaths,
@@ -135,6 +144,9 @@ export class Orchestrator {
     this.maxProviderRateLimitAutoResumeCycles =
       options.maxProviderRateLimitAutoResumeCycles ??
       readPositiveIntegerEnv("AISA_MAX_PROVIDER_RATE_LIMIT_AUTO_RESUME_CYCLES", 8);
+    this.runWorkspaceScopePolicy =
+      options.runWorkspaceScopePolicy ??
+      createDefaultRunWorkspaceScopePolicy(this.workspacePaths.rootDir);
   }
 
   start(): void {
@@ -449,6 +461,12 @@ export class Orchestrator {
         continue;
       }
 
+      const workspaceScopeError = await this.getRunWorkspaceScopeError(run);
+      if (workspaceScopeError) {
+        await this.persistRunWorkspaceScopeBlocked(run, current, workspaceScopeError);
+        continue;
+      }
+
       if (current.waiting_for_human) {
         await this.maybeAutoResumeWaitingRun(run.id, current, attempts);
         continue;
@@ -710,56 +728,61 @@ export class Orchestrator {
       previous_attempts: previousAttempts
     };
 
-    attempt = updateAttempt(attempt, {
-      status: "running",
-      started_at: new Date().toISOString()
-    });
-    await saveAttempt(this.workspacePaths, attempt);
-    await saveCurrentDecision(
-      this.workspacePaths,
-      updateCurrentDecision(current ?? createCurrentDecision({ run_id: runId }), {
-        run_status: "running",
-        latest_attempt_id: attempt.id,
-        recommended_next_action: "attempt_running",
-        recommended_attempt_type: attempt.attempt_type,
-        summary: `Running ${attempt.attempt_type} attempt: ${attempt.objective}`,
-        blocking_reason: null,
-        waiting_for_human: false
-      })
-    );
-    await saveAttemptContext(this.workspacePaths, runId, attempt.id, context);
-    await this.writeAttemptHeartbeat({
-      runId,
-      attemptId: attempt.id,
-      startedAt: attempt.started_at ?? new Date().toISOString(),
-      status: "active"
-    });
-    const heartbeatTimer = setInterval(() => {
-      void this.writeAttemptHeartbeat({
+    let heartbeatTimer: NodeJS.Timeout | null = null;
+    let heartbeatStarted = false;
+
+    try {
+      await this.assertAttemptWorkspaceScope(run, attempt);
+      attempt = updateAttempt(attempt, {
+        status: "running",
+        started_at: new Date().toISOString()
+      });
+      await saveAttempt(this.workspacePaths, attempt);
+      await saveCurrentDecision(
+        this.workspacePaths,
+        updateCurrentDecision(current ?? createCurrentDecision({ run_id: runId }), {
+          run_status: "running",
+          latest_attempt_id: attempt.id,
+          recommended_next_action: "attempt_running",
+          recommended_attempt_type: attempt.attempt_type,
+          summary: `Running ${attempt.attempt_type} attempt: ${attempt.objective}`,
+          blocking_reason: null,
+          waiting_for_human: false
+        })
+      );
+      await saveAttemptContext(this.workspacePaths, runId, attempt.id, context);
+      await this.writeAttemptHeartbeat({
         runId,
         attemptId: attempt.id,
         startedAt: attempt.started_at ?? new Date().toISOString(),
         status: "active"
       });
-    }, this.attemptHeartbeatIntervalMs);
-    heartbeatTimer.unref?.();
-    const checkpointPreflight = await captureAttemptCheckpointPreflight({
-      attempt,
-      attemptPaths
-    });
-    await appendRunJournal(
-      this.workspacePaths,
-      createRunJournalEntry({
-        run_id: runId,
-        attempt_id: attempt.id,
-        type: "attempt.started",
-        payload: {
-          attempt_type: attempt.attempt_type
-        }
-      })
-    );
+      heartbeatStarted = true;
+      heartbeatTimer = setInterval(() => {
+        void this.writeAttemptHeartbeat({
+          runId,
+          attemptId: attempt.id,
+          startedAt: attempt.started_at ?? new Date().toISOString(),
+          status: "active"
+        });
+      }, this.attemptHeartbeatIntervalMs);
+      heartbeatTimer.unref?.();
+      const checkpointPreflight = await captureAttemptCheckpointPreflight({
+        attempt,
+        attemptPaths
+      });
+      await appendRunJournal(
+        this.workspacePaths,
+        createRunJournalEntry({
+          run_id: runId,
+          attempt_id: attempt.id,
+          type: "attempt.started",
+          payload: {
+            attempt_type: attempt.attempt_type
+          }
+        })
+      );
 
-    try {
       this.assertDispatchableAttemptContract(attempt, attemptContract);
       const execution = await this.adapter.runAttemptTask({
         run,
@@ -881,6 +904,9 @@ export class Orchestrator {
         currentSnapshot: nextCurrent
       });
     } catch (error) {
+      if (error instanceof RunWorkspaceScopeError) {
+        await this.appendRunWorkspaceScopeBlockedEntry(run.id, attempt.id, error);
+      }
       attempt = updateAttempt(attempt, {
         status: "failed",
         ended_at: new Date().toISOString()
@@ -914,13 +940,17 @@ export class Orchestrator {
         currentSnapshot: failedCurrentDecision
       });
     } finally {
-      clearInterval(heartbeatTimer);
-      await this.writeAttemptHeartbeat({
-        runId,
-        attemptId: attempt.id,
-        startedAt: attempt.started_at ?? new Date().toISOString(),
-        status: "released"
-      });
+      if (heartbeatTimer) {
+        clearInterval(heartbeatTimer);
+      }
+      if (heartbeatStarted) {
+        await this.writeAttemptHeartbeat({
+          runId,
+          attemptId: attempt.id,
+          startedAt: attempt.started_at ?? new Date().toISOString(),
+          status: "released"
+        });
+      }
     }
   }
 
@@ -1845,6 +1875,17 @@ export class Orchestrator {
     journal: Awaited<ReturnType<typeof listRunJournal>>;
   }): { reason: string; message: string } | null {
     const latestAttempt = this.getLatestAttempt(input.current, input.attempts);
+    const workspaceScopeMessage = this.getRunWorkspaceScopeBlockedMessage(
+      input.journal,
+      latestAttempt?.id ?? input.current.latest_attempt_id ?? null
+    );
+    if (workspaceScopeMessage) {
+      return {
+        reason: "workspace_scope_blocked",
+        message: workspaceScopeMessage
+      };
+    }
+
     if (!latestAttempt) {
       return null;
     }
@@ -2118,6 +2159,33 @@ export class Orchestrator {
     return null;
   }
 
+  private getRunWorkspaceScopeBlockedMessage(
+    journal: Awaited<ReturnType<typeof listRunJournal>>,
+    attemptId: string | null
+  ): string | null {
+    for (let index = journal.length - 1; index >= 0; index -= 1) {
+      const entry = journal[index];
+      if (!entry || entry.type !== "run.workspace_scope.blocked") {
+        continue;
+      }
+
+      if (attemptId && entry.attempt_id !== attemptId) {
+        continue;
+      }
+
+      const payload =
+        entry.payload && typeof entry.payload === "object"
+          ? (entry.payload as Record<string, unknown>)
+          : null;
+      const message = payload?.message;
+      if (typeof message === "string" && message.length > 0) {
+        return message;
+      }
+    }
+
+    return null;
+  }
+
   private getLatestAttemptFailureMessage(input: {
     current: CurrentDecision;
     journal: Awaited<ReturnType<typeof listRunJournal>>;
@@ -2268,6 +2336,89 @@ export class Orchestrator {
     );
   }
 
+  private async getRunWorkspaceScopeError(
+    run: Run
+  ): Promise<RunWorkspaceScopeError | null> {
+    try {
+      await lockRunWorkspaceRoot(run.workspace_root, this.runWorkspaceScopePolicy);
+      return null;
+    } catch (error) {
+      if (error instanceof RunWorkspaceScopeError) {
+        return error;
+      }
+
+      throw error;
+    }
+  }
+
+  private async assertAttemptWorkspaceScope(
+    run: Run,
+    attempt: Attempt
+  ): Promise<void> {
+    await assertAttemptWorkspaceWithinRunScope({
+      runWorkspaceRoot: run.workspace_root,
+      attemptWorkspaceRoot: attempt.workspace_root,
+      policy: this.runWorkspaceScopePolicy
+    });
+  }
+
+  private async persistRunWorkspaceScopeBlocked(
+    run: Run,
+    current: CurrentDecision,
+    error: RunWorkspaceScopeError
+  ): Promise<void> {
+    const nextCurrent = updateCurrentDecision(current, {
+      run_status: "waiting_steer",
+      recommended_next_action: "wait_for_human",
+      summary: error.message,
+      blocking_reason: error.message,
+      waiting_for_human: true
+    });
+
+    const currentAlreadyBlocked =
+      current.run_status === nextCurrent.run_status &&
+      current.recommended_next_action === nextCurrent.recommended_next_action &&
+      current.summary === nextCurrent.summary &&
+      current.blocking_reason === nextCurrent.blocking_reason &&
+      current.waiting_for_human === nextCurrent.waiting_for_human;
+
+    if (!currentAlreadyBlocked) {
+      await saveCurrentDecision(this.workspacePaths, nextCurrent);
+    }
+
+    await this.appendRunWorkspaceScopeBlockedEntry(run.id, current.latest_attempt_id, error);
+  }
+
+  private async appendRunWorkspaceScopeBlockedEntry(
+    runId: string,
+    attemptId: string | null,
+    error: RunWorkspaceScopeError
+  ): Promise<void> {
+    const journal = await listRunJournal(this.workspacePaths, runId);
+    const latestEntry = journal.at(-1);
+    if (
+      latestEntry?.type === "run.workspace_scope.blocked" &&
+      latestEntry.attempt_id === attemptId &&
+      latestEntry.payload.message === error.message
+    ) {
+      return;
+    }
+
+    await appendRunJournal(
+      this.workspacePaths,
+      createRunJournalEntry({
+        run_id: runId,
+        attempt_id: attemptId,
+        type: "run.workspace_scope.blocked",
+        payload: {
+          code: error.code,
+          message: error.message,
+          ...error.details
+        }
+      })
+    );
+  }
+
   private hasActiveAttemptForRun(runId: string): boolean {
     const prefix = `${runId}:`;
     for (const activeKey of this.activeAttempts) {
@@ -2324,3 +2475,12 @@ function readPositiveIntegerEnv(name: string, fallback: number): number {
   const parsed = Number.parseInt(raw, 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
+
+export {
+  assertAttemptWorkspaceWithinRunScope,
+  createRunWorkspaceScopePolicy,
+  createDefaultRunWorkspaceScopePolicy,
+  lockRunWorkspaceRoot,
+  RunWorkspaceScopeError,
+  type RunWorkspaceScopePolicy
+} from "./workspace-scope.js";
