@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import {
   AttemptContractDraftSchema,
   AttemptEvaluationSchema,
+  AttemptEvaluationSynthesisRecordSchema,
   AttemptReviewerJudgmentSchema,
   AttemptReviewerOpinionSchema,
   EvalResultSchema,
@@ -9,6 +10,7 @@ import {
   isExecutionContractDraftReady,
   type AttemptContractDraft,
   type AttemptEvaluation,
+  type AttemptEvaluationSynthesisRecord,
   type AttemptReviewInputPacket,
   type AttemptReviewInputRef,
   type AttemptRuntimeVerification,
@@ -16,6 +18,7 @@ import {
   type AttemptReviewerIdentity,
   type AttemptReviewerJudgment,
   type AttemptReviewerOpinion,
+  type AttemptSynthesizerIdentity,
   type Branch,
   type EvalResult,
   type EvalSpec,
@@ -25,7 +28,9 @@ import {
 
 type ReviewableAttemptPacket = AttemptReviewInputPacket | AttemptReviewPacket;
 const REVIEWER_CONFIG_ENV = "AISA_REVIEWERS_JSON";
+const SYNTHESIZER_CONFIG_ENV = "AISA_REVIEW_SYNTHESIZER_JSON";
 const DEFAULT_CLI_REVIEWER_TIMEOUT_MS = 60_000;
+const DEFAULT_CLI_SYNTHESIZER_TIMEOUT_MS = 90_000;
 
 export interface AttemptReviewerAdapter {
   readonly reviewer: AttemptReviewerIdentity;
@@ -64,6 +69,48 @@ export type CliAttemptReviewerConfig = {
 export type AttemptReviewerConfig =
   | HeuristicAttemptReviewerConfig
   | CliAttemptReviewerConfig;
+
+export interface AttemptEvaluationSynthesizerAdapter {
+  readonly kind: "deterministic" | "cli";
+  readonly synthesizer: AttemptSynthesizerIdentity | null;
+  synthesizeEvaluation(input: {
+    reviewInputPacket: AttemptReviewInputPacket;
+    reviewInputPacketRef: string;
+    opinions: AttemptReviewerOpinion[];
+    opinionRefs: string[];
+    deterministicBaseEvaluation: AttemptEvaluation;
+  }): Promise<{
+    raw_output: string;
+    structured_judgment: AttemptReviewerJudgment;
+  }>;
+}
+
+export type DeterministicAttemptEvaluationSynthesizerConfig = {
+  kind: "deterministic";
+};
+
+export type CliAttemptEvaluationSynthesizerConfig = {
+  kind: "cli";
+  synthesizer_id: string;
+  role: string;
+  adapter?: string;
+  provider?: string | null;
+  model?: string | null;
+  command: string;
+  args?: string[];
+  cwd?: string | null;
+  env?: Record<string, string>;
+  timeout_ms?: number;
+};
+
+export type AttemptEvaluationSynthesizerConfig =
+  | DeterministicAttemptEvaluationSynthesizerConfig
+  | CliAttemptEvaluationSynthesizerConfig;
+
+export type AttemptEvaluationSynthesisOutcome = {
+  evaluation: AttemptEvaluation;
+  synthesisRecord: AttemptEvaluationSynthesisRecord | null;
+};
 
 export function evaluateBranch(input: {
   goal: Goal;
@@ -179,11 +226,14 @@ export function createCliAttemptReviewer(
   return {
     reviewer,
     async reviewAttempt({ reviewInputPacket }) {
-      const commandResult = await runCliReviewerCommand({
+      const commandResult = await runCliJsonCommand({
         command: input.command,
         args: input.args ?? [],
         cwd: input.cwd ?? process.cwd(),
-        env: input.env ?? {},
+        env: {
+          ...buildCliReviewerEnv(input),
+          ...(input.env ?? {})
+        },
         timeoutMs: input.timeout_ms ?? DEFAULT_CLI_REVIEWER_TIMEOUT_MS,
         stdin: JSON.stringify(reviewInputPacket, null, 2)
       });
@@ -193,6 +243,89 @@ export function createCliAttemptReviewer(
         raw_output: commandResult.stdout,
         structured_judgment: parsedOutput.structured_judgment,
         proposed_next_contract: parsedOutput.proposed_next_contract
+      };
+    }
+  };
+}
+
+export function createDeterministicAttemptEvaluationSynthesizer(): AttemptEvaluationSynthesizerAdapter {
+  return {
+    kind: "deterministic",
+    synthesizer: null,
+    async synthesizeEvaluation({
+      opinions,
+      deterministicBaseEvaluation
+    }) {
+      const structuredJudgment = buildDeterministicSynthesisJudgment({
+        baseEvaluation: deterministicBaseEvaluation,
+        opinions
+      });
+
+      return {
+        raw_output: JSON.stringify(
+          {
+            strategy: buildDeterministicSynthesisStrategy(opinions.length),
+            structured_judgment: structuredJudgment
+          },
+          null,
+          2
+        ),
+        structured_judgment: structuredJudgment
+      };
+    }
+  };
+}
+
+export function createCliAttemptEvaluationSynthesizer(
+  input: CliAttemptEvaluationSynthesizerConfig
+): AttemptEvaluationSynthesizerAdapter {
+  const synthesizer: AttemptSynthesizerIdentity = {
+    synthesizer_id: input.synthesizer_id,
+    role: input.role,
+    adapter: input.adapter ?? "cli-json-stdio",
+    provider: input.provider ?? null,
+    model: input.model ?? null
+  };
+
+  return {
+    kind: "cli",
+    synthesizer,
+    async synthesizeEvaluation({
+      reviewInputPacket,
+      reviewInputPacketRef,
+      opinions,
+      opinionRefs,
+      deterministicBaseEvaluation
+    }) {
+      const commandResult = await runCliJsonCommand({
+        command: input.command,
+        args: input.args ?? [],
+        cwd: input.cwd ?? process.cwd(),
+        env: {
+          ...buildCliSynthesizerEnv(input),
+          ...(input.env ?? {})
+        },
+        timeoutMs: input.timeout_ms ?? DEFAULT_CLI_SYNTHESIZER_TIMEOUT_MS,
+        stdin: JSON.stringify(
+          {
+            review_input_packet: reviewInputPacket,
+            review_input_packet_ref: reviewInputPacketRef,
+            reviewer_opinions: opinions,
+            opinion_refs: opinionRefs,
+            deterministic_base_evaluation: deterministicBaseEvaluation
+          },
+          null,
+          2
+        )
+      });
+      const parsedOutput = parseCliSynthesizerOutput(
+        commandResult.stdout,
+        synthesizer.synthesizer_id
+      );
+
+      return {
+        raw_output: commandResult.stdout,
+        structured_judgment: parsedOutput.structured_judgment
       };
     }
   };
@@ -245,6 +378,39 @@ export function loadAttemptReviewerConfigs(
   return parsed.map((entry, index) => parseAttemptReviewerConfig(entry, index));
 }
 
+export function createAttemptEvaluationSynthesizer(input: {
+  config?: AttemptEvaluationSynthesizerConfig | null;
+  env?: NodeJS.ProcessEnv;
+} = {}): AttemptEvaluationSynthesizerAdapter {
+  const config =
+    input.config ?? loadAttemptEvaluationSynthesizerConfig(input.env ?? process.env);
+
+  if (!config || config.kind === "deterministic") {
+    return createDeterministicAttemptEvaluationSynthesizer();
+  }
+
+  return createCliAttemptEvaluationSynthesizer(config);
+}
+
+export function loadAttemptEvaluationSynthesizerConfig(
+  env: NodeJS.ProcessEnv
+): AttemptEvaluationSynthesizerConfig | null {
+  const raw = env[SYNTHESIZER_CONFIG_ENV];
+  if (!raw || raw.trim().length === 0) {
+    return null;
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    throw new Error(`${SYNTHESIZER_CONFIG_ENV} must be valid JSON: ${reason}`);
+  }
+
+  return parseAttemptEvaluationSynthesizerConfig(parsed);
+}
+
 export async function runAttemptReviewerPipeline(input: {
   reviewInputPacket: AttemptReviewInputPacket;
   reviewers: AttemptReviewerAdapter[];
@@ -273,71 +439,68 @@ export async function runAttemptReviewerPipeline(input: {
   );
 }
 
-export function synthesizeAttemptEvaluation(input: {
+export async function synthesizeAttemptEvaluation(input: {
   reviewInputPacket: AttemptReviewInputPacket;
   opinions: AttemptReviewerOpinion[];
   reviewInputPacketRef: string;
   opinionRefs: string[];
-}): AttemptEvaluation {
+  synthesizer?: AttemptEvaluationSynthesizerAdapter | null;
+  synthesizerConfig?: AttemptEvaluationSynthesizerConfig | null;
+  synthesizerEnv?: NodeJS.ProcessEnv;
+}): Promise<AttemptEvaluationSynthesisOutcome> {
   const baseEvaluation = buildAttemptEvaluationBase({
     reviewPacket: input.reviewInputPacket
   });
-  const judgments = input.opinions.map((opinion) => opinion.structured_judgment);
-  const verificationLocked = baseEvaluation.verification_status === "failed";
-  const synthesizedGoalProgress =
-    judgments.length > 0
-      ? clampUnit(average(judgments.map((judgment) => judgment.goal_progress)))
-      : baseEvaluation.goal_progress;
-  const synthesizedEvidenceQuality =
-    judgments.length > 0
-      ? clampUnit(average(judgments.map((judgment) => judgment.evidence_quality)))
-      : baseEvaluation.evidence_quality;
-  const mergedMissingEvidence = uniqueStrings([
-    ...baseEvaluation.missing_evidence,
-    ...judgments.flatMap((judgment) => judgment.missing_evidence)
-  ]);
-  const recommendation = verificationLocked
-    ? baseEvaluation.recommendation
-    : pickMajorityValue(
-        judgments.map((judgment) => judgment.recommendation),
-        baseEvaluation.recommendation
-      );
-  const suggestedAttemptType = verificationLocked
-    ? baseEvaluation.suggested_attempt_type
-    : pickMajorityValue(
-        judgments.map((judgment) => judgment.suggested_attempt_type),
-        baseEvaluation.suggested_attempt_type
-      );
-
-  return AttemptEvaluationSchema.parse({
-    ...baseEvaluation,
-    goal_progress: verificationLocked
-      ? Math.min(baseEvaluation.goal_progress, synthesizedGoalProgress, 0.34)
-      : synthesizedGoalProgress,
-    evidence_quality: synthesizedEvidenceQuality,
-    recommendation,
-    suggested_attempt_type: suggestedAttemptType,
-    rationale: [
-      baseEvaluation.rationale,
-      `reviewers=${input.opinions.length}`,
-      input.opinions.length > 0
-        ? `reviewer_recommendations=${buildRecommendationSummary(judgments)}`
-        : null
-    ]
-      .filter(Boolean)
-      .join(", "),
-    missing_evidence: mergedMissingEvidence,
-    review_input_packet_ref: input.reviewInputPacketRef,
-    opinion_refs: input.opinionRefs,
-    synthesis_strategy:
-      input.opinions.length > 1
-        ? "deterministic_consensus_v1"
-        : input.opinions.length === 1
-          ? "deterministic_single_reviewer_v1"
-          : "deterministic_fallback_v1",
-    reviewer_count: input.opinions.length,
-    created_at: new Date().toISOString()
+  const synthesizer =
+    input.synthesizer ??
+    createAttemptEvaluationSynthesizer({
+      config: input.synthesizerConfig,
+      env: input.synthesizerEnv ?? process.env
+    });
+  const synthesis = await synthesizer.synthesizeEvaluation({
+    reviewInputPacket: input.reviewInputPacket,
+    reviewInputPacketRef: input.reviewInputPacketRef,
+    opinions: input.opinions,
+    opinionRefs: input.opinionRefs,
+    deterministicBaseEvaluation: baseEvaluation
   });
+  const evaluationSynthesisRef =
+    synthesizer.kind === "cli"
+      ? buildAttemptEvaluationSynthesisRef(
+          input.reviewInputPacket.run_id,
+          input.reviewInputPacket.attempt_id
+        )
+      : null;
+
+  return {
+    evaluation: buildSynthesizedAttemptEvaluation({
+      baseEvaluation,
+      structuredJudgment: synthesis.structured_judgment,
+      reviewInputPacketRef: input.reviewInputPacketRef,
+      opinionRefs: input.opinionRefs,
+      opinionCount: input.opinions.length,
+      evaluationSynthesisRef,
+      synthesisStrategy:
+        synthesizer.kind === "cli"
+          ? "cli_synthesizer_v1"
+          : buildDeterministicSynthesisStrategy(input.opinions.length),
+      synthesizerIdentity: synthesizer.synthesizer
+    }),
+    synthesisRecord:
+      synthesizer.kind === "cli" && synthesizer.synthesizer
+        ? AttemptEvaluationSynthesisRecordSchema.parse({
+            run_id: input.reviewInputPacket.run_id,
+            attempt_id: input.reviewInputPacket.attempt_id,
+            synthesizer: synthesizer.synthesizer,
+            review_input_packet_ref: input.reviewInputPacketRef,
+            opinion_refs: input.opinionRefs,
+            deterministic_base_evaluation: baseEvaluation,
+            raw_output: synthesis.raw_output,
+            structured_judgment: synthesis.structured_judgment,
+            created_at: new Date().toISOString()
+          })
+        : null
+  };
 }
 
 function buildHeuristicReviewerJudgment(
@@ -356,6 +519,136 @@ function buildHeuristicReviewerJudgment(
     rationale: evaluation.rationale,
     missing_evidence: evaluation.missing_evidence
   });
+}
+
+function buildDeterministicSynthesisJudgment(input: {
+  baseEvaluation: AttemptEvaluation;
+  opinions: AttemptReviewerOpinion[];
+}): AttemptReviewerJudgment {
+  const judgments = input.opinions.map((opinion) => opinion.structured_judgment);
+  const verificationLocked = input.baseEvaluation.verification_status === "failed";
+  const goalProgress =
+    judgments.length > 0
+      ? clampUnit(average(judgments.map((judgment) => judgment.goal_progress)))
+      : input.baseEvaluation.goal_progress;
+  const evidenceQuality =
+    judgments.length > 0
+      ? clampUnit(average(judgments.map((judgment) => judgment.evidence_quality)))
+      : input.baseEvaluation.evidence_quality;
+
+  return AttemptReviewerJudgmentSchema.parse({
+    goal_progress: verificationLocked
+      ? Math.min(input.baseEvaluation.goal_progress, goalProgress, 0.34)
+      : goalProgress,
+    evidence_quality: evidenceQuality,
+    verification_status: input.baseEvaluation.verification_status,
+    recommendation: verificationLocked
+      ? input.baseEvaluation.recommendation
+      : pickMajorityValue(
+          judgments.map((judgment) => judgment.recommendation),
+          input.baseEvaluation.recommendation
+        ),
+    suggested_attempt_type: verificationLocked
+      ? input.baseEvaluation.suggested_attempt_type
+      : pickMajorityValue(
+          judgments.map((judgment) => judgment.suggested_attempt_type),
+          input.baseEvaluation.suggested_attempt_type
+        ),
+    rationale: [
+      input.baseEvaluation.rationale,
+      `reviewers=${input.opinions.length}`,
+      input.opinions.length > 0
+        ? `reviewer_recommendations=${buildRecommendationSummary(judgments)}`
+        : null
+    ]
+      .filter(Boolean)
+      .join(", "),
+    missing_evidence: uniqueStrings([
+      ...input.baseEvaluation.missing_evidence,
+      ...judgments.flatMap((judgment) => judgment.missing_evidence)
+    ])
+  });
+}
+
+function buildSynthesizedAttemptEvaluation(input: {
+  baseEvaluation: AttemptEvaluation;
+  structuredJudgment: AttemptReviewerJudgment;
+  reviewInputPacketRef: string;
+  opinionRefs: string[];
+  opinionCount: number;
+  evaluationSynthesisRef: string | null;
+  synthesisStrategy: string;
+  synthesizerIdentity: AttemptSynthesizerIdentity | null;
+}): AttemptEvaluation {
+  const verificationLocked = input.baseEvaluation.verification_status === "failed";
+
+  return AttemptEvaluationSchema.parse({
+    ...input.baseEvaluation,
+    goal_progress: verificationLocked
+      ? Math.min(
+          input.baseEvaluation.goal_progress,
+          clampUnit(input.structuredJudgment.goal_progress),
+          0.34
+        )
+      : clampUnit(input.structuredJudgment.goal_progress),
+    evidence_quality: clampUnit(input.structuredJudgment.evidence_quality),
+    verification_status: input.baseEvaluation.verification_status,
+    recommendation: verificationLocked
+      ? input.baseEvaluation.recommendation
+      : input.structuredJudgment.recommendation,
+    suggested_attempt_type: verificationLocked
+      ? input.baseEvaluation.suggested_attempt_type
+      : input.structuredJudgment.suggested_attempt_type,
+    rationale: buildSynthesizedEvaluationRationale({
+      baseRationale: input.baseEvaluation.rationale,
+      synthesisRationale: input.structuredJudgment.rationale,
+      opinionCount: input.opinionCount,
+      synthesisStrategy: input.synthesisStrategy,
+      synthesizerIdentity: input.synthesizerIdentity
+    }),
+    missing_evidence: uniqueStrings([
+      ...input.baseEvaluation.missing_evidence,
+      ...input.structuredJudgment.missing_evidence
+    ]),
+    review_input_packet_ref: input.reviewInputPacketRef,
+    opinion_refs: input.opinionRefs,
+    evaluation_synthesis_ref: input.evaluationSynthesisRef,
+    synthesis_strategy: input.synthesisStrategy,
+    synthesizer: input.synthesizerIdentity,
+    reviewer_count: input.opinionCount,
+    created_at: new Date().toISOString()
+  });
+}
+
+function buildSynthesizedEvaluationRationale(input: {
+  baseRationale: string;
+  synthesisRationale: string;
+  opinionCount: number;
+  synthesisStrategy: string;
+  synthesizerIdentity: AttemptSynthesizerIdentity | null;
+}): string {
+  return [
+    input.baseRationale,
+    `reviewers=${input.opinionCount}`,
+    input.synthesizerIdentity
+      ? `synthesizer=${input.synthesizerIdentity.synthesizer_id}/${input.synthesisStrategy}`
+      : `synthesizer=${input.synthesisStrategy}`,
+    input.synthesisRationale
+  ]
+    .filter(Boolean)
+    .join(", ");
+}
+
+function buildDeterministicSynthesisStrategy(opinionCount: number): string {
+  return opinionCount > 1
+    ? "deterministic_consensus_v1"
+    : opinionCount === 1
+      ? "deterministic_single_reviewer_v1"
+      : "deterministic_fallback_v1";
+}
+
+function buildAttemptEvaluationSynthesisRef(runId: string, attemptId: string): string {
+  return `runs/${runId}/attempts/${attemptId}/evaluation_synthesis.json`;
 }
 
 function buildAttemptEvaluationBase(input: {
@@ -626,7 +919,29 @@ function createAttemptReviewerAdapter(
     : createHeuristicAttemptReviewer(config);
 }
 
-async function runCliReviewerCommand(input: {
+function buildCliReviewerEnv(input: CliAttemptReviewerConfig): Record<string, string> {
+  return {
+    AISA_CLI_REVIEWER_ID: input.reviewer_id,
+    AISA_CLI_REVIEWER_ROLE: input.role,
+    AISA_CLI_REVIEWER_ADAPTER: input.adapter ?? "cli-json-stdio",
+    ...(input.provider ? { AISA_CLI_REVIEWER_PROVIDER: input.provider } : {}),
+    ...(input.model ? { AISA_CLI_REVIEWER_MODEL: input.model } : {})
+  };
+}
+
+function buildCliSynthesizerEnv(
+  input: CliAttemptEvaluationSynthesizerConfig
+): Record<string, string> {
+  return {
+    AISA_CLI_SYNTHESIZER_ID: input.synthesizer_id,
+    AISA_CLI_SYNTHESIZER_ROLE: input.role,
+    AISA_CLI_SYNTHESIZER_ADAPTER: input.adapter ?? "cli-json-stdio",
+    ...(input.provider ? { AISA_CLI_SYNTHESIZER_PROVIDER: input.provider } : {}),
+    ...(input.model ? { AISA_CLI_SYNTHESIZER_MODEL: input.model } : {})
+  };
+}
+
+async function runCliJsonCommand(input: {
   command: string;
   args: string[];
   cwd: string;
@@ -671,7 +986,7 @@ async function runCliReviewerCommand(input: {
       if (timedOut) {
         reject(
           new Error(
-            `CLI reviewer command timed out after ${input.timeoutMs}ms: ${formatCommandForError(input.command, input.args)}`
+            `CLI command timed out after ${input.timeoutMs}ms: ${formatCommandForError(input.command, input.args)}`
           )
         );
         return;
@@ -681,7 +996,7 @@ async function runCliReviewerCommand(input: {
         reject(
           new Error(
             [
-              `CLI reviewer command failed: ${formatCommandForError(input.command, input.args)}`,
+              `CLI command failed: ${formatCommandForError(input.command, input.args)}`,
               `exit_code=${exitCode ?? "null"}`,
               signal ? `signal=${signal}` : null,
               stdout.trim().length > 0 ? `stdout:\n${stdout.trim()}` : null,
@@ -703,28 +1018,11 @@ async function runCliReviewerCommand(input: {
   });
 }
 
-function parseCliReviewerOutput(
-  stdout: string,
-  reviewerId: string
-): {
+function parseCliReviewerOutput(stdout: string, reviewerId: string): {
   structured_judgment: AttemptReviewerJudgment;
   proposed_next_contract: AttemptContractDraft | null;
 } {
-  if (stdout.trim().length === 0) {
-    throw new Error(`CLI reviewer ${reviewerId} returned empty stdout.`);
-  }
-
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(stdout);
-  } catch (error) {
-    const reason = error instanceof Error ? error.message : String(error);
-    throw new Error(`CLI reviewer ${reviewerId} returned invalid JSON: ${reason}`);
-  }
-
-  if (!isRecord(parsed)) {
-    throw new Error(`CLI reviewer ${reviewerId} must return a JSON object.`);
-  }
+  const parsed = parseCliJsonObject(stdout, `CLI reviewer ${reviewerId}`);
 
   return {
     structured_judgment: AttemptReviewerJudgmentSchema.parse(parsed.structured_judgment),
@@ -733,6 +1031,39 @@ function parseCliReviewerOutput(
         ? null
         : AttemptContractDraftSchema.parse(parsed.proposed_next_contract)
   };
+}
+
+function parseCliSynthesizerOutput(
+  stdout: string,
+  synthesizerId: string
+): {
+  structured_judgment: AttemptReviewerJudgment;
+} {
+  const parsed = parseCliJsonObject(stdout, `CLI synthesizer ${synthesizerId}`);
+
+  return {
+    structured_judgment: AttemptReviewerJudgmentSchema.parse(parsed.structured_judgment)
+  };
+}
+
+function parseCliJsonObject(stdout: string, label: string): Record<string, unknown> {
+  if (stdout.trim().length === 0) {
+    throw new Error(`${label} returned empty stdout.`);
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(stdout);
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    throw new Error(`${label} returned invalid JSON: ${reason}`);
+  }
+
+  if (!isRecord(parsed)) {
+    throw new Error(`${label} must return a JSON object.`);
+  }
+
+  return parsed;
 }
 
 function parseAttemptReviewerConfig(
@@ -776,14 +1107,60 @@ function parseAttemptReviewerConfig(
   );
 }
 
+function parseAttemptEvaluationSynthesizerConfig(
+  value: unknown
+): AttemptEvaluationSynthesizerConfig {
+  if (!isRecord(value)) {
+    throw new Error(`${SYNTHESIZER_CONFIG_ENV} must be a JSON object.`);
+  }
+
+  const kind = readRequiredString(value, "kind", undefined, SYNTHESIZER_CONFIG_ENV);
+  if (kind === "deterministic") {
+    return {
+      kind
+    };
+  }
+
+  if (kind === "cli") {
+    return {
+      kind,
+      synthesizer_id: readRequiredString(
+        value,
+        "synthesizer_id",
+        undefined,
+        SYNTHESIZER_CONFIG_ENV
+      ),
+      role: readRequiredString(value, "role", undefined, SYNTHESIZER_CONFIG_ENV),
+      adapter: readOptionalString(value, "adapter", undefined, SYNTHESIZER_CONFIG_ENV),
+      provider: readNullableString(value, "provider", undefined, SYNTHESIZER_CONFIG_ENV),
+      model: readNullableString(value, "model", undefined, SYNTHESIZER_CONFIG_ENV),
+      command: readRequiredString(value, "command", undefined, SYNTHESIZER_CONFIG_ENV),
+      args: readOptionalStringArray(value, "args", undefined, SYNTHESIZER_CONFIG_ENV),
+      cwd: readNullableString(value, "cwd", undefined, SYNTHESIZER_CONFIG_ENV),
+      env: readOptionalStringRecord(value, "env", undefined, SYNTHESIZER_CONFIG_ENV),
+      timeout_ms: readOptionalPositiveInteger(
+        value,
+        "timeout_ms",
+        undefined,
+        SYNTHESIZER_CONFIG_ENV
+      )
+    };
+  }
+
+  throw new Error(
+    `${SYNTHESIZER_CONFIG_ENV}.kind must be "deterministic" or "cli".`
+  );
+}
+
 function readRequiredString(
   value: Record<string, unknown>,
   key: string,
-  index: number
+  index?: number,
+  envLabel = REVIEWER_CONFIG_ENV
 ): string {
   const raw = value[key];
   if (typeof raw !== "string" || raw.trim().length === 0) {
-    throw new Error(`AISA_REVIEWERS_JSON[${index}].${key} must be a non-empty string.`);
+    throw new Error(formatConfigFieldError(envLabel, key, "must be a non-empty string.", index));
   }
 
   return raw;
@@ -792,7 +1169,8 @@ function readRequiredString(
 function readOptionalString(
   value: Record<string, unknown>,
   key: string,
-  index: number
+  index?: number,
+  envLabel = REVIEWER_CONFIG_ENV
 ): string | undefined {
   const raw = value[key];
   if (raw == null) {
@@ -800,7 +1178,7 @@ function readOptionalString(
   }
 
   if (typeof raw !== "string" || raw.trim().length === 0) {
-    throw new Error(`AISA_REVIEWERS_JSON[${index}].${key} must be a non-empty string.`);
+    throw new Error(formatConfigFieldError(envLabel, key, "must be a non-empty string.", index));
   }
 
   return raw;
@@ -809,7 +1187,8 @@ function readOptionalString(
 function readNullableString(
   value: Record<string, unknown>,
   key: string,
-  index: number
+  index?: number,
+  envLabel = REVIEWER_CONFIG_ENV
 ): string | null | undefined {
   const raw = value[key];
   if (raw === undefined) {
@@ -821,7 +1200,7 @@ function readNullableString(
   }
 
   if (typeof raw !== "string" || raw.trim().length === 0) {
-    throw new Error(`AISA_REVIEWERS_JSON[${index}].${key} must be a string or null.`);
+    throw new Error(formatConfigFieldError(envLabel, key, "must be a string or null.", index));
   }
 
   return raw;
@@ -830,7 +1209,8 @@ function readNullableString(
 function readOptionalStringArray(
   value: Record<string, unknown>,
   key: string,
-  index: number
+  index?: number,
+  envLabel = REVIEWER_CONFIG_ENV
 ): string[] | undefined {
   const raw = value[key];
   if (raw == null) {
@@ -838,7 +1218,7 @@ function readOptionalStringArray(
   }
 
   if (!Array.isArray(raw) || raw.some((entry) => typeof entry !== "string")) {
-    throw new Error(`AISA_REVIEWERS_JSON[${index}].${key} must be an array of strings.`);
+    throw new Error(formatConfigFieldError(envLabel, key, "must be an array of strings.", index));
   }
 
   return raw;
@@ -847,7 +1227,8 @@ function readOptionalStringArray(
 function readOptionalStringRecord(
   value: Record<string, unknown>,
   key: string,
-  index: number
+  index?: number,
+  envLabel = REVIEWER_CONFIG_ENV
 ): Record<string, string> | undefined {
   const raw = value[key];
   if (raw == null) {
@@ -855,12 +1236,12 @@ function readOptionalStringRecord(
   }
 
   if (!isRecord(raw)) {
-    throw new Error(`AISA_REVIEWERS_JSON[${index}].${key} must be an object of strings.`);
+    throw new Error(formatConfigFieldError(envLabel, key, "must be an object of strings.", index));
   }
 
   const entries = Object.entries(raw);
   if (entries.some(([, entryValue]) => typeof entryValue !== "string")) {
-    throw new Error(`AISA_REVIEWERS_JSON[${index}].${key} must be an object of strings.`);
+    throw new Error(formatConfigFieldError(envLabel, key, "must be an object of strings.", index));
   }
 
   return Object.fromEntries(entries) as Record<string, string>;
@@ -869,7 +1250,8 @@ function readOptionalStringRecord(
 function readOptionalPositiveInteger(
   value: Record<string, unknown>,
   key: string,
-  index: number
+  index?: number,
+  envLabel = REVIEWER_CONFIG_ENV
 ): number | undefined {
   const raw = value[key];
   if (raw == null) {
@@ -877,10 +1259,21 @@ function readOptionalPositiveInteger(
   }
 
   if (typeof raw !== "number" || !Number.isInteger(raw) || raw <= 0) {
-    throw new Error(`AISA_REVIEWERS_JSON[${index}].${key} must be a positive integer.`);
+    throw new Error(
+      formatConfigFieldError(envLabel, key, "must be a positive integer.", index)
+    );
   }
 
   return raw;
+}
+
+function formatConfigFieldError(
+  envLabel: string,
+  key: string,
+  message: string,
+  index?: number
+): string {
+  return index == null ? `${envLabel}.${key} ${message}` : `${envLabel}[${index}].${key} ${message}`;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

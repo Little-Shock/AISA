@@ -21,6 +21,7 @@ import {
   type AttemptContract,
   type AttemptContractDraft,
   type AttemptEvaluation,
+  type AttemptEvaluationSynthesisRecord,
   type AttemptReviewInputPacket,
   type AttemptReviewInputRef,
   type AttemptReviewPacket,
@@ -37,10 +38,13 @@ import {
 } from "@autoresearch/domain";
 import { appendEvent } from "@autoresearch/event-log";
 import {
+  createAttemptEvaluationSynthesizer,
   createAttemptReviewerAdapters,
   evaluateBranch,
   runAttemptReviewerPipeline as executeAttemptReviewerPipeline,
   synthesizeAttemptEvaluation,
+  type AttemptEvaluationSynthesizerAdapter,
+  type AttemptEvaluationSynthesizerConfig,
   type AttemptReviewerConfig,
   type AttemptReviewerAdapter
 } from "@autoresearch/judge";
@@ -52,6 +56,7 @@ import {
   getAttemptContext,
   getAttemptHeartbeat,
   getAttemptEvaluation,
+  getAttemptEvaluationSynthesisRecord,
   getAttemptReviewInputPacket,
   getAttemptReviewPacket,
   getAttemptResult,
@@ -80,6 +85,7 @@ import {
   saveAttemptContract,
   saveAttemptContext,
   saveAttemptEvaluation,
+  saveAttemptEvaluationSynthesisRecord,
   saveAttemptHeartbeat,
   saveAttemptReviewInputPacket,
   saveAttemptReviewOpinion,
@@ -133,6 +139,9 @@ export interface OrchestratorOptions {
   reviewers?: AttemptReviewerAdapter[];
   reviewerConfigs?: AttemptReviewerConfig[];
   reviewerConfigEnv?: NodeJS.ProcessEnv;
+  synthesizer?: AttemptEvaluationSynthesizerAdapter | null;
+  synthesizerConfig?: AttemptEvaluationSynthesizerConfig | null;
+  synthesizerConfigEnv?: NodeJS.ProcessEnv;
   requestRuntimeRestart?: (request: RuntimeRestartRequest) => Promise<void> | void;
 }
 
@@ -243,6 +252,7 @@ export class Orchestrator {
   private readonly runtimeSourceDriftAutoResumeMs: number;
   private readonly runWorkspaceScopePolicy: RunWorkspaceScopePolicy;
   private readonly reviewers: AttemptReviewerAdapter[];
+  private readonly synthesizer: AttemptEvaluationSynthesizerAdapter;
   private readonly requestRuntimeRestart: ((
     request: RuntimeRestartRequest
   ) => Promise<void> | void) | null;
@@ -278,6 +288,11 @@ export class Orchestrator {
     if (options.reviewers && options.reviewerConfigs) {
       throw new Error("Orchestrator reviewer injection is ambiguous. Use reviewers or reviewerConfigs.");
     }
+    if (options.synthesizer && options.synthesizerConfig) {
+      throw new Error(
+        "Orchestrator synthesizer injection is ambiguous. Use synthesizer or synthesizerConfig."
+      );
+    }
     if (options.reviewers && options.reviewers.length === 0) {
       throw new Error("Orchestrator reviewers cannot be an empty array.");
     }
@@ -288,6 +303,12 @@ export class Orchestrator {
             configs: options.reviewerConfigs,
             env: options.reviewerConfigEnv ?? process.env
           });
+    this.synthesizer =
+      options.synthesizer ??
+      createAttemptEvaluationSynthesizer({
+        config: options.synthesizerConfig,
+        env: options.synthesizerConfigEnv ?? process.env
+      });
     this.requestRuntimeRestart = options.requestRuntimeRestart ?? null;
     this.instanceStartedAtMs = Date.now();
   }
@@ -1048,7 +1069,7 @@ export class Orchestrator {
       await Promise.all(
         reviewOpinions.map((opinion) => saveAttemptReviewOpinion(this.workspacePaths, opinion))
       );
-      const evaluation = synthesizeAttemptEvaluation({
+      const synthesis = await this.runAttemptEvaluationSynthesis({
         reviewInputPacket,
         opinions: reviewOpinions,
         reviewInputPacketRef,
@@ -1056,7 +1077,13 @@ export class Orchestrator {
           this.buildAttemptReviewOpinionRef(runId, attempt.id, opinion.opinion_id)
         )
       });
-      await saveAttemptEvaluation(this.workspacePaths, evaluation);
+      if (synthesis.synthesisRecord) {
+        await saveAttemptEvaluationSynthesisRecord(
+          this.workspacePaths,
+          synthesis.synthesisRecord
+        );
+      }
+      await saveAttemptEvaluation(this.workspacePaths, synthesis.evaluation);
 
       attempt = updateAttempt(completedAttemptForEvaluation, {
         evaluation_ref: `runs/${runId}/attempts/${attempt.id}/evaluation.json`
@@ -1068,13 +1095,13 @@ export class Orchestrator {
         current,
         attempt,
         attempts: completedAttempts,
-        evaluation,
+        evaluation: synthesis.evaluation,
         result: execution.writeback
       });
       const checkpointOutcome = await maybeCreateVerifiedExecutionCheckpoint({
         run,
         attempt,
-        evaluation,
+        evaluation: synthesis.evaluation,
         attemptPaths,
         preflight: checkpointPreflight
       });
@@ -1106,7 +1133,7 @@ export class Orchestrator {
           run,
           attempt,
           execution.writeback,
-          evaluation,
+          synthesis.evaluation,
           runtimeVerification,
           nextCurrent
         )
@@ -1128,9 +1155,9 @@ export class Orchestrator {
           attempt_id: attempt.id,
           type: "attempt.completed",
           payload: {
-            recommendation: evaluation.recommendation,
-            goal_progress: evaluation.goal_progress,
-            suggested_attempt_type: evaluation.suggested_attempt_type
+            recommendation: synthesis.evaluation.recommendation,
+            goal_progress: synthesis.evaluation.goal_progress,
+            suggested_attempt_type: synthesis.evaluation.suggested_attempt_type
           }
         })
       );
@@ -1211,6 +1238,7 @@ export class Orchestrator {
       context,
       result,
       evaluation,
+      evaluationSynthesis,
       reviewInputPacket,
       reviewOpinions,
       runtimeVerification,
@@ -1220,6 +1248,7 @@ export class Orchestrator {
       getAttemptContext(this.workspacePaths, input.runId, input.attempt.id),
       getAttemptResult(this.workspacePaths, input.runId, input.attempt.id),
       getAttemptEvaluation(this.workspacePaths, input.runId, input.attempt.id),
+      getAttemptEvaluationSynthesisRecord(this.workspacePaths, input.runId, input.attempt.id),
       getAttemptReviewInputPacket(this.workspacePaths, input.runId, input.attempt.id),
       listAttemptReviewOpinions(this.workspacePaths, input.runId, input.attempt.id),
       getAttemptRuntimeVerification(this.workspacePaths, input.runId, input.attempt.id),
@@ -1246,7 +1275,8 @@ export class Orchestrator {
       reviewInputPacketRef: reviewInputPacket
         ? this.buildAttemptReviewInputPacketRef(input.runId, input.attempt.id)
         : null,
-      reviewOpinions
+      reviewOpinions,
+      evaluationSynthesis
     });
 
     await saveAttemptReviewPacket(this.workspacePaths, reviewPacket);
@@ -1296,6 +1326,10 @@ export class Orchestrator {
 
   private buildAttemptEvaluationRef(runId: string, attemptId: string): string {
     return `runs/${runId}/attempts/${attemptId}/evaluation.json`;
+  }
+
+  private buildAttemptEvaluationSynthesisRef(runId: string, attemptId: string): string {
+    return `runs/${runId}/attempts/${attemptId}/evaluation_synthesis.json`;
   }
 
   private buildAttemptReviewInputPacketRef(runId: string, attemptId: string): string {
@@ -1363,6 +1397,25 @@ export class Orchestrator {
     }
   }
 
+  private async runAttemptEvaluationSynthesis(input: {
+    reviewInputPacket: AttemptReviewInputPacket;
+    reviewInputPacketRef: string;
+    opinions: AttemptReviewerOpinion[];
+    opinionRefs: string[];
+  }): Promise<Awaited<ReturnType<typeof synthesizeAttemptEvaluation>>> {
+    try {
+      return await synthesizeAttemptEvaluation({
+        ...input,
+        synthesizer: this.synthesizer
+      });
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      throw new Error(
+        `尝试 ${input.reviewInputPacket.attempt_id} 的 synthesizer 在 evaluation 落盘前失败：${reason}`
+      );
+    }
+  }
+
   private async ensureSettledAttemptReviewPackets(
     runId: string,
     current: CurrentDecision | null,
@@ -1397,6 +1450,7 @@ export class Orchestrator {
       context,
       result,
       evaluation,
+      evaluationSynthesis,
       reviewInputPacket,
       reviewOpinions,
       runtimeVerification,
@@ -1407,6 +1461,7 @@ export class Orchestrator {
       getAttemptContext(this.workspacePaths, runId, attemptId),
       getAttemptResult(this.workspacePaths, runId, attemptId),
       getAttemptEvaluation(this.workspacePaths, runId, attemptId),
+      getAttemptEvaluationSynthesisRecord(this.workspacePaths, runId, attemptId),
       getAttemptReviewInputPacket(this.workspacePaths, runId, attemptId),
       listAttemptReviewOpinions(this.workspacePaths, runId, attemptId),
       getAttemptRuntimeVerification(this.workspacePaths, runId, attemptId),
@@ -1433,7 +1488,8 @@ export class Orchestrator {
       reviewInputPacketRef: reviewInputPacket
         ? this.buildAttemptReviewInputPacketRef(runId, attemptId)
         : null,
-      reviewOpinions
+      reviewOpinions,
+      evaluationSynthesis
     });
 
     await saveAttemptReviewPacket(this.workspacePaths, reviewPacket);
@@ -1511,6 +1567,7 @@ export class Orchestrator {
         runtimeVerification: input.runtimeVerification,
         journal: attemptJournal,
         reviewInputPacketFile: null,
+        evaluationSynthesisFile: null,
         reviewOpinionFiles: []
       }),
       generated_at: new Date().toISOString()
@@ -1521,6 +1578,7 @@ export class Orchestrator {
     attempt: Attempt;
     reviewInputPacket: AttemptReviewInputPacket;
     evaluation: AttemptEvaluation | null;
+    evaluationSynthesis: AttemptEvaluationSynthesisRecord | null;
     currentSnapshot: CurrentDecision | null;
     journal: Awaited<ReturnType<typeof listRunJournal>>;
     reviewInputPacketRef: string | null;
@@ -1562,6 +1620,9 @@ export class Orchestrator {
         reviewInputPacketFile: input.reviewInputPacketRef
           ? attemptPaths.reviewInputPacketFile
           : null,
+        evaluationSynthesisFile: input.evaluationSynthesis
+          ? attemptPaths.evaluationSynthesisFile
+          : null,
         reviewOpinionFiles: input.reviewOpinions.map((opinion) =>
           resolve(attemptPaths.reviewOpinionsDir, `${opinion.opinion_id}.json`)
         )
@@ -1570,6 +1631,12 @@ export class Orchestrator {
       review_opinion_refs: reviewOpinionRefs,
       synthesized_evaluation_ref: input.evaluation
         ? this.buildAttemptEvaluationRef(
+            input.reviewInputPacket.run_id,
+            input.reviewInputPacket.attempt_id
+          )
+        : null,
+      evaluation_synthesis_ref: input.evaluationSynthesis
+        ? this.buildAttemptEvaluationSynthesisRef(
             input.reviewInputPacket.run_id,
             input.reviewInputPacket.attempt_id
           )
@@ -1584,6 +1651,7 @@ export class Orchestrator {
     runtimeVerification: AttemptRuntimeVerification | null;
     journal: Awaited<ReturnType<typeof listRunJournal>>;
     reviewInputPacketFile: string | null;
+    evaluationSynthesisFile: string | null;
     reviewOpinionFiles: string[];
   }): Promise<ReviewPacketArtifact[]> {
     const candidatePaths = new Map<string, { kind: string; rawPath: string }>();
@@ -1604,6 +1672,7 @@ export class Orchestrator {
     addPath("attempt_result", input.attemptPaths.resultFile);
     addPath("attempt_evaluation", input.attemptPaths.evaluationFile);
     addPath("review_input_packet", input.reviewInputPacketFile);
+    addPath("evaluation_synthesis", input.evaluationSynthesisFile);
     addPath("runtime_verification", input.attemptPaths.runtimeVerificationFile);
     addPath("heartbeat", input.attemptPaths.heartbeatFile);
     addPath("stdout", input.attemptPaths.stdoutFile);

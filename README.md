@@ -19,6 +19,7 @@
 - `dashboard` 可以观察 run、attempt、review packet、runtime 状态和错误
 - `orchestrator` 会围绕 `CurrentDecision` 持续推进下一次 attempt
 - `Codex CLI` 作为当前 worker adapter
+- reviewer pipeline 可以并行跑 Gemini CLI / Codex CLI，并让单独的 synthesizer 产出最终 `evaluation.json`
 - execution attempt 会在独立 managed worktree 中运行，而不是直接污染源工作区
 - execution 会留下 replayable verification contract、runtime verification、review packet 和工件清单
 - runtime 改到 live 源码时，会显式要求重启，避免旧内存继续派发
@@ -110,6 +111,8 @@ pnpm --filter @autoresearch/dashboard-ui dev
 - `CODEX_MODEL`
 - `CODEX_PROFILE`
 - `CODEX_SANDBOX`
+- `AISA_REVIEWERS_JSON`
+- `AISA_REVIEW_SYNTHESIZER_JSON`
 - `OPENAI_API_KEY`
 - `OPENAI_BASE_URL`
 
@@ -118,6 +121,78 @@ pnpm --filter @autoresearch/dashboard-ui dev
 - `control-api` 会把 worker 相关配置透传给底层 `codex exec`
 - dashboard 默认通过同源 `/api/control/*` 代理访问本机 `control-api`
 - 如果没有额外 provider 覆盖，当前环境会直接使用本机已有的 CLI / API 配置
+
+如果要启用多 reviewer 和最终 synthesis，仓库自带了一个统一包装器：
+
+```bash
+node scripts/llm-judge-cli.mjs reviewer
+node scripts/llm-judge-cli.mjs synthesizer
+```
+
+常见本地配置是让 Gemini CLI 和 Codex CLI 都做 reviewer，再让 Codex CLI 负责最终 synthesis。对应环境变量是：
+
+```bash
+export AISA_REVIEWERS_JSON='[
+  {
+    "kind": "cli",
+    "reviewer_id": "gemini-reviewer",
+    "role": "principal_reviewer",
+    "adapter": "llm-judge-cli",
+    "provider": "gemini",
+    "model": "gemini-2.5-pro",
+    "command": "node",
+    "args": ["scripts/llm-judge-cli.mjs", "reviewer"],
+    "cwd": "/Users/atou/AISA",
+    "env": {
+      "AISA_LLM_PROVIDER": "gemini",
+      "AISA_LLM_MODEL": "gemini-2.5-pro"
+    },
+    "timeout_ms": 300000
+  },
+  {
+    "kind": "cli",
+    "reviewer_id": "codex-reviewer",
+    "role": "risk_reviewer",
+    "adapter": "llm-judge-cli",
+    "provider": "codex",
+    "model": "gpt-5.4",
+    "command": "node",
+    "args": ["scripts/llm-judge-cli.mjs", "reviewer"],
+    "cwd": "/Users/atou/AISA",
+    "env": {
+      "AISA_LLM_PROVIDER": "codex",
+      "AISA_LLM_MODEL": "gpt-5.4"
+    },
+    "timeout_ms": 300000
+  }
+]'
+
+export AISA_REVIEW_SYNTHESIZER_JSON='{
+  "kind": "cli",
+  "synthesizer_id": "codex-synthesizer",
+  "role": "final_synthesizer",
+  "adapter": "llm-judge-cli",
+  "provider": "codex",
+  "model": "gpt-5.4",
+  "command": "node",
+  "args": ["scripts/llm-judge-cli.mjs", "synthesizer"],
+  "cwd": "/Users/atou/AISA",
+  "env": {
+    "AISA_LLM_PROVIDER": "codex",
+    "AISA_LLM_MODEL": "gpt-5.4"
+  },
+  "timeout_ms": 300000
+}'
+```
+
+这台机器上实测 `gemini-3.1-pro` 当前会返回 404，所以 live 示例先写成 `gemini-2.5-pro`。如果你的 Gemini CLI 环境已经开放了 3.1，只需要替换上面的 model 和对应 env。
+
+这样每次 attempt 都会留下：
+
+- `review_input_packet.json`
+- `review_opinions/*.json`
+- `evaluation_synthesis.json`
+- `evaluation.json`
 
 ## 常用验证
 
@@ -209,7 +284,7 @@ pnpm dev
 
 ## 当前限制
 
-- evaluator 现在还是单一 `AttemptEvaluation`，还没升级成多 reviewer / synthesizer pipeline
+- 多 reviewer / synthesizer 已经支持，但 live 是否启用取决于本机 CLI 凭据和 `AISA_REVIEWERS_JSON` / `AISA_REVIEW_SYNTHESIZER_JSON`
 - 旧的 `goal / branch` 逻辑还在 orchestrator 里保留兼容，没有彻底剥离
 - dashboard 已经能看 run detail，但体验上还没有完全围绕 run page 收口
 - provider 可用性仍然会直接影响自举 run 的连续性

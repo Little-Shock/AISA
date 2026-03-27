@@ -181,6 +181,14 @@ export const CurrentDecisionSchema = z.object({
   updated_at: z.string().datetime()
 });
 
+export const AttemptSynthesizerIdentitySchema = z.object({
+  synthesizer_id: z.string().min(1),
+  role: z.string().min(1),
+  adapter: z.string().min(1),
+  provider: z.string().min(1).nullable(),
+  model: z.string().min(1).nullable()
+});
+
 export const AttemptEvaluationSchema = z.object({
   attempt_id: z.string(),
   run_id: z.string(),
@@ -193,7 +201,9 @@ export const AttemptEvaluationSchema = z.object({
   missing_evidence: z.array(z.string().min(1)).default([]),
   review_input_packet_ref: z.string().min(1).nullable().default(null),
   opinion_refs: z.array(z.string().min(1)).default([]),
+  evaluation_synthesis_ref: z.string().min(1).nullable().default(null),
   synthesis_strategy: z.string().min(1).default("legacy_single_judge"),
+  synthesizer: AttemptSynthesizerIdentitySchema.nullable().default(null),
   reviewer_count: z.number().int().nonnegative().default(0),
   created_at: z.string().datetime()
 });
@@ -521,7 +531,20 @@ export const AttemptReviewPacketSchema = z.object({
   review_input_packet_ref: z.string().min(1).nullable().default(null),
   review_opinion_refs: z.array(z.string().min(1)).default([]),
   synthesized_evaluation_ref: z.string().min(1).nullable().default(null),
+  evaluation_synthesis_ref: z.string().min(1).nullable().default(null),
   generated_at: z.string().datetime()
+});
+
+export const AttemptEvaluationSynthesisRecordSchema = z.object({
+  run_id: z.string(),
+  attempt_id: z.string(),
+  synthesizer: AttemptSynthesizerIdentitySchema,
+  review_input_packet_ref: z.string().min(1),
+  opinion_refs: z.array(z.string().min(1)).default([]),
+  deterministic_base_evaluation: AttemptEvaluationSchema,
+  raw_output: z.string(),
+  structured_judgment: AttemptReviewerJudgmentSchema,
+  created_at: z.string().datetime()
 });
 
 export const ContextSnapshotSchema = z.object({
@@ -616,10 +639,14 @@ export type WorkerArtifact = z.infer<typeof WorkerArtifactSchema>;
 export type ReviewPacketArtifact = z.infer<typeof ReviewPacketArtifactSchema>;
 export type AttemptReviewInputRef = z.infer<typeof AttemptReviewInputRefSchema>;
 export type AttemptReviewerIdentity = z.infer<typeof AttemptReviewerIdentitySchema>;
+export type AttemptSynthesizerIdentity = z.infer<typeof AttemptSynthesizerIdentitySchema>;
 export type AttemptReviewerJudgment = z.infer<typeof AttemptReviewerJudgmentSchema>;
 export type AttemptReviewInputPacket = z.infer<typeof AttemptReviewInputPacketSchema>;
 export type AttemptReviewerOpinion = z.infer<typeof AttemptReviewerOpinionSchema>;
 export type AttemptReviewPacket = z.infer<typeof AttemptReviewPacketSchema>;
+export type AttemptEvaluationSynthesisRecord = z.infer<
+  typeof AttemptEvaluationSynthesisRecordSchema
+>;
 export type ContextSnapshot = z.infer<typeof ContextSnapshotSchema>;
 export type EvalResult = z.infer<typeof EvalResultSchema>;
 export type ContextBoard = z.infer<typeof ContextBoardSchema>;

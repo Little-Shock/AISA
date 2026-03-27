@@ -4,6 +4,7 @@ import type {
   Attempt,
   AttemptContract,
   AttemptHeartbeat,
+  AttemptEvaluationSynthesisRecord,
   AttemptRuntimeEvent,
   AttemptRuntimeState,
   AttemptEvaluation,
@@ -31,6 +32,7 @@ import {
   AttemptSchema,
   AttemptContractSchema,
   AttemptHeartbeatSchema,
+  AttemptEvaluationSynthesisRecordSchema,
   AttemptRuntimeEventSchema,
   AttemptRuntimeStateSchema,
   AttemptEvaluationSchema,
@@ -101,6 +103,7 @@ export interface AttemptPaths {
   contextFile: string;
   resultFile: string;
   evaluationFile: string;
+  evaluationSynthesisFile: string;
   reviewInputPacketFile: string;
   reviewPacketFile: string;
   reviewOpinionsDir: string;
@@ -159,6 +162,7 @@ export function resolveAttemptPaths(
     contextFile: join(attemptDir, "context.json"),
     resultFile: join(attemptDir, "result.json"),
     evaluationFile: join(attemptDir, "evaluation.json"),
+    evaluationSynthesisFile: join(attemptDir, "evaluation_synthesis.json"),
     reviewInputPacketFile: join(attemptDir, "review_input_packet.json"),
     reviewPacketFile: join(attemptDir, "review_packet.json"),
     reviewOpinionsDir: join(attemptDir, "review_opinions"),
@@ -648,6 +652,18 @@ export async function saveAttemptEvaluation(
   await writeJsonFile(attemptPaths.evaluationFile, evaluation);
 }
 
+export async function saveAttemptEvaluationSynthesisRecord(
+  paths: WorkspacePaths,
+  synthesisRecord: AttemptEvaluationSynthesisRecord
+): Promise<void> {
+  const attemptPaths = await ensureAttemptDirectories(
+    paths,
+    synthesisRecord.run_id,
+    synthesisRecord.attempt_id
+  );
+  await writeJsonFile(attemptPaths.evaluationSynthesisFile, synthesisRecord);
+}
+
 export async function saveAttemptReviewInputPacket(
   paths: WorkspacePaths,
   reviewInputPacket: AttemptReviewInputPacket
@@ -706,6 +722,21 @@ export async function getAttemptEvaluation(
       resolveAttemptPaths(paths, runId, attemptId).evaluationFile
     );
     return AttemptEvaluationSchema.parse(evaluation);
+  } catch {
+    return null;
+  }
+}
+
+export async function getAttemptEvaluationSynthesisRecord(
+  paths: WorkspacePaths,
+  runId: string,
+  attemptId: string
+): Promise<AttemptEvaluationSynthesisRecord | null> {
+  try {
+    const synthesisRecord = await readJsonFile<AttemptEvaluationSynthesisRecord>(
+      resolveAttemptPaths(paths, runId, attemptId).evaluationSynthesisFile
+    );
+    return AttemptEvaluationSynthesisRecordSchema.parse(synthesisRecord);
   } catch {
     return null;
   }

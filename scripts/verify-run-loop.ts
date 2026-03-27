@@ -21,11 +21,13 @@ import {
   assessExecutionVerificationToolchain,
   Orchestrator
 } from "../packages/orchestrator/src/index.js";
+import { synthesizeAttemptEvaluation } from "../packages/judge/src/index.js";
 import {
   appendRunJournal,
   ensureWorkspace,
   getAttemptContext,
   getAttemptEvaluation,
+  getAttemptEvaluationSynthesisRecord,
   getAttemptReviewInputPacket,
   getAttemptReviewPacket,
   getCurrentDecision,
@@ -47,9 +49,12 @@ import {
 } from "../packages/state-store/src/index.js";
 
 const REVIEWER_CONFIG_ENV = "AISA_REVIEWERS_JSON";
+const SYNTHESIZER_CONFIG_ENV = "AISA_REVIEW_SYNTHESIZER_JSON";
 const CLI_REVIEWER_FAILURE_TIMEOUT_MS = 1_000;
+const CLI_SYNTHESIZER_FAILURE_TIMEOUT_MS = 1_000;
 
 type CliReviewerFailureMode = "invalid_json" | "nonzero_exit" | "timeout";
+type CliSynthesizerFailureMode = "invalid_json" | "nonzero_exit";
 
 type ScenarioDriver =
   | "happy_path"
@@ -1008,10 +1013,11 @@ async function assertMultiReviewerPipelinePersistsOpinionsAndSynthesizesEvaluati
 
   const expectedReviewInputPacketRef = `runs/${run.id}/attempts/${researchAttempt!.id}/review_input_packet.json`;
   const expectedEvaluationRef = `runs/${run.id}/attempts/${researchAttempt!.id}/evaluation.json`;
-  const [reviewInputPacket, reviewOpinions, evaluation, reviewPacket, current] = await Promise.all([
+  const [reviewInputPacket, reviewOpinions, evaluation, evaluationSynthesis, reviewPacket, current] = await Promise.all([
     getAttemptReviewInputPacket(workspacePaths, run.id, researchAttempt!.id),
     listAttemptReviewOpinions(workspacePaths, run.id, researchAttempt!.id),
     getAttemptEvaluation(workspacePaths, run.id, researchAttempt!.id),
+    getAttemptEvaluationSynthesisRecord(workspacePaths, run.id, researchAttempt!.id),
     getAttemptReviewPacket(workspacePaths, run.id, researchAttempt!.id),
     getCurrentDecision(workspacePaths, run.id)
   ]);
@@ -1119,6 +1125,21 @@ async function assertMultiReviewerPipelinePersistsOpinionsAndSynthesizesEvaluati
     "deterministic_consensus_v1",
     "multi_reviewer_pipeline: synthesized evaluation should record its merge strategy"
   );
+  assert.equal(
+    evaluation?.evaluation_synthesis_ref,
+    null,
+    "multi_reviewer_pipeline: deterministic synthesis should not claim a separate synthesis artifact"
+  );
+  assert.equal(
+    evaluation?.synthesizer,
+    null,
+    "multi_reviewer_pipeline: deterministic synthesis should not claim a model synthesizer"
+  );
+  assert.equal(
+    evaluationSynthesis,
+    null,
+    "multi_reviewer_pipeline: deterministic synthesis should not persist an evaluation_synthesis artifact"
+  );
 
   assert.ok(reviewPacket, "multi_reviewer_pipeline: review packet should still be persisted");
   assert.equal(
@@ -1135,6 +1156,11 @@ async function assertMultiReviewerPipelinePersistsOpinionsAndSynthesizesEvaluati
     reviewPacket?.review_opinion_refs.length,
     2,
     "multi_reviewer_pipeline: review packet should expose both opinion refs"
+  );
+  assert.equal(
+    reviewPacket?.evaluation_synthesis_ref,
+    null,
+    "multi_reviewer_pipeline: deterministic synthesis should not expose an evaluation_synthesis ref"
   );
   assert.equal(
     reviewPacket?.artifact_manifest.filter((artifact) => artifact.kind === "review_opinion" && artifact.exists).length,
@@ -1154,6 +1180,539 @@ async function assertMultiReviewerPipelinePersistsOpinionsAndSynthesizesEvaluati
   );
 }
 
+async function assertCliSynthesizerPersistsArtifactAndFinalizesEvaluation(): Promise<void> {
+  const rootDir = await mkdtemp(join(tmpdir(), "aisa-cli-synthesizer-pipeline-"));
+  await initializeGitRepo(rootDir, false);
+  const { run, workspacePaths } = await bootstrapRun(rootDir, "cli-synthesizer-pipeline");
+  const reviewerConfigs = [
+    {
+      kind: "heuristic",
+      reviewer_id: "gemini-reviewer",
+      role: "principal_reviewer",
+      adapter: "deterministic-heuristic",
+      provider: "gemini",
+      model: "gemini-2.5-pro"
+    },
+    {
+      kind: "cli",
+      reviewer_id: "codex-reviewer",
+      role: "risk_reviewer",
+      adapter: "fixture-cli-reviewer",
+      provider: "codex",
+      model: "gpt-5.4",
+      command: process.execPath,
+      args: [join(process.cwd(), "scripts", "fixture-reviewer-cli.mjs")],
+      cwd: process.cwd(),
+      timeout_ms: 5_000
+    }
+  ];
+  const synthesizerConfig = {
+    kind: "cli",
+    synthesizer_id: "codex-synthesizer",
+    role: "final_synthesizer",
+    adapter: "fixture-cli-synthesizer",
+    provider: "codex",
+    model: "gpt-5.4",
+    command: process.execPath,
+    args: [join(process.cwd(), "scripts", "fixture-synthesizer-cli.mjs")],
+    cwd: process.cwd(),
+    timeout_ms: 5_000
+  };
+
+  await withTemporaryEnv(REVIEWER_CONFIG_ENV, JSON.stringify(reviewerConfigs), async () => {
+    await withTemporaryEnv(SYNTHESIZER_CONFIG_ENV, JSON.stringify(synthesizerConfig), async () => {
+      const orchestrator = new Orchestrator(
+        workspacePaths,
+        new ScenarioAdapter("happy_path") as never,
+        undefined,
+        60_000
+      );
+      await settle({
+        orchestrator,
+        workspacePaths,
+        runId: run.id,
+        iterations: 2
+      });
+    });
+  });
+
+  const attempts = await listAttempts(workspacePaths, run.id);
+  const researchAttempt = attempts.find(
+    (attempt) => attempt.attempt_type === "research" && attempt.status === "completed"
+  );
+  assert.ok(
+    researchAttempt,
+    "cli_synthesizer_pipeline: expected one completed research attempt"
+  );
+
+  const expectedReviewInputPacketRef = `runs/${run.id}/attempts/${researchAttempt!.id}/review_input_packet.json`;
+  const expectedEvaluationRef = `runs/${run.id}/attempts/${researchAttempt!.id}/evaluation.json`;
+  const expectedEvaluationSynthesisRef = `runs/${run.id}/attempts/${researchAttempt!.id}/evaluation_synthesis.json`;
+  const [reviewOpinions, evaluation, evaluationSynthesis, reviewPacket, current] = await Promise.all([
+    listAttemptReviewOpinions(workspacePaths, run.id, researchAttempt!.id),
+    getAttemptEvaluation(workspacePaths, run.id, researchAttempt!.id),
+    getAttemptEvaluationSynthesisRecord(workspacePaths, run.id, researchAttempt!.id),
+    getAttemptReviewPacket(workspacePaths, run.id, researchAttempt!.id),
+    getCurrentDecision(workspacePaths, run.id)
+  ]);
+
+  assert.equal(
+    reviewOpinions.length,
+    2,
+    "cli_synthesizer_pipeline: both reviewer opinions should still be persisted before synthesis"
+  );
+  assert.ok(evaluation, "cli_synthesizer_pipeline: synthesized evaluation should be persisted");
+  assert.equal(
+    evaluation?.review_input_packet_ref,
+    expectedReviewInputPacketRef,
+    "cli_synthesizer_pipeline: evaluation should still reference the frozen input packet"
+  );
+  assert.equal(
+    evaluation?.synthesis_strategy,
+    "cli_synthesizer_v1",
+    "cli_synthesizer_pipeline: evaluation should record the cli synthesizer strategy"
+  );
+  assert.equal(
+    evaluation?.evaluation_synthesis_ref,
+    expectedEvaluationSynthesisRef,
+    "cli_synthesizer_pipeline: evaluation should point at the persisted synthesis artifact"
+  );
+  assert.equal(
+    evaluation?.synthesizer?.synthesizer_id,
+    "codex-synthesizer",
+    "cli_synthesizer_pipeline: evaluation should record the synthesizer identity"
+  );
+  assert.equal(
+    evaluation?.synthesizer?.provider,
+    "codex",
+    "cli_synthesizer_pipeline: evaluation should record the synthesizer provider"
+  );
+  assert.equal(
+    evaluation?.synthesizer?.model,
+    "gpt-5.4",
+    "cli_synthesizer_pipeline: evaluation should record the synthesizer model"
+  );
+  assert.equal(
+    evaluation?.goal_progress,
+    0.91,
+    "cli_synthesizer_pipeline: cli synthesis should drive the final goal_progress"
+  );
+  assert.equal(
+    evaluation?.evidence_quality,
+    0.87,
+    "cli_synthesizer_pipeline: cli synthesis should drive the final evidence_quality"
+  );
+  assert.match(
+    evaluation?.rationale ?? "",
+    new RegExp(`cli synthesizer reconciled ${researchAttempt!.id}`),
+    "cli_synthesizer_pipeline: cli synthesis rationale should survive in evaluation.json"
+  );
+
+  assert.ok(
+    evaluationSynthesis,
+    "cli_synthesizer_pipeline: evaluation_synthesis.json should be persisted"
+  );
+  assert.equal(
+    evaluationSynthesis?.review_input_packet_ref,
+    expectedReviewInputPacketRef,
+    "cli_synthesizer_pipeline: synthesis artifact should point at the frozen input packet"
+  );
+  assert.deepEqual(
+    evaluationSynthesis?.opinion_refs,
+    reviewPacket?.review_opinion_refs ?? [],
+    "cli_synthesizer_pipeline: synthesis artifact should point at every persisted opinion"
+  );
+  assert.equal(
+    evaluationSynthesis?.synthesizer.synthesizer_id,
+    "codex-synthesizer",
+    "cli_synthesizer_pipeline: synthesis artifact should keep synthesizer identity"
+  );
+  const synthesisOutput = JSON.parse(evaluationSynthesis!.raw_output) as {
+    received_attempt_id?: string;
+    structured_judgment?: {
+      rationale?: string;
+    };
+  };
+  assert.equal(
+    synthesisOutput.received_attempt_id,
+    researchAttempt!.id,
+    "cli_synthesizer_pipeline: cli synthesizer should receive the frozen synthesis packet"
+  );
+  assert.equal(
+    synthesisOutput.structured_judgment?.rationale,
+    `cli synthesizer reconciled ${researchAttempt!.id}`,
+    "cli_synthesizer_pipeline: synthesis artifact should keep the cli synthesizer raw output"
+  );
+
+  assert.ok(reviewPacket, "cli_synthesizer_pipeline: review packet should still be persisted");
+  assert.equal(
+    reviewPacket?.synthesized_evaluation_ref,
+    expectedEvaluationRef,
+    "cli_synthesizer_pipeline: review packet should expose the final evaluation ref"
+  );
+  assert.equal(
+    reviewPacket?.evaluation_synthesis_ref,
+    expectedEvaluationSynthesisRef,
+    "cli_synthesizer_pipeline: review packet should expose the synthesis artifact ref"
+  );
+  assert.equal(
+    reviewPacket?.artifact_manifest.filter(
+      (artifact) => artifact.kind === "evaluation_synthesis" && artifact.exists
+    ).length,
+    1,
+    "cli_synthesizer_pipeline: artifact manifest should include the synthesis artifact"
+  );
+
+  assert.equal(
+    current?.recommended_next_action,
+    "start_execution",
+    "cli_synthesizer_pipeline: loop should still consume the final synthesized evaluation"
+  );
+  assert.equal(
+    current?.latest_attempt_id,
+    researchAttempt!.id,
+    "cli_synthesizer_pipeline: current decision should still point at the settled attempt"
+  );
+}
+
+function buildCliSynthesizerFailureMatcher(
+  mode: CliSynthesizerFailureMode,
+  timeoutMs: number
+): RegExp {
+  switch (mode) {
+    case "invalid_json":
+      return /evaluation 落盘前失败：CLI synthesizer .* returned invalid JSON/;
+    case "nonzero_exit":
+      return /evaluation 落盘前失败：CLI command failed/;
+    default:
+      return new RegExp(`evaluation 落盘前失败：CLI command timed out after ${timeoutMs}ms`);
+  }
+}
+
+type CliSynthesizerFailureCaseState = {
+  run: Run;
+  workspacePaths: ReturnType<typeof resolveWorkspacePaths>;
+  failedResearchAttempt: Attempt;
+  reviewInputPacket: Awaited<ReturnType<typeof getAttemptReviewInputPacket>>;
+  reviewOpinions: Awaited<ReturnType<typeof listAttemptReviewOpinions>>;
+  evaluation: Awaited<ReturnType<typeof getAttemptEvaluation>>;
+  evaluationSynthesis: Awaited<ReturnType<typeof getAttemptEvaluationSynthesisRecord>>;
+  reviewPacket: Awaited<ReturnType<typeof getAttemptReviewPacket>>;
+  current: Awaited<ReturnType<typeof getCurrentDecision>>;
+};
+
+async function runCliSynthesizerFailureCase(
+  mode: CliSynthesizerFailureMode
+): Promise<CliSynthesizerFailureCaseState> {
+  const rootDir = await mkdtemp(join(tmpdir(), `aisa-cli-synthesizer-${mode}-`));
+  await initializeGitRepo(rootDir, false);
+  const { run, workspacePaths } = await bootstrapRun(rootDir, `cli-synthesizer-${mode}`);
+  const reviewerConfigs = [
+    {
+      kind: "heuristic",
+      reviewer_id: "principal-reviewer",
+      role: "principal_reviewer",
+      adapter: "deterministic-heuristic"
+    }
+  ];
+  const synthesizerConfig = {
+    kind: "cli",
+    synthesizer_id: `${mode}-synthesizer`,
+    role: "final_synthesizer",
+    adapter: `inline-${mode}-synthesizer`,
+    command: process.execPath,
+    args: [join(process.cwd(), "scripts", "fixture-synthesizer-cli.mjs"), mode],
+    cwd: process.cwd(),
+    timeout_ms: CLI_SYNTHESIZER_FAILURE_TIMEOUT_MS
+  };
+
+  await withTemporaryEnv(REVIEWER_CONFIG_ENV, JSON.stringify(reviewerConfigs), async () => {
+    await withTemporaryEnv(SYNTHESIZER_CONFIG_ENV, JSON.stringify(synthesizerConfig), async () => {
+      const orchestrator = new Orchestrator(
+        workspacePaths,
+        new ScenarioAdapter("happy_path") as never,
+        undefined,
+        60_000
+      );
+      await settle({
+        orchestrator,
+        workspacePaths,
+        runId: run.id,
+        iterations: 2
+      });
+    });
+  });
+
+  const attempts = await listAttempts(workspacePaths, run.id);
+  const failedResearchAttempt = attempts.find(
+    (attempt) => attempt.attempt_type === "research" && attempt.status === "failed"
+  );
+  assert.ok(
+    failedResearchAttempt,
+    `cli_synthesizer_${mode}: expected one failed research attempt`
+  );
+
+  const [reviewInputPacket, reviewOpinions, evaluation, evaluationSynthesis, reviewPacket, current] =
+    await Promise.all([
+      getAttemptReviewInputPacket(workspacePaths, run.id, failedResearchAttempt!.id),
+      listAttemptReviewOpinions(workspacePaths, run.id, failedResearchAttempt!.id),
+      getAttemptEvaluation(workspacePaths, run.id, failedResearchAttempt!.id),
+      getAttemptEvaluationSynthesisRecord(workspacePaths, run.id, failedResearchAttempt!.id),
+      getAttemptReviewPacket(workspacePaths, run.id, failedResearchAttempt!.id),
+      getCurrentDecision(workspacePaths, run.id)
+    ]);
+
+  return {
+    run,
+    workspacePaths,
+    failedResearchAttempt: failedResearchAttempt!,
+    reviewInputPacket,
+    reviewOpinions,
+    evaluation,
+    evaluationSynthesis,
+    reviewPacket,
+    current
+  };
+}
+
+async function assertCliSynthesizerFailureBlocksEvaluationPersistence(
+  mode: CliSynthesizerFailureMode
+): Promise<void> {
+  const {
+    run,
+    failedResearchAttempt,
+    reviewInputPacket,
+    reviewOpinions,
+    evaluation,
+    evaluationSynthesis,
+    reviewPacket,
+    current
+  } = await runCliSynthesizerFailureCase(mode);
+
+  const expectedReviewInputPacketRef = `runs/${run.id}/attempts/${failedResearchAttempt.id}/review_input_packet.json`;
+
+  assert.ok(
+    reviewInputPacket,
+    `cli_synthesizer_${mode}: review_input_packet.json should still be persisted before synthesis fails`
+  );
+  assert.equal(
+    reviewInputPacket?.attempt.status,
+    "completed",
+    `cli_synthesizer_${mode}: frozen review input packet should keep the pre-synthesis completed status`
+  );
+  assert.equal(
+    reviewOpinions.length,
+    1,
+    `cli_synthesizer_${mode}: reviewer opinions should stay persisted when synthesis fails`
+  );
+  assert.equal(
+    evaluation,
+    null,
+    `cli_synthesizer_${mode}: evaluation.json should not be persisted after synthesizer failure`
+  );
+  assert.equal(
+    evaluationSynthesis,
+    null,
+    `cli_synthesizer_${mode}: evaluation_synthesis.json should not be persisted after synthesizer failure`
+  );
+  assert.ok(reviewPacket, `cli_synthesizer_${mode}: review packet should still be persisted`);
+  assert.equal(
+    reviewPacket?.attempt.status,
+    "failed",
+    `cli_synthesizer_${mode}: settled review packet should expose the failed attempt status`
+  );
+  assert.equal(
+    reviewPacket?.review_input_packet_ref,
+    expectedReviewInputPacketRef,
+    `cli_synthesizer_${mode}: review packet should still point at the frozen input packet`
+  );
+  assert.equal(
+    reviewPacket?.review_opinion_refs.length,
+    1,
+    `cli_synthesizer_${mode}: review packet should keep persisted reviewer opinions`
+  );
+  assert.equal(
+    reviewPacket?.synthesized_evaluation_ref,
+    null,
+    `cli_synthesizer_${mode}: review packet should not expose an evaluation ref after synthesis failure`
+  );
+  assert.equal(
+    reviewPacket?.evaluation_synthesis_ref,
+    null,
+    `cli_synthesizer_${mode}: review packet should not expose an evaluation_synthesis ref after synthesis failure`
+  );
+  assert.equal(
+    reviewPacket?.artifact_manifest.filter(
+      (artifact) => artifact.kind === "review_opinion" && artifact.exists
+    ).length,
+    1,
+    `cli_synthesizer_${mode}: artifact manifest should keep persisted reviewer opinions`
+  );
+  assert.equal(
+    reviewPacket?.artifact_manifest.filter(
+      (artifact) => artifact.kind === "evaluation_synthesis" && artifact.exists
+    ).length,
+    0,
+    `cli_synthesizer_${mode}: artifact manifest should stay free of evaluation_synthesis files after failure`
+  );
+  assert.equal(
+    current?.recommended_next_action,
+    "wait_for_human",
+    `cli_synthesizer_${mode}: loop should stop and wait for human recovery`
+  );
+  assert.match(
+    current?.blocking_reason ?? "",
+    buildCliSynthesizerFailureMatcher(mode, CLI_SYNTHESIZER_FAILURE_TIMEOUT_MS),
+    `cli_synthesizer_${mode}: blocking reason should expose the synthesizer failure`
+  );
+  assert.match(
+    reviewPacket?.failure_context?.message ?? "",
+    buildCliSynthesizerFailureMatcher(mode, CLI_SYNTHESIZER_FAILURE_TIMEOUT_MS),
+    `cli_synthesizer_${mode}: failure context should expose the synthesizer failure`
+  );
+}
+
+async function assertCliSynthesizerCannotOverrideFailedRuntimeVerification(): Promise<void> {
+  const run = createRun({
+    goal_id: "goal_hard_gate",
+    branch_id: null,
+    title: "hard gate",
+    description: "ensure failed runtime verification stays hard-gated",
+    success_criteria: ["failed runtime verification stays hard-gated"],
+    owner_id: "verify-run-loop",
+    workspace_root: process.cwd()
+  });
+  const baseAttempt = createAttempt({
+    run_id: run.id,
+    attempt_type: "execution",
+    worker: "codex",
+    objective: "repair the runtime",
+    success_criteria: ["verification should pass"],
+    workspace_root: process.cwd()
+  });
+  const attempt = updateAttempt(baseAttempt, {
+    status: "completed",
+    started_at: new Date().toISOString(),
+    ended_at: new Date().toISOString()
+  });
+  const attemptContract = createAttemptContract({
+    attempt_id: attempt.id,
+    run_id: run.id,
+    attempt_type: "execution",
+    objective: attempt.objective,
+    success_criteria: attempt.success_criteria,
+    required_evidence: ["verification output"],
+    verification_plan: {
+      commands: [
+        {
+          purpose: "typecheck",
+          command: "pnpm typecheck"
+        }
+      ]
+    }
+  });
+  const reviewInputPacket = {
+    run_id: run.id,
+    attempt_id: attempt.id,
+    attempt,
+    attempt_contract: attemptContract,
+    current_decision_snapshot: createCurrentDecision({
+      run_id: run.id,
+      run_status: "running",
+      latest_attempt_id: attempt.id,
+      recommended_next_action: "attempt_running",
+      recommended_attempt_type: "execution",
+      summary: "runtime failure under review"
+    }),
+    context: null,
+    journal: [],
+    failure_context: {
+      message: "Verification failed.",
+      journal_event_id: null,
+      journal_event_ts: null
+    },
+    result: WorkerWritebackSchema.parse({
+      summary: "Applied a patch but verification still failed.",
+      findings: [
+        {
+          type: "fact",
+          content: "Typecheck still fails.",
+          evidence: ["pnpm typecheck => exit 1"]
+        }
+      ],
+      questions: [],
+      recommended_next_steps: ["inspect the failing typecheck output"],
+      confidence: 0.71,
+      artifacts: []
+    }),
+    runtime_verification: {
+      attempt_id: attempt.id,
+      run_id: run.id,
+      attempt_type: "execution",
+      status: "failed",
+      repo_root: process.cwd(),
+      git_head: "abc123",
+      git_status: [" M packages/judge/src/index.ts"],
+      preexisting_git_status: [],
+      new_git_status: [" M packages/judge/src/index.ts"],
+      changed_files: ["packages/judge/src/index.ts"],
+      failure_code: "verification_command_failed",
+      failure_reason: "Verification command failed for typecheck.",
+      command_results: [
+        {
+          purpose: "typecheck",
+          command: "pnpm typecheck",
+          cwd: process.cwd(),
+          expected_exit_code: 0,
+          exit_code: 1,
+          passed: false,
+          stdout_file: "/tmp/typecheck.stdout",
+          stderr_file: "/tmp/typecheck.stderr"
+        }
+      ],
+      created_at: new Date().toISOString()
+    },
+    artifact_manifest: [],
+    generated_at: new Date().toISOString()
+  };
+  const synthesis = await synthesizeAttemptEvaluation({
+    reviewInputPacket,
+    opinions: [],
+    reviewInputPacketRef: `runs/${run.id}/attempts/${attempt.id}/review_input_packet.json`,
+    opinionRefs: [],
+    synthesizerConfig: {
+      kind: "cli",
+      synthesizer_id: "fixture-hard-gate",
+      role: "final_synthesizer",
+      adapter: "fixture-cli-synthesizer",
+      command: process.execPath,
+      args: [join(process.cwd(), "scripts", "fixture-synthesizer-cli.mjs")],
+      cwd: process.cwd(),
+      timeout_ms: 5_000
+    }
+  });
+
+  assert.equal(
+    synthesis.evaluation.verification_status,
+    "failed",
+    "cli_synthesizer_hard_gate: failed runtime verification must remain failed after cli synthesis"
+  );
+  assert.equal(
+    synthesis.evaluation.recommendation,
+    "continue",
+    "cli_synthesizer_hard_gate: verification_command_failed should keep the deterministic continue recommendation"
+  );
+  assert.equal(
+    synthesis.evaluation.suggested_attempt_type,
+    "research",
+    "cli_synthesizer_hard_gate: verification_command_failed should keep the deterministic research retry suggestion"
+  );
+  assert.ok(
+    synthesis.evaluation.goal_progress <= 0.34,
+    "cli_synthesizer_hard_gate: failed runtime verification must keep goal_progress hard-capped"
+  );
+}
+
 function buildCliReviewerFailureMatcher(
   mode: CliReviewerFailureMode,
   timeoutMs: number
@@ -1162,9 +1721,9 @@ function buildCliReviewerFailureMatcher(
     case "invalid_json":
       return /opinion 落盘前失败：CLI reviewer .* returned invalid JSON/;
     case "nonzero_exit":
-      return /opinion 落盘前失败：CLI reviewer command failed/;
+      return /opinion 落盘前失败：CLI command failed/;
     case "timeout":
-      return new RegExp(`opinion 落盘前失败：CLI reviewer command timed out after ${timeoutMs}ms`);
+      return new RegExp(`opinion 落盘前失败：CLI command timed out after ${timeoutMs}ms`);
   }
 }
 
@@ -2894,6 +3453,34 @@ async function main(): Promise<void> {
   }
 
   try {
+    await assertCliSynthesizerFailureBlocksEvaluationPersistence("invalid_json");
+    results.push({
+      id: "cli_synthesizer_invalid_json_blocks_evaluation_persistence",
+      status: "pass"
+    });
+  } catch (error) {
+    results.push({
+      id: "cli_synthesizer_invalid_json_blocks_evaluation_persistence",
+      status: "fail",
+      error: error instanceof Error ? error.message : String(error)
+    });
+  }
+
+  try {
+    await assertCliSynthesizerFailureBlocksEvaluationPersistence("nonzero_exit");
+    results.push({
+      id: "cli_synthesizer_nonzero_exit_blocks_evaluation_persistence",
+      status: "pass"
+    });
+  } catch (error) {
+    results.push({
+      id: "cli_synthesizer_nonzero_exit_blocks_evaluation_persistence",
+      status: "fail",
+      error: error instanceof Error ? error.message : String(error)
+    });
+  }
+
+  try {
     await assertMultiReviewerPipelinePersistsOpinionsAndSynthesizesEvaluation();
     results.push({
       id: "multi_reviewer_pipeline_persists_and_synthesizes",
@@ -2902,6 +3489,34 @@ async function main(): Promise<void> {
   } catch (error) {
     results.push({
       id: "multi_reviewer_pipeline_persists_and_synthesizes",
+      status: "fail",
+      error: error instanceof Error ? error.message : String(error)
+    });
+  }
+
+  try {
+    await assertCliSynthesizerPersistsArtifactAndFinalizesEvaluation();
+    results.push({
+      id: "cli_synthesizer_persists_artifact_and_finalizes_evaluation",
+      status: "pass"
+    });
+  } catch (error) {
+    results.push({
+      id: "cli_synthesizer_persists_artifact_and_finalizes_evaluation",
+      status: "fail",
+      error: error instanceof Error ? error.message : String(error)
+    });
+  }
+
+  try {
+    await assertCliSynthesizerCannotOverrideFailedRuntimeVerification();
+    results.push({
+      id: "cli_synthesizer_hard_gate_preserves_failed_runtime_verification",
+      status: "pass"
+    });
+  } catch (error) {
+    results.push({
+      id: "cli_synthesizer_hard_gate_preserves_failed_runtime_verification",
       status: "fail",
       error: error instanceof Error ? error.message : String(error)
     });
