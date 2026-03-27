@@ -18,6 +18,7 @@ import {
   resolveWorkspacePaths,
   saveAttempt,
   saveAttemptContract,
+  saveAttemptContext,
   saveAttemptEvaluation,
   saveAttemptResult,
   saveAttemptRuntimeVerification,
@@ -51,21 +52,20 @@ async function main(): Promise<void> {
     recommended_attempt_type: null,
     summary: "Run completed with persisted execution evidence."
   });
-  const attempt = updateAttempt(
-    createAttempt({
-      run_id: run.id,
-      attempt_type: "execution",
-      worker: "fake-codex",
-      objective: "Make a small backend change and verify it.",
-      success_criteria: run.success_criteria,
-      workspace_root: projectRoot
-    }),
-    {
-      status: "completed",
-      started_at: new Date().toISOString(),
-      ended_at: new Date().toISOString()
-    }
-  );
+  const createdAttempt = createAttempt({
+    run_id: run.id,
+    attempt_type: "execution",
+    worker: "fake-codex",
+    objective: "Make a small backend change and verify it.",
+    success_criteria: run.success_criteria,
+    workspace_root: projectRoot
+  });
+  const attempt = updateAttempt(createdAttempt, {
+    status: "completed",
+    started_at: new Date().toISOString(),
+    ended_at: new Date().toISOString(),
+    input_context_ref: `runs/${run.id}/attempts/${createdAttempt.id}/context.json`
+  });
 
   await saveRun(workspacePaths, run);
   await saveCurrentDecision(
@@ -104,6 +104,21 @@ async function main(): Promise<void> {
       }
     })
   );
+  const persistedContext = {
+    contract: {
+      title: "Run detail API verification"
+    },
+    current_decision: {
+      summary: "Run completed with persisted execution evidence."
+    },
+    previous_attempts: [
+      {
+        id: "att_seeded123",
+        status: "completed"
+      }
+    ]
+  };
+  await saveAttemptContext(workspacePaths, run.id, attempt.id, persistedContext);
   await saveAttemptResult(workspacePaths, run.id, attempt.id, {
     summary: "Execution left a replayable verification plan.",
     findings: [
@@ -322,8 +337,13 @@ async function main(): Promise<void> {
     const payload = response.json() as {
       attempts: Array<{ id: string }>;
       attempt_details: Array<{
-        attempt: { id: string };
+        attempt: { id: string; input_context_ref: string | null };
         contract: { required_evidence: string[] } | null;
+        context: {
+          contract: { title: string };
+          current_decision: { summary: string };
+          previous_attempts: Array<{ id: string; status: string }>;
+        } | null;
         result: { summary: string; verification_plan?: { commands: Array<{ command: string }> } } | null;
         evaluation: { verification_status: string } | null;
         runtime_verification: { status: string; changed_files: string[] } | null;
@@ -336,10 +356,15 @@ async function main(): Promise<void> {
     assert.equal(payload.attempts.length, 1);
     assert.equal(payload.attempt_details.length, 1);
     assert.equal(payload.attempt_details[0]?.attempt.id, attempt.id);
+    assert.equal(
+      payload.attempt_details[0]?.attempt.input_context_ref,
+      `runs/${run.id}/attempts/${attempt.id}/context.json`
+    );
     assert.deepEqual(payload.attempt_details[0]?.contract?.required_evidence, [
       "git-visible workspace changes",
       "runtime replay success"
     ]);
+    assert.deepEqual(payload.attempt_details[0]?.context, persistedContext);
     assert.equal(
       payload.attempt_details[0]?.result?.verification_plan?.commands[0]?.command,
       "pnpm verify:runtime"
@@ -369,11 +394,14 @@ async function main(): Promise<void> {
           attempt_id: attempt.id,
           detail_fields: {
             has_contract: payload.attempt_details[0]?.contract !== null,
+            has_context: payload.attempt_details[0]?.context !== null,
             has_result: payload.attempt_details[0]?.result !== null,
             has_evaluation: payload.attempt_details[0]?.evaluation !== null,
             has_runtime_verification:
               payload.attempt_details[0]?.runtime_verification !== null
-          }
+          },
+          input_context_ref: payload.attempt_details[0]?.attempt.input_context_ref,
+          context_contract_title: payload.attempt_details[0]?.context?.contract.title
         },
         null,
         2

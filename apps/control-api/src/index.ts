@@ -30,6 +30,7 @@ import { buildSelfBootstrapRunTemplate, generateInitialPlan } from "@autoresearc
 import {
   appendRunJournal,
   getAttemptContract,
+  getAttemptContext,
   ensureWorkspace,
   getAttemptEvaluation,
   getAttemptLogExcerpt,
@@ -213,6 +214,7 @@ export async function buildServer(
         attempts.map(async (attempt) => ({
           attempt,
           contract: await getAttemptContract(workspacePaths, runId, attempt.id),
+          context: await getAttemptContext(workspacePaths, runId, attempt.id),
           result: await getAttemptResult(workspacePaths, runId, attempt.id),
           evaluation: await getAttemptEvaluation(workspacePaths, runId, attempt.id),
           runtime_verification: await getAttemptRuntimeVerification(
