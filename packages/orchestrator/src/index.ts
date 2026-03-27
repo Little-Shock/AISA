@@ -111,7 +111,15 @@ export interface OrchestratorOptions {
   maxProviderRateLimitAutoResumeCycles?: number;
   runtimeSourceDriftAutoResumeMs?: number;
   runWorkspaceScopePolicy?: RunWorkspaceScopePolicy;
+  requestRuntimeRestart?: (request: RuntimeRestartRequest) => Promise<void> | void;
 }
+
+export type RuntimeRestartRequest = {
+  runId: string;
+  attemptId: string;
+  affectedFiles: string[];
+  message: string;
+};
 
 export class Orchestrator {
   private timer: NodeJS.Timeout | null = null;
@@ -126,6 +134,9 @@ export class Orchestrator {
   private readonly maxProviderRateLimitAutoResumeCycles: number;
   private readonly runtimeSourceDriftAutoResumeMs: number;
   private readonly runWorkspaceScopePolicy: RunWorkspaceScopePolicy;
+  private readonly requestRuntimeRestart: ((
+    request: RuntimeRestartRequest
+  ) => Promise<void> | void) | null;
   private readonly instanceStartedAtMs: number;
 
   constructor(
@@ -155,6 +166,7 @@ export class Orchestrator {
     this.runWorkspaceScopePolicy =
       options.runWorkspaceScopePolicy ??
       createDefaultRunWorkspaceScopePolicy(this.workspacePaths.rootDir);
+    this.requestRuntimeRestart = options.requestRuntimeRestart ?? null;
     this.instanceStartedAtMs = Date.now();
   }
 
@@ -763,6 +775,7 @@ export class Orchestrator {
 
     let heartbeatTimer: NodeJS.Timeout | null = null;
     let heartbeatStarted = false;
+    let runtimeRestartRequest: RuntimeRestartRequest | null = null;
 
     try {
       await this.assertAttemptWorkspaceScope(run, attempt);
@@ -887,6 +900,14 @@ export class Orchestrator {
       const runtimeSourceDriftFiles = detectLiveRuntimeSourceDrift(
         runtimeVerification.verification.changed_files
       );
+      if (runtimeSourceDriftFiles.length > 0) {
+        runtimeRestartRequest = {
+          runId,
+          attemptId: attempt.id,
+          affectedFiles: runtimeSourceDriftFiles,
+          message: this.buildRuntimeSourceDriftMessage(runtimeSourceDriftFiles)
+        };
+      }
       nextCurrent = this.applyRuntimeSourceDriftOutcomeToCurrentDecision(
         nextCurrent,
         attempt,
@@ -987,6 +1008,9 @@ export class Orchestrator {
           startedAt: attempt.started_at ?? new Date().toISOString(),
           status: "released"
         });
+      }
+      if (runtimeRestartRequest) {
+        await this.requestRuntimeRestart?.(runtimeRestartRequest);
       }
     }
   }

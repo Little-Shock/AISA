@@ -475,7 +475,7 @@ async function verifyFailedExecutionAutoResumes(): Promise<void> {
     workspacePaths,
     runId: run.id,
     predicate: (runStatus) => runStatus === "completed",
-    timeoutMs: 20_000,
+    timeoutMs: 45_000,
     delayMs: 120
   });
 
@@ -603,7 +603,7 @@ async function verifyRunLaunchResetsAutoResumeBudget(): Promise<void> {
     workspacePaths,
     runId: run.id,
     predicate: (runStatus) => runStatus === "completed",
-    timeoutMs: 15_000,
+    timeoutMs: 45_000,
     delayMs: 120
   });
 

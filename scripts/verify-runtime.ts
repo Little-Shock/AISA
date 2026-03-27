@@ -106,6 +106,15 @@ async function assertRunLoopReplay(): Promise<void> {
   );
 }
 
+async function assertControlApiSupervisorReplay(): Promise<void> {
+  const result = await runTsxScript("scripts/verify-control-api-supervisor.ts");
+  assert.equal(
+    result.exitCode,
+    0,
+    formatScriptFailure("scripts/verify-control-api-supervisor.ts", result)
+  );
+}
+
 async function assertHistoryContractDriftBaseline(): Promise<HistoryContractDriftReport> {
   const baselinePath = join(
     process.cwd(),
@@ -146,6 +155,7 @@ async function assertHistoryContractDriftBaseline(): Promise<HistoryContractDrif
 
 async function main(): Promise<void> {
   await assertRunLoopReplay();
+  await assertControlApiSupervisorReplay();
   const report = await assertHistoryContractDriftBaseline();
 
   console.log(
@@ -153,6 +163,9 @@ async function main(): Promise<void> {
       {
         summary: "runtime 回放通过，历史 contract 漂移体检也稳定锁住旧基线。",
         run_loop: {
+          status: "passed"
+        },
+        control_api_supervisor: {
           status: "passed"
         },
         history_contract_drift: {

@@ -4,6 +4,7 @@
 
 - `smoke-plan.ts`: 从 fixture goal 生成状态、事件和计划工件
 - `verify-runtime.ts`: 回放 runtime 主套件，并锁住历史 contract 漂移体检的旧基线
+- `verify-control-api-supervisor.ts`: 验证 control-api supervisor 会在子进程请求重启后自动拉起新实例
 - `verify-history-contract-drift.ts`: 只读扫描历史 execution attempt 的 contract 漂移，发现后以非零退出
 - `verify-run-loop.ts`: 运行 run-centered runtime smoke cases，验证 loop、恢复和失败暴露语义
 - `verify-drive-run.ts`: 验证本地 run driver 可以推进 run，并覆盖 execution sandbox 选择

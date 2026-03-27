@@ -72,24 +72,59 @@ export async function buildServer(
     workspaceRoot?: string;
     startOrchestrator?: boolean;
     allowedRunWorkspaceRoots?: string[];
+    enableSelfRestart?: boolean;
   } = {}
 ) {
   const runtimeRoot = options.workspaceRoot ?? repositoryRoot;
   const workspacePaths = resolveWorkspacePaths(runtimeRoot);
   const contextManager = new ContextManager();
   const adapter = new CodexCliWorkerAdapter(loadCodexCliConfig(process.env));
+  const app = Fastify({
+    logger: true
+  });
   const runWorkspaceScopePolicy = await createRunWorkspaceScopePolicy({
     runtimeRoot,
     allowedRoots: options.allowedRunWorkspaceRoots,
     envValue: process.env.AISA_ALLOWED_WORKSPACE_ROOTS
   });
-  const orchestrator = new Orchestrator(workspacePaths, adapter, undefined, undefined, {
-    runWorkspaceScopePolicy
-  });
-  const app = Fastify({
-    logger: true
-  });
   let orchestratorStarted = false;
+  let restartPending = false;
+  let orchestrator: Orchestrator;
+  const requestRuntimeRestart = (request: {
+    runId: string;
+    attemptId: string;
+    affectedFiles: string[];
+    message: string;
+  }): void => {
+    if (!options.enableSelfRestart || restartPending) {
+      return;
+    }
+
+    restartPending = true;
+    app.log.warn(
+      {
+        run_id: request.runId,
+        attempt_id: request.attemptId,
+        affected_files: request.affectedFiles
+      },
+      "Runtime source drift completed. Scheduling control-api restart."
+    );
+
+    if (orchestratorStarted) {
+      orchestrator.stop();
+      orchestratorStarted = false;
+    }
+
+    setTimeout(() => {
+      void app.close().finally(() => {
+        process.exit(readRestartExitCode());
+      });
+    }, 0);
+  };
+  orchestrator = new Orchestrator(workspacePaths, adapter, undefined, undefined, {
+    runWorkspaceScopePolicy,
+    requestRuntimeRestart
+  });
 
   await ensureWorkspace(workspacePaths);
   await app.register(cors, {
@@ -751,10 +786,20 @@ const isDirectExecution =
   fileURLToPath(import.meta.url) === process.argv[1];
 
 if (isDirectExecution) {
-  buildServer()
+  buildServer({
+    enableSelfRestart:
+      process.env.AISA_CONTROL_API_ENABLE_SELF_RESTART === "1" ||
+      process.env.AISA_CONTROL_API_SUPERVISED === "1"
+  })
     .then((app) => app.listen({ port, host }))
     .catch((error) => {
       console.error(error);
       process.exitCode = 1;
     });
+}
+
+function readRestartExitCode(): number {
+  const raw = process.env.AISA_CONTROL_API_RESTART_EXIT_CODE;
+  const parsed = raw ? Number.parseInt(raw, 10) : Number.NaN;
+  return Number.isFinite(parsed) ? parsed : 75;
 }
