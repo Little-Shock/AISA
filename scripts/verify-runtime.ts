@@ -38,14 +38,22 @@ type ScriptResult = {
   stderr: string;
 };
 
-function runTsxScript(scriptPath: string): Promise<ScriptResult> {
+const SKIP_SELF_BOOTSTRAP_ENV = "AISA_VERIFY_RUNTIME_SKIP_SELF_BOOTSTRAP";
+
+function runTsxScript(
+  scriptPath: string,
+  extraEnv?: NodeJS.ProcessEnv
+): Promise<ScriptResult> {
   return new Promise((resolve, reject) => {
     const child = spawn(
       process.execPath,
       ["--import", "tsx", scriptPath],
       {
         cwd: process.cwd(),
-        env: process.env
+        env: {
+          ...process.env,
+          ...extraEnv
+        }
       }
     );
     let stdout = "";
@@ -124,6 +132,17 @@ async function assertRunDetailApiReplay(): Promise<void> {
   );
 }
 
+async function assertSelfBootstrapReplay(): Promise<void> {
+  const result = await runTsxScript("scripts/verify-self-bootstrap.ts", {
+    [SKIP_SELF_BOOTSTRAP_ENV]: "1"
+  });
+  assert.equal(
+    result.exitCode,
+    0,
+    formatScriptFailure("scripts/verify-self-bootstrap.ts", result)
+  );
+}
+
 async function assertHistoryContractDriftBaseline(): Promise<HistoryContractDriftReport> {
   const baselinePath = join(
     process.cwd(),
@@ -166,12 +185,19 @@ async function main(): Promise<void> {
   await assertRunLoopReplay();
   await assertControlApiSupervisorReplay();
   await assertRunDetailApiReplay();
+  const skipSelfBootstrapReplay = process.env[SKIP_SELF_BOOTSTRAP_ENV] === "1";
+
+  if (!skipSelfBootstrapReplay) {
+    await assertSelfBootstrapReplay();
+  }
   const report = await assertHistoryContractDriftBaseline();
 
   console.log(
     JSON.stringify(
       {
-        summary: "runtime 回放通过，历史 contract 漂移体检也稳定锁住旧基线。",
+        summary: skipSelfBootstrapReplay
+          ? "runtime 回放通过，嵌套 self-bootstrap 回放已按防递归保护跳过，历史 contract 漂移体检也稳定锁住旧基线。"
+          : "runtime 回放通过，self-bootstrap 主链和历史 contract 漂移体检都稳定锁住了。",
         run_loop: {
           status: "passed"
         },
@@ -181,6 +207,13 @@ async function main(): Promise<void> {
         run_detail_api: {
           status: "passed"
         },
+        self_bootstrap: skipSelfBootstrapReplay
+          ? {
+              status: "skipped_recursive_guard"
+            }
+          : {
+              status: "passed"
+            },
         history_contract_drift: {
           status: "expected_failure_confirmed",
           drift_count: report.drift_count,

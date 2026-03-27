@@ -1,0 +1,48 @@
+{
+  "title": "修正 drive-run 的 stable stop 过冲",
+  "summary": "self-bootstrap 入口已经进了 `pnpm verify:runtime` 主链，但本地 `drive-run` 续跑路径现在自己就是红的。下一项最小且更值的后端任务，是修正 `stopAfterCompletedAttempts` 的 stable stop 语义，让 `drive-run` 在首个 research 完成后先停在可检查状态，而不是在同一轮里继续偷跑出第二个 research attempt。",
+  "why_now": [
+    "`pnpm verify:drive-run` 现在直接失败，红点是 `local drive-run should not create an execution attempt before the contract is ready`。实际落盘的 `attempt_types` 已经变成 `[\"research\", \"research\"]`，说明首个 stable stop 前又偷跑了一轮 research。",
+    "`scripts/verify-runtime.ts` 现在虽然会回放 self-bootstrap 主链，但还不会回放 `scripts/verify-drive-run.ts`，所以这条本地续跑回归还没有进主套件红线。",
+    "`scripts/drive-run.ts` 是不依赖 control-api 直接推进 run 的本地入口。对自举开发来说，能起 run 还不够，run 还得能在 research 留下 execution contract 之后再继续推进。"
+  ],
+  "next_attempt_contract": {
+    "attempt_type": "execution",
+    "objective": "修正 `drive-run.ts` 的 stable stop 语义。调用方设置 `stopAfterCompletedAttempts: 1` 时，本地 driver 必须在首个 research attempt 完成后停住，不要在同一轮里继续创建第二个 research attempt。",
+    "success_criteria": [
+      "`pnpm verify:drive-run` 从仓库根目录回放通过，首个 stable stop 时 `attempt_types` 重新回到只含一个 `research`。",
+      "`verify-drive-run` 继续显式断言没有 replayable execution contract 时不会提前派发 execution，也不会在 stable stop 前偷跑第二个 research。",
+      "`pnpm typecheck` 和 `pnpm verify:runtime` 从仓库根目录继续回放通过。"
+    ],
+    "required_evidence": [
+      "git 可见改动只触达 `scripts/drive-run.ts`、直接相关的 orchestrator 路径和最小回归脚本。",
+      "留下 `pnpm verify:drive-run` 的通过输出，能看出首个 stable stop 不再过冲。",
+      "给出 `pnpm typecheck`、`pnpm verify:drive-run`、`pnpm verify:runtime` 的回放结果。"
+    ],
+    "forbidden_shortcuts": [
+      "不要把 `verify-drive-run` 的首个 stable stop 断言放宽成允许两个 research attempt。",
+      "不要靠增加 `stopAfterCompletedAttempts`、跳过首个断言或修改 fixture 预期去掩盖过冲。",
+      "不要为过用例去绕开真实的 `drive-run.ts` 行为或吞掉 replayable contract 缺失时的阻塞原因。"
+    ],
+    "expected_artifacts": [
+      "scripts/drive-run.ts",
+      "scripts/verify-drive-run.ts"
+    ],
+    "verification_plan": {
+      "commands": [
+        {
+          "purpose": "typecheck the workspace after the change",
+          "command": "pnpm typecheck"
+        },
+        {
+          "purpose": "verify local drive-run now stops cleanly before the next research pass",
+          "command": "pnpm verify:drive-run"
+        },
+        {
+          "purpose": "replay the runtime regression suite after the drive-run fix",
+          "command": "pnpm verify:runtime"
+        }
+      ]
+    }
+  }
+}

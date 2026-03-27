@@ -3,7 +3,7 @@
 这个目录放最小验证脚本。
 
 - `smoke-plan.ts`: 从 fixture goal 生成状态、事件和计划工件
-- `verify-runtime.ts`: 回放 runtime 主套件，覆盖 run loop、run detail API、control-api supervisor，并锁住历史 contract 漂移体检的旧基线
+- `verify-runtime.ts`: 回放 runtime 主套件，覆盖 run loop、run detail API、control-api supervisor、self-bootstrap 主链，并锁住历史 contract 漂移体检的旧基线
 - `verify-control-api-supervisor.ts`: 验证 control-api supervisor 会在子进程请求重启后自动拉起新实例
 - `verify-history-contract-drift.ts`: 只读扫描历史 execution attempt 的 contract 漂移，发现后以非零退出
 - `verify-run-loop.ts`: 运行 run-centered runtime smoke cases，验证 loop、恢复和失败暴露语义

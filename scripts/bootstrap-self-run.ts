@@ -34,6 +34,8 @@ type ScriptResult = {
   stderr: string;
 };
 
+const SKIP_SELF_BOOTSTRAP_ENV = "AISA_VERIFY_RUNTIME_SKIP_SELF_BOOTSTRAP";
+
 type VerifyRuntimeReport = {
   summary: string;
 };
@@ -85,11 +87,18 @@ function resolveSourceRoot(): string {
   return dirname(dirname(fileURLToPath(import.meta.url)));
 }
 
-function runTsxScript(rootDir: string, scriptPath: string): Promise<ScriptResult> {
+function runTsxScript(
+  rootDir: string,
+  scriptPath: string,
+  extraEnv?: NodeJS.ProcessEnv
+): Promise<ScriptResult> {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, ["--import", "tsx", scriptPath], {
       cwd: rootDir,
-      env: process.env,
+      env: {
+        ...process.env,
+        ...extraEnv
+      },
       stdio: ["ignore", "pipe", "pipe"]
     });
     let stdout = "";
@@ -142,7 +151,10 @@ async function captureRuntimeHealthSnapshot(input: {
   const verifyRuntimeCommand = "pnpm verify:runtime";
   const verifyRuntimeResult = await runTsxScript(
     input.evidenceRoot,
-    "scripts/verify-runtime.ts"
+    "scripts/verify-runtime.ts",
+    {
+      [SKIP_SELF_BOOTSTRAP_ENV]: "1"
+    }
   );
 
   if (verifyRuntimeResult.exitCode !== 0) {

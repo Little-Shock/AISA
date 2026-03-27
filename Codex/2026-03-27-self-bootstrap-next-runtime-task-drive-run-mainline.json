@@ -1,0 +1,43 @@
+{
+  "title": "把 drive-run 回归接进 runtime 主链",
+  "summary": "`drive-run` 的 stable stop 过冲已经修住，本地 `pnpm verify:drive-run` 重新回绿。下一项最小且更值的后端任务，是把这条回归正式接进 `pnpm verify:runtime`，让 runtime 主套件直接盯住本地续跑路径，不再靠额外手工补跑。",
+  "why_now": [
+    "`scripts/verify-runtime.ts` 现在会回放 run loop、control-api supervisor、run detail API、self-bootstrap 和历史 contract 漂移，但还不会回放 `scripts/verify-drive-run.ts`。",
+    "这次 stable stop 过冲就是先在 `pnpm verify:drive-run` 里暴露出来的。如果不把它接进主链，`pnpm verify:runtime` 仍然可能保持绿色，同时本地续跑能力已经回退。",
+    "`scripts/drive-run.ts` 是 self-bootstrap 和本地 runtime 调试都会走到的直接入口。把它纳入主套件，比继续堆新能力更能提高系统自我改进时的安全边界。"
+  ],
+  "next_attempt_contract": {
+    "attempt_type": "execution",
+    "objective": "把 `scripts/verify-drive-run.ts` 接进 `scripts/verify-runtime.ts` 主链，并让 runtime 回放结果明确包含 drive-run 状态，保证本地续跑回归从此成为主套件红线。",
+    "success_criteria": [
+      "`pnpm verify:runtime` 从仓库根目录回放通过，输出里明确包含 `drive_run` 的通过状态。",
+      "`scripts/verify-runtime.ts` 会在 `scripts/verify-drive-run.ts` 失败时同步失败，不再允许本地续跑回归脱离主套件。",
+      "`pnpm typecheck` 从仓库根目录继续回放通过。"
+    ],
+    "required_evidence": [
+      "git 可见改动只触达 `scripts/verify-runtime.ts`、直接相关的最小脚本或文档。",
+      "留下 `pnpm verify:runtime` 的通过输出，能看出 drive-run 已经被主链回放。",
+      "给出 `pnpm typecheck` 和 `pnpm verify:runtime` 的回放结果。"
+    ],
+    "forbidden_shortcuts": [
+      "不要只在 README 或合同文件里写上 drive-run 已纳入主链，而不改实际回放代码。",
+      "不要靠放宽 `verify:runtime` 的断言或吞掉 `verify-drive-run` 的失败来伪装主链稳定。",
+      "不要改成只在特定环境变量下才跑 `verify-drive-run`，导致默认主链继续漏检。"
+    ],
+    "expected_artifacts": [
+      "scripts/verify-runtime.ts"
+    ],
+    "verification_plan": {
+      "commands": [
+        {
+          "purpose": "typecheck the workspace after the change",
+          "command": "pnpm typecheck"
+        },
+        {
+          "purpose": "replay the runtime regression suite with drive-run folded into the mainline",
+          "command": "pnpm verify:runtime"
+        }
+      ]
+    }
+  }
+}

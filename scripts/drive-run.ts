@@ -71,6 +71,28 @@ export async function driveRun(input: {
   const stopAfterCompletedAttempts = input.stopAfterCompletedAttempts ?? null;
 
   for (let pollCount = 1; pollCount <= maxPolls; pollCount += 1) {
+    if (stopAfterCompletedAttempts !== null) {
+      latestSnapshot = await readRunSnapshot(workspacePaths, input.runId);
+
+      const completedAttemptCount = countCompletedAttempts(latestSnapshot.attempts);
+      if (completedAttemptCount >= stopAfterCompletedAttempts) {
+        return {
+          ...latestSnapshot,
+          stopReason: "completed_attempt_limit",
+          pollCount,
+          completedAttemptCount
+        };
+      }
+
+      const hasRunningAttempt = latestSnapshot.attempts.some(
+        (attempt) => attempt.status === "running"
+      );
+      if (hasRunningAttempt) {
+        await sleep(input.pollIntervalMs ?? 1500);
+        continue;
+      }
+    }
+
     await orchestrator.tick();
     await sleep(input.pollIntervalMs ?? 1500);
     latestSnapshot = await readRunSnapshot(workspacePaths, input.runId);
