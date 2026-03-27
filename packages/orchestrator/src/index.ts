@@ -1650,6 +1650,10 @@ export class Orchestrator {
     attempt: Attempt,
     evaluation: AttemptEvaluation
   ): boolean {
+    if (attempt.attempt_type === "execution" && evaluation.verification_status === "passed") {
+      return false;
+    }
+
     if (!["continue", "retry"].includes(evaluation.recommendation)) {
       return false;
     }
@@ -2460,7 +2464,8 @@ export class Orchestrator {
     return (
       type === "run.steer.queued" ||
       type === "run.launched" ||
-      type === "run.manual_recovery"
+      type === "run.manual_recovery" ||
+      type === "attempt.checkpoint.created"
     );
   }
 

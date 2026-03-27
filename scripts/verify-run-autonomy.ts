@@ -18,6 +18,7 @@ import { Orchestrator } from "../packages/orchestrator/src/index.js";
 import {
   appendRunJournal,
   ensureWorkspace,
+  getAttemptReviewPacket,
   getCurrentDecision,
   listAttempts,
   listRunJournal,
@@ -190,6 +191,48 @@ class RecoveryExecutionAdapter {
         ],
         questions: [],
         recommended_next_steps: [],
+        confidence: 0.9,
+        artifacts: [{ type: "patch", path: "artifacts/diff.patch" }]
+      },
+      reportMarkdown: "# fake",
+      exitCode: 0
+    };
+  }
+}
+
+class ContinuingExecutionAdapter {
+  readonly type = "fake-codex";
+
+  async runAttemptTask(input: {
+    run: Run;
+    attempt: Attempt;
+  }): Promise<{
+    writeback: WorkerWriteback;
+    reportMarkdown: string;
+    exitCode: number;
+  }> {
+    if (input.attempt.attempt_type !== "execution") {
+      throw new Error("Continued execution case should stay in execution.");
+    }
+
+    await writeFile(
+      join(input.run.workspace_root, "execution-change.md"),
+      `execution change from ${input.attempt.id}\n`,
+      "utf8"
+    );
+
+    return {
+      writeback: {
+        summary: "Execution made a verified change and left a concrete next step for the next pass.",
+        findings: [
+          {
+            type: "fact",
+            content: "The execution step changed the workspace and kept the mainline moving.",
+            evidence: ["execution-change.md"]
+          }
+        ],
+        questions: [],
+        recommended_next_steps: ["Continue the verified execution mainline."],
         confidence: 0.9,
         artifacts: [{ type: "patch", path: "artifacts/diff.patch" }]
       },
@@ -1428,6 +1471,261 @@ async function verifyRuntimeSourceDriftAutoResumesAfterRestart(): Promise<void> 
   );
 }
 
+async function verifyVerifiedExecutionContinueDoesNotPauseForHuman(): Promise<void> {
+  const { run, workspacePaths, rootDir } = await bootstrapRun(
+    "verified-execution-continue-does-not-pause-for-human"
+  );
+  await writeExecutionWorkspacePackage(rootDir);
+  await initializeGitRepo(rootDir);
+
+  const previousExecution = updateAttempt(
+    createAttempt({
+      run_id: run.id,
+      attempt_type: "execution",
+      worker: "fake-codex",
+      objective: "Seed the prior verified execution step.",
+      success_criteria: run.success_criteria,
+      workspace_root: run.workspace_root
+    }),
+    {
+      status: "completed",
+      started_at: new Date().toISOString(),
+      ended_at: new Date().toISOString()
+    }
+  );
+
+  await saveAttempt(workspacePaths, previousExecution);
+  await saveAttemptResult(workspacePaths, run.id, previousExecution.id, {
+    summary: "Previous verified execution already produced the next concrete step.",
+    findings: [
+      {
+        type: "fact",
+        content: "The previous execution step already left a reusable direction.",
+        evidence: ["execution-change.md"]
+      }
+    ],
+    questions: [],
+    recommended_next_steps: ["Continue the verified execution mainline."],
+    confidence: 0.9,
+    artifacts: [{ type: "patch", path: "artifacts/diff.patch" }]
+  });
+  await saveCurrentDecision(
+    workspacePaths,
+    createCurrentDecision({
+      run_id: run.id,
+      best_attempt_id: previousExecution.id,
+      latest_attempt_id: previousExecution.id,
+      run_status: "running",
+      recommended_next_action: "continue_execution",
+      recommended_attempt_type: "execution",
+      summary: "Continue the verified execution chain.",
+      waiting_for_human: false
+    })
+  );
+
+  const orchestrator = new Orchestrator(
+    workspacePaths,
+    new ContinuingExecutionAdapter() as never,
+    undefined,
+    60_000,
+    {
+      waitingHumanAutoResumeMs: 30,
+      maxAutomaticResumeCycles: 2
+    }
+  );
+
+  await settleUntilSnapshot(orchestrator, {
+    workspacePaths,
+    runId: run.id,
+    predicate: ({ attempts }) =>
+      attempts.filter(
+        (attempt) => attempt.id !== previousExecution.id && attempt.status === "completed"
+      ).length >= 1,
+    timeoutMs: 20_000,
+    delayMs: 120
+  });
+
+  const attempts = await listAttempts(workspacePaths, run.id);
+  const resumedExecution = [...attempts]
+    .sort((left, right) => left.created_at.localeCompare(right.created_at))
+    .find((attempt) => attempt.id !== previousExecution.id && attempt.status === "completed");
+  assert.ok(resumedExecution, "expected a resumed execution attempt to complete");
+
+  const reviewPacket = await getAttemptReviewPacket(workspacePaths, run.id, resumedExecution.id);
+  assert.ok(reviewPacket, "completed execution should leave a review packet");
+  assert.ok(
+    reviewPacket.current_decision_snapshot,
+    "review packet should capture the settled current decision"
+  );
+  assert.equal(
+    reviewPacket.current_decision_snapshot?.waiting_for_human,
+    false,
+    "verified execution continue should not force a human pause after two consecutive execution passes"
+  );
+  assert.equal(reviewPacket.current_decision_snapshot?.run_status, "running");
+  assert.equal(
+    reviewPacket.current_decision_snapshot?.recommended_next_action,
+    "continue_execution"
+  );
+}
+
+async function verifyCheckpointedRestartResetsAutoResumeBudget(): Promise<void> {
+  const { run, workspacePaths, rootDir } = await bootstrapRun(
+    "checkpointed-restart-resets-auto-resume-budget"
+  );
+  await writeExecutionWorkspacePackage(rootDir);
+  await initializeGitRepo(rootDir);
+
+  const completedExecution = updateAttempt(
+    createAttempt({
+      run_id: run.id,
+      attempt_type: "execution",
+      worker: "fake-codex",
+      objective: "Resume execution after a checkpointed restart.",
+      success_criteria: run.success_criteria,
+      workspace_root: run.workspace_root
+    }),
+    {
+      status: "completed",
+      started_at: new Date().toISOString(),
+      ended_at: new Date().toISOString()
+    }
+  );
+
+  const restartMessage = [
+    "Execution changed live runtime source files already loaded by the in-process control-api/orchestrator.",
+    "Restart before the next dispatch. Affected files: packages/orchestrator/src/index.ts"
+  ].join(" ");
+
+  await saveAttempt(workspacePaths, completedExecution);
+  await saveCurrentDecision(
+    workspacePaths,
+    createCurrentDecision({
+      run_id: run.id,
+      latest_attempt_id: completedExecution.id,
+      run_status: "waiting_steer",
+      recommended_next_action: "continue_execution",
+      recommended_attempt_type: "execution",
+      summary: restartMessage,
+      blocking_reason: restartMessage,
+      waiting_for_human: true
+    })
+  );
+  await appendRunJournal(
+    workspacePaths,
+    createRunJournalEntry({
+      run_id: run.id,
+      attempt_id: completedExecution.id,
+      type: "run.auto_resume.scheduled",
+      payload: {
+        cycle: 1,
+        next_action: "continue_execution",
+        attempt_type: "execution",
+        reason: "runtime_restarted_continue_execution"
+      }
+    })
+  );
+  await appendRunJournal(
+    workspacePaths,
+    createRunJournalEntry({
+      run_id: run.id,
+      attempt_id: completedExecution.id,
+      type: "attempt.completed",
+      payload: {
+        recommendation: "continue",
+        goal_progress: 0.9,
+        suggested_attempt_type: "execution"
+      }
+    })
+  );
+  await appendRunJournal(
+    workspacePaths,
+    createRunJournalEntry({
+      run_id: run.id,
+      attempt_id: completedExecution.id,
+      type: "attempt.verification.passed",
+      payload: {
+        status: "passed",
+        failure_code: null,
+        failure_reason: null,
+        changed_files: ["packages/orchestrator/src/index.ts"],
+        command_count: 1,
+        artifact_path: "artifacts/runtime-verification.json"
+      }
+    })
+  );
+  await appendRunJournal(
+    workspacePaths,
+    createRunJournalEntry({
+      run_id: run.id,
+      attempt_id: completedExecution.id,
+      type: "attempt.checkpoint.created",
+      payload: {
+        commit_sha: "abc123",
+        commit_message: "checkpoint",
+        artifact_path: "artifacts/git-checkpoint.json"
+      }
+    })
+  );
+  await appendRunJournal(
+    workspacePaths,
+    createRunJournalEntry({
+      run_id: run.id,
+      attempt_id: completedExecution.id,
+      type: "attempt.restart_required",
+      payload: {
+        reason: "runtime_source_drift",
+        message: restartMessage,
+        affected_files: ["packages/orchestrator/src/index.ts"]
+      }
+    })
+  );
+
+  await wait(40);
+
+  const orchestrator = new Orchestrator(
+    workspacePaths,
+    new RecoveryExecutionAdapter() as never,
+    undefined,
+    60_000,
+    {
+      waitingHumanAutoResumeMs: 30,
+      runtimeSourceDriftAutoResumeMs: 30,
+      maxAutomaticResumeCycles: 1
+    }
+  );
+
+  await settleUntil(orchestrator, {
+    workspacePaths,
+    runId: run.id,
+    predicate: (runStatus) => runStatus === "completed",
+    timeoutMs: 20_000,
+    delayMs: 120
+  });
+
+  const current = await getCurrentDecision(workspacePaths, run.id);
+  const journal = await listRunJournal(workspacePaths, run.id);
+  const restartSchedules = journal.filter(
+    (entry) =>
+      entry.type === "run.auto_resume.scheduled" &&
+      entry.payload.reason === "runtime_restarted_continue_execution"
+  );
+
+  assert.ok(current, "current decision must exist");
+  assert.equal(current.run_status, "completed");
+  assert.equal(
+    journal.filter((entry) => entry.type === "run.auto_resume.exhausted").length,
+    0,
+    "checkpointed success should reset the restart auto-resume budget"
+  );
+  assert.equal(restartSchedules.length, 2);
+  assert.equal(
+    restartSchedules.at(-1)?.payload.cycle,
+    1,
+    "restart auto-resume cycle numbering should reset after a verified checkpoint"
+  );
+}
+
 async function main(): Promise<void> {
   const checks: Array<{ id: string; run: () => Promise<void> }> = [
     {
@@ -1461,6 +1759,14 @@ async function main(): Promise<void> {
     {
       id: "runtime_source_drift_auto_resumes_after_restart",
       run: verifyRuntimeSourceDriftAutoResumesAfterRestart
+    },
+    {
+      id: "verified_execution_continue_does_not_pause_for_human",
+      run: verifyVerifiedExecutionContinueDoesNotPauseForHuman
+    },
+    {
+      id: "checkpointed_restart_resets_auto_resume_budget",
+      run: verifyCheckpointedRestartResetsAutoResumeBudget
     },
     {
       id: "recovery_auto_resumes_execution",
