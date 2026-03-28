@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { join } from "node:path";
+import { join, relative, resolve } from "node:path";
 import type { Attempt, AttemptEvaluation, Run } from "@autoresearch/domain";
 import type { AttemptPaths } from "@autoresearch/state-store";
 import { writeJsonFile } from "@autoresearch/state-store";
@@ -22,6 +22,8 @@ export type AttemptCheckpointOutcome =
         message: string;
         changed_files: string[];
       };
+      includes_preexisting_changes: boolean;
+      preexisting_status_before: string[];
     }
   | {
       status: "blocked";
@@ -115,7 +117,17 @@ export async function maybeCreateVerifiedExecutionCheckpoint(input: {
     });
   }
 
-  if (input.preflight.status_before.length > 0) {
+  const canAbsorbPreexistingManagedWorkspaceChanges =
+    input.preflight.status_before.length > 0 &&
+    isManagedWorkspaceCheckpoint({
+      run: input.run,
+      attempt: input.attempt
+    });
+
+  if (
+    input.preflight.status_before.length > 0 &&
+    !canAbsorbPreexistingManagedWorkspaceChanges
+  ) {
     return await writeCheckpointArtifact(input.attemptPaths, {
       status: "blocked",
       reason: "workspace_not_clean_before_execution",
@@ -136,7 +148,14 @@ export async function maybeCreateVerifiedExecutionCheckpoint(input: {
   }
 
   const subject = buildCheckpointCommitSubject(input.run, input.attempt);
-  const body = buildCheckpointCommitBody(input.run, input.attempt, input.evaluation);
+  const body = buildCheckpointCommitBody(
+    input.run,
+    input.attempt,
+    input.evaluation,
+    canAbsorbPreexistingManagedWorkspaceChanges
+      ? input.preflight.status_before
+      : []
+  );
   const commitEnv = {
     GIT_AUTHOR_NAME: CHECKPOINT_AUTHOR_NAME,
     GIT_AUTHOR_EMAIL: CHECKPOINT_AUTHOR_EMAIL,
@@ -179,12 +198,19 @@ export async function maybeCreateVerifiedExecutionCheckpoint(input: {
 
   return await writeCheckpointArtifact(input.attemptPaths, {
     status: "created",
-    message: `Created execution auto-checkpoint ${headAfter}.`,
+    message: canAbsorbPreexistingManagedWorkspaceChanges
+      ? [
+          `Created execution auto-checkpoint ${headAfter}.`,
+          `Absorbed ${input.preflight.status_before.length} preexisting managed-workspace change entries into this catch-up checkpoint.`
+        ].join(" ")
+      : `Created execution auto-checkpoint ${headAfter}.`,
     commit: {
       sha: headAfter ?? "unknown",
       message: subject,
       changed_files: changedFiles
-    }
+    },
+    includes_preexisting_changes: canAbsorbPreexistingManagedWorkspaceChanges,
+    preexisting_status_before: input.preflight.status_before
   });
 }
 
@@ -195,15 +221,44 @@ function buildCheckpointCommitSubject(run: Run, attempt: Attempt): string {
 function buildCheckpointCommitBody(
   run: Run,
   attempt: Attempt,
-  evaluation: AttemptEvaluation
+  evaluation: AttemptEvaluation,
+  preexistingStatusBefore: string[]
 ): string {
-  return [
+  const lines = [
     `Run: ${run.title}`,
     `Run ID: ${run.id}`,
     `Attempt ID: ${attempt.id}`,
     `Verification: ${evaluation.verification_status}`,
     `Goal Progress: ${evaluation.goal_progress.toFixed(2)}`
-  ].join("\n");
+  ];
+
+  if (preexistingStatusBefore.length > 0) {
+    lines.push(
+      `Managed Workspace Catch-up: true`,
+      `Preexisting Status Entries: ${preexistingStatusBefore.length}`,
+      `Preexisting Status Before: ${preexistingStatusBefore.slice(0, 10).join("; ")}`
+    );
+  }
+
+  return lines.join("\n");
+}
+
+function isManagedWorkspaceCheckpoint(input: {
+  run: Run;
+  attempt: Attempt;
+}): boolean {
+  if (!input.run.managed_workspace_root) {
+    return false;
+  }
+
+  const managedWorkspaceRoot = resolve(input.run.managed_workspace_root);
+  const attemptWorkspaceRoot = resolve(input.attempt.workspace_root);
+  const relativePath = relative(managedWorkspaceRoot, attemptWorkspaceRoot);
+
+  return (
+    relativePath === "" ||
+    (!relativePath.startsWith("..") && !relativePath.startsWith(`..${"/"}`))
+  );
 }
 
 async function resolveGitRepoRoot(workspaceRoot: string): Promise<string | null> {
@@ -262,6 +317,8 @@ async function writeCheckpointArtifact(
           message: string;
           changed_files: string[];
         };
+        includes_preexisting_changes: boolean;
+        preexisting_status_before: string[];
       }
     | {
         status: "blocked";
@@ -287,7 +344,9 @@ async function writeCheckpointArtifact(
       status: "created",
       message: payload.message,
       artifact_path: artifactPath,
-      commit: payload.commit
+      commit: payload.commit,
+      includes_preexisting_changes: payload.includes_preexisting_changes,
+      preexisting_status_before: payload.preexisting_status_before
     };
   }
 

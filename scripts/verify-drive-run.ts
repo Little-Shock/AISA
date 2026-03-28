@@ -4,6 +4,7 @@ import { access, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  createAttempt,
   createCurrentDecision,
   createRun,
   createRunJournalEntry,
@@ -21,12 +22,20 @@ import {
   getAttemptRuntimeVerification,
   listAttempts,
   listRunJournal,
+  resolveAttemptPaths,
   resolveWorkspacePaths,
+  saveAttempt,
   saveCurrentDecision,
   saveRun,
   saveRunSteer
 } from "../packages/state-store/src/index.ts";
 import { Orchestrator } from "../packages/orchestrator/src/index.ts";
+import {
+  captureAttemptCheckpointPreflight,
+  maybeCreateVerifiedExecutionCheckpoint
+} from "../packages/orchestrator/src/git-checkpoint.ts";
+import { ensureRunManagedWorkspace } from "../packages/orchestrator/src/run-workspace.ts";
+import { createDefaultRunWorkspaceScopePolicy } from "../packages/orchestrator/src/workspace-scope.ts";
 import {
   assertDriveRunReachedStableStop,
   driveRun,
@@ -165,6 +174,7 @@ async function main(): Promise<void> {
   const workspacePaths = resolveWorkspacePaths(rootDir);
   await ensureWorkspace(workspacePaths);
   await initializeGitRepo(rootDir);
+  await verifyManagedWorkspaceCheckpointCatchesUpDirtyBaseline();
 
   const run = createRun({
     title: "Drive a self-bootstrap run locally",
@@ -400,6 +410,132 @@ async function main(): Promise<void> {
       null,
       2
     )
+  );
+}
+
+async function verifyManagedWorkspaceCheckpointCatchesUpDirtyBaseline(): Promise<void> {
+  const rootDir = await mkdtemp(join(tmpdir(), "aisa-managed-checkpoint-"));
+  const workspacePaths = resolveWorkspacePaths(rootDir);
+  await ensureWorkspace(workspacePaths);
+  await initializeGitRepo(rootDir);
+
+  const seededRun = createRun({
+    title: "Managed workspace checkpoint catch-up",
+    description:
+      "Verify a managed run workspace can checkpoint verified progress even when it starts dirty.",
+    success_criteria: ["Create a checkpoint that absorbs preexisting managed-workspace changes."],
+    constraints: [],
+    owner_id: "test-owner",
+    workspace_root: rootDir
+  });
+  const managedRun = await ensureRunManagedWorkspace({
+    run: seededRun,
+    policy: createDefaultRunWorkspaceScopePolicy(rootDir)
+  });
+  assert.ok(
+    managedRun.managed_workspace_root,
+    "managed workspace checkpoint test should provision an isolated worktree"
+  );
+  await saveRun(workspacePaths, managedRun);
+
+  const attempt = createAttempt({
+    run_id: managedRun.id,
+    attempt_type: "execution",
+    worker: "fake-codex",
+    objective: "Checkpoint the managed workspace after verification passes.",
+    success_criteria: ["Create a checkpoint commit that leaves the worktree clean."],
+    workspace_root: managedRun.managed_workspace_root
+  });
+  await saveAttempt(workspacePaths, attempt);
+
+  const attemptPaths = resolveAttemptPaths(workspacePaths, managedRun.id, attempt.id);
+  await writeFile(
+    join(managedRun.managed_workspace_root, "preexisting-note.md"),
+    "left dirty from a prior verified attempt\n",
+    "utf8"
+  );
+
+  const preflight = await captureAttemptCheckpointPreflight({
+    attempt,
+    attemptPaths
+  });
+  assert.equal(preflight?.status, "ready");
+  assert.ok(
+    preflight?.status_before.some((line) => line.includes("preexisting-note.md")),
+    "managed workspace preflight should capture the preexisting dirty file"
+  );
+
+  await writeFile(
+    join(managedRun.managed_workspace_root, "execution-note.md"),
+    `checkpointed by ${attempt.id}\n`,
+    "utf8"
+  );
+
+  const checkpointOutcome = await maybeCreateVerifiedExecutionCheckpoint({
+    run: managedRun,
+    attempt,
+    evaluation: {
+      attempt_id: attempt.id,
+      run_id: managedRun.id,
+      goal_progress: 0.9,
+      evidence_quality: 0.9,
+      verification_status: "passed",
+      recommendation: "continue",
+      suggested_attempt_type: "execution",
+      rationale: "Verification passed and should create a checkpoint.",
+      missing_evidence: [],
+      review_input_packet_ref: null,
+      opinion_refs: [],
+      evaluation_synthesis_ref: null,
+      synthesis_strategy: "legacy_single_judge",
+      synthesizer: null,
+      reviewer_count: 0,
+      created_at: new Date().toISOString()
+    },
+    attemptPaths,
+    preflight
+  });
+
+  assert.equal(
+    checkpointOutcome.status,
+    "created",
+    "managed workspaces should checkpoint verified progress instead of staying blocked forever"
+  );
+
+  const checkpoint = JSON.parse(await readFile(checkpointOutcome.artifact_path, "utf8")) as {
+    status: string;
+    message: string;
+    includes_preexisting_changes?: boolean;
+    preexisting_status_before?: string[];
+    commit: {
+      changed_files: string[];
+    };
+  };
+  const gitStatusAfterCheckpoint = (
+    await runCommand(managedRun.managed_workspace_root, [
+      "git",
+      "-C",
+      managedRun.managed_workspace_root,
+      "status",
+      "--porcelain=v1"
+    ])
+  ).stdout.trim();
+
+  assert.equal(checkpoint.status, "created");
+  assert.equal(gitStatusAfterCheckpoint, "");
+  assert.equal(
+    checkpoint.includes_preexisting_changes,
+    true,
+    "checkpoint artifact should record that it absorbed preexisting managed-workspace changes"
+  );
+  assert.ok(
+    checkpoint.preexisting_status_before?.some((line) => line.includes("preexisting-note.md")),
+    "checkpoint artifact should preserve the preflight dirty status"
+  );
+  assert.deepEqual(
+    [...checkpoint.commit.changed_files].sort(),
+    ["execution-note.md", "preexisting-note.md"],
+    "catch-up checkpoint should commit both the carried-over dirty file and the new execution delta"
   );
 }
 
