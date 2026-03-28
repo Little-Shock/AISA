@@ -5,6 +5,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   createAttempt,
+  createAttemptContract,
+  createAttemptRuntimeState,
   createCurrentDecision,
   createRun,
   createRunJournalEntry,
@@ -16,8 +18,10 @@ import {
 import {
   appendRunJournal,
   ensureWorkspace,
+  getAttempt,
   getAttemptContract,
   getAttemptResult,
+  getAttemptRuntimeState,
   getCurrentDecision,
   getAttemptRuntimeVerification,
   listAttempts,
@@ -25,7 +29,9 @@ import {
   resolveAttemptPaths,
   resolveWorkspacePaths,
   saveAttempt,
+  saveAttemptContract,
   saveCurrentDecision,
+  saveAttemptRuntimeState,
   saveRun,
   saveRunSteer
 } from "../packages/state-store/src/index.ts";
@@ -169,12 +175,65 @@ class ProgressingAdapter {
   }
 }
 
+class CompletedRuntimeStateExecutionAdapter {
+  readonly type = "fake-codex";
+
+  async runAttemptTask(input: {
+    run: Run;
+    attempt: Attempt;
+    workspacePaths: ReturnType<typeof resolveWorkspacePaths>;
+  }): Promise<{
+    writeback: WorkerWriteback;
+    reportMarkdown: string;
+    exitCode: number;
+  }> {
+    await writeFile(
+      join(input.attempt.workspace_root, "execution-note.md"),
+      `checkpointed by ${input.attempt.id}\n`,
+      "utf8"
+    );
+    await saveAttemptRuntimeState(
+      input.workspacePaths,
+      createAttemptRuntimeState({
+        run_id: input.run.id,
+        attempt_id: input.attempt.id,
+        running: false,
+        phase: "completed",
+        active_since: input.attempt.started_at ?? new Date().toISOString(),
+        last_event_at: new Date().toISOString(),
+        progress_text: "执行完成",
+        final_output: "execution-note.md written"
+      })
+    );
+
+    return {
+      writeback: {
+        summary: "Execution finished and left replayable evidence.",
+        findings: [
+          {
+            type: "fact",
+            content: "The execution note was written before runtime verification started.",
+            evidence: ["execution-note.md"]
+          }
+        ],
+        questions: [],
+        recommended_next_steps: [],
+        confidence: 0.88,
+        artifacts: []
+      },
+      reportMarkdown: "# execution",
+      exitCode: 0
+    };
+  }
+}
+
 async function main(): Promise<void> {
   const rootDir = await mkdtemp(join(tmpdir(), "aisa-drive-run-"));
   const workspacePaths = resolveWorkspacePaths(rootDir);
   await ensureWorkspace(workspacePaths);
   await initializeGitRepo(rootDir);
   await verifyManagedWorkspaceCheckpointCatchesUpDirtyBaseline();
+  await verifyExecutionAttemptRuntimeStateTransitionsAcrossVerification();
 
   const run = createRun({
     title: "Drive a self-bootstrap run locally",
@@ -539,6 +598,112 @@ async function verifyManagedWorkspaceCheckpointCatchesUpDirtyBaseline(): Promise
   );
 }
 
+async function verifyExecutionAttemptRuntimeStateTransitionsAcrossVerification(): Promise<void> {
+  const rootDir = await mkdtemp(join(tmpdir(), "aisa-runtime-state-verifying-"));
+  const workspacePaths = resolveWorkspacePaths(rootDir);
+  await ensureWorkspace(workspacePaths);
+  await initializeGitRepo(rootDir);
+
+  const run = createRun({
+    title: "Keep execution runtime state truthful during verification",
+    description:
+      "Verify execution attempts switch back to a running verifying state after the worker already marked itself completed.",
+    success_criteria: ["Show verifying while runtime replay is still running."],
+    constraints: [],
+    owner_id: "test-owner",
+    workspace_root: rootDir
+  });
+  const current = createCurrentDecision({
+    run_id: run.id,
+    run_status: "running",
+    recommended_next_action: "attempt_running",
+    recommended_attempt_type: "execution",
+    summary: "Dispatching an execution attempt for runtime-state verification."
+  });
+  const attempt = createAttempt({
+    run_id: run.id,
+    attempt_type: "execution",
+    worker: "fake-codex",
+    objective: "Write a visible execution note and replay runtime verification.",
+    success_criteria: ["Leave git-visible changes and survive runtime replay."],
+    workspace_root: rootDir
+  });
+  const attemptContract = createAttemptContract({
+    attempt_id: attempt.id,
+    run_id: run.id,
+    attempt_type: "execution",
+    objective: attempt.objective,
+    success_criteria: attempt.success_criteria,
+    required_evidence: [
+      "Leave a git-visible workspace change tied to the execution objective.",
+      "Replay the locked verification command before claiming completion."
+    ],
+    forbidden_shortcuts: [
+      "Do not leave the runtime state at completed while runtime verification is still running."
+    ],
+    expected_artifacts: ["execution-note.md"],
+    verification_plan: {
+      commands: [
+        {
+          purpose: "keep runtime verification alive long enough to observe the phase handoff",
+          command: 'node -e "setTimeout(() => process.exit(0), 1200)"'
+        }
+      ]
+    }
+  });
+
+  await saveRun(workspacePaths, run);
+  await saveCurrentDecision(workspacePaths, current);
+  await saveAttempt(workspacePaths, attempt);
+  await saveAttemptContract(workspacePaths, attemptContract);
+
+  const orchestrator = new Orchestrator(
+    workspacePaths,
+    new CompletedRuntimeStateExecutionAdapter() as never,
+    undefined,
+    10
+  );
+
+  await orchestrator.tick();
+
+  const verifyingState = await waitForAttemptRuntimeState(
+    workspacePaths,
+    run.id,
+    attempt.id,
+    (state) => state?.phase === "verifying" && state.running,
+    4_000
+  );
+  const runningAttempt = await getAttempt(workspacePaths, run.id, attempt.id);
+
+  assert.equal(
+    verifyingState?.phase,
+    "verifying",
+    "runtime state should expose the verification phase instead of staying completed"
+  );
+  assert.equal(verifyingState?.running, true);
+  assert.equal(verifyingState?.progress_text, "运行时回放中");
+  assert.equal(runningAttempt.status, "running");
+
+  await waitForAttemptCompletion(workspacePaths, run.id, attempt.id, 8_000);
+
+  const completedState = await waitForAttemptRuntimeState(
+    workspacePaths,
+    run.id,
+    attempt.id,
+    (state) => state?.phase === "completed" && state.running === false,
+    4_000
+  );
+  const runtimeVerification = await getAttemptRuntimeVerification(
+    workspacePaths,
+    run.id,
+    attempt.id
+  );
+
+  assert.equal(completedState?.phase, "completed");
+  assert.equal(completedState?.running, false);
+  assert.equal(runtimeVerification?.status, "passed");
+}
+
 async function settleFirstResearchAttempt(input: {
   workspacePaths: ReturnType<typeof resolveWorkspacePaths>;
   runId: string;
@@ -685,9 +850,10 @@ async function waitForCheckpointEntry(
 async function waitForAttemptCompletion(
   workspacePaths: ReturnType<typeof resolveWorkspacePaths>,
   runId: string,
-  attemptId: string
+  attemptId: string,
+  timeoutMs = 1_500
 ): Promise<void> {
-  const deadline = Date.now() + 1_500;
+  const deadline = Date.now() + timeoutMs;
 
   while (Date.now() < deadline) {
     const attempts = await listAttempts(workspacePaths, runId);
@@ -705,6 +871,30 @@ async function waitForAttemptCompletion(
   }
 
   throw new Error(`Timed out waiting for attempt ${attemptId} to complete`);
+}
+
+async function waitForAttemptRuntimeState(
+  workspacePaths: ReturnType<typeof resolveWorkspacePaths>,
+  runId: string,
+  attemptId: string,
+  predicate: (
+    state: Awaited<ReturnType<typeof getAttemptRuntimeState>>
+  ) => boolean,
+  timeoutMs = 1_500
+) {
+  const deadline = Date.now() + timeoutMs;
+
+  while (Date.now() < deadline) {
+    const state = await getAttemptRuntimeState(workspacePaths, runId, attemptId);
+
+    if (predicate(state)) {
+      return state;
+    }
+
+    await sleep(10);
+  }
+
+  throw new Error(`Timed out waiting for runtime state for attempt ${attemptId}`);
 }
 
 async function waitForStableDecisionForAttempt(

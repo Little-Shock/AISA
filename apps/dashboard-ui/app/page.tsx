@@ -1670,6 +1670,10 @@ function runtimePhaseLabel(value: string | null | undefined): string {
       return "调用工具";
     case "verifying":
       return "验证中";
+    case "reviewing":
+      return "评审中";
+    case "synthesizing":
+      return "汇总结论";
     case "writing":
       return "写入改动";
     case "message":

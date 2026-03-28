@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { readFile, stat } from "node:fs/promises";
 import { relative, resolve } from "node:path";
 import {
+  createAttemptRuntimeState,
   createAttempt,
   createAttemptContract,
   createCurrentDecision,
@@ -12,6 +13,7 @@ import {
   isExecutionAttemptContractReady,
   isExecutionContractDraftReady,
   updateAttempt,
+  updateAttemptRuntimeState,
   updateBranch,
   updateCurrentDecision,
   updateGoal,
@@ -60,6 +62,7 @@ import {
   getAttemptReviewInputPacket,
   getAttemptReviewPacket,
   getAttemptResult,
+  getAttemptRuntimeState,
   getAttemptRuntimeVerification,
   getCurrentDecision,
   getBranch,
@@ -91,6 +94,7 @@ import {
   saveAttemptReviewOpinion,
   saveAttemptReviewPacket,
   saveAttemptResult,
+  saveAttemptRuntimeState,
   saveBranch,
   saveCurrentDecision,
   saveEvalResult,
@@ -1038,6 +1042,15 @@ export class Orchestrator {
       attempt = updateAttempt(attempt, {
         result_ref: this.buildAttemptResultRef(runId, attempt.id)
       });
+      if (attempt.attempt_type === "execution") {
+        await this.transitionAttemptRuntimeState({
+          runId,
+          attempt,
+          phase: "verifying",
+          running: true,
+          progressText: "运行时回放中"
+        });
+      }
       const runtimeVerification = await runAttemptRuntimeVerification({
         run,
         attempt,
@@ -1066,6 +1079,13 @@ export class Orchestrator {
         reviewInputPacketRef,
         reviewInputPacket
       );
+      await this.transitionAttemptRuntimeState({
+        runId,
+        attempt: completedAttemptForEvaluation,
+        phase: "reviewing",
+        running: true,
+        progressText: "评审中"
+      });
       const reviewOpinions = await this.runAttemptReviewerPipeline({
         reviewInputPacket,
         reviewInputPacketRef,
@@ -1074,6 +1094,13 @@ export class Orchestrator {
       await Promise.all(
         reviewOpinions.map((opinion) => saveAttemptReviewOpinion(this.workspacePaths, opinion))
       );
+      await this.transitionAttemptRuntimeState({
+        runId,
+        attempt: completedAttemptForEvaluation,
+        phase: "synthesizing",
+        running: true,
+        progressText: "汇总结论中"
+      });
       const synthesis = await this.runAttemptEvaluationSynthesis({
         reviewInputPacket,
         opinions: reviewOpinions,
@@ -1179,6 +1206,14 @@ export class Orchestrator {
         attempt,
         currentSnapshot: nextCurrent
       });
+      await this.transitionAttemptRuntimeState({
+        runId,
+        attempt,
+        phase: "completed",
+        running: false,
+        progressText: attempt.attempt_type === "execution" ? "执行完成" : "已完成",
+        error: null
+      });
     } catch (error) {
       if (error instanceof RunWorkspaceScopeError) {
         await this.appendRunWorkspaceScopeBlockedEntry(run.id, attempt.id, error);
@@ -1214,6 +1249,14 @@ export class Orchestrator {
         runId,
         attempt,
         currentSnapshot: failedCurrentDecision
+      });
+      await this.transitionAttemptRuntimeState({
+        runId,
+        attempt,
+        phase: "failed",
+        running: false,
+        progressText: "尝试失败",
+        error: error instanceof Error ? error.message : String(error)
       });
     } finally {
       if (heartbeatTimer) {
@@ -1289,6 +1332,42 @@ export class Orchestrator {
     if (input.currentSnapshot) {
       await saveCurrentDecision(this.workspacePaths, input.currentSnapshot);
     }
+  }
+
+  private async transitionAttemptRuntimeState(input: {
+    runId: string;
+    attempt: Attempt;
+    phase: string;
+    running: boolean;
+    progressText: string;
+    error?: string | null;
+  }): Promise<void> {
+    const now = new Date().toISOString();
+    const existing = await getAttemptRuntimeState(
+      this.workspacePaths,
+      input.runId,
+      input.attempt.id
+    );
+    const nextState = existing
+      ? updateAttemptRuntimeState(existing, {
+          running: input.running,
+          phase: input.phase,
+          last_event_at: now,
+          progress_text: input.progressText,
+          error: input.error ?? null,
+          active_since: existing.active_since ?? input.attempt.started_at ?? now
+        })
+      : createAttemptRuntimeState({
+          attempt_id: input.attempt.id,
+          run_id: input.runId,
+          running: input.running,
+          phase: input.phase,
+          active_since: input.attempt.started_at ?? now,
+          last_event_at: now,
+          progress_text: input.progressText,
+          error: input.error ?? null
+        });
+    await saveAttemptRuntimeState(this.workspacePaths, nextState);
   }
 
   private async appendRuntimeVerificationJournal(
