@@ -514,12 +514,14 @@ async function main(hostJudgeConfig: HostJudgeConfigSnapshot): Promise<void> {
     firstResearchResult,
     secondResearchResult,
     secondResearchReviewPacket,
-    executionAttemptContract
+    executionAttemptContract,
+    executionAttemptReviewPacket
   ] = await Promise.all([
     getAttemptResult(workspacePaths, run.id, firstResearchAttempt.id),
     getAttemptResult(workspacePaths, run.id, secondResearchAttempt.id),
     getAttemptReviewPacket(workspacePaths, run.id, secondResearchAttempt.id),
-    getAttemptContract(workspacePaths, run.id, executionAttempt.id)
+    getAttemptContract(workspacePaths, run.id, executionAttempt.id),
+    getAttemptReviewPacket(workspacePaths, run.id, executionAttempt.id)
   ]);
   const runtimeVerification = await getAttemptRuntimeVerification(
     workspacePaths,
@@ -637,7 +639,57 @@ async function main(hostJudgeConfig: HostJudgeConfigSnapshot): Promise<void> {
     executionAttemptPaths.artifactsDir,
     SELF_BOOTSTRAP_NEXT_TASK_ACTIVE_ENTRY_SNAPSHOT_FILE_NAME
   );
+  const syncedPublicationArtifactRelativePath =
+    `artifacts/${SELF_BOOTSTRAP_NEXT_TASK_PROMOTION_ARTIFACT_FILE_NAME}`;
+  const syncedSourceAssetSnapshotRelativePath =
+    `artifacts/${SELF_BOOTSTRAP_NEXT_TASK_SOURCE_ASSET_SNAPSHOT_FILE_NAME}`;
+  const syncedPublishedActiveEntryRelativePath =
+    `artifacts/${SELF_BOOTSTRAP_NEXT_TASK_ACTIVE_ENTRY_SNAPSHOT_FILE_NAME}`;
 
+  assert.deepEqual(runtimeVerification.synced_self_bootstrap_artifacts, {
+    publication_artifact: syncedPublicationArtifactPath,
+    source_asset_snapshot: syncedSourceAssetSnapshotPath,
+    published_active_entry: syncedPublishedActiveEntryPath
+  });
+  assert.ok(
+    executionAttemptReviewPacket,
+    "execution attempt should persist a settled review packet"
+  );
+  assert.deepEqual(
+    executionAttemptReviewPacket?.runtime_verification?.synced_self_bootstrap_artifacts,
+    runtimeVerification.synced_self_bootstrap_artifacts,
+    "execution review packet should retain the synced self-bootstrap artifact paths"
+  );
+  assert.ok(
+    executionAttemptReviewPacket?.artifact_manifest.some(
+      (artifact) =>
+        artifact.kind ===
+          "attempt.runtime_verification.self_bootstrap.publication_artifact" &&
+        artifact.path === syncedPublicationArtifactRelativePath &&
+        artifact.exists
+    ),
+    "execution review packet should expose the synced publication artifact"
+  );
+  assert.ok(
+    executionAttemptReviewPacket?.artifact_manifest.some(
+      (artifact) =>
+        artifact.kind ===
+          "attempt.runtime_verification.self_bootstrap.source_asset_snapshot" &&
+        artifact.path === syncedSourceAssetSnapshotRelativePath &&
+        artifact.exists
+    ),
+    "execution review packet should expose the synced source asset snapshot"
+  );
+  assert.ok(
+    executionAttemptReviewPacket?.artifact_manifest.some(
+      (artifact) =>
+        artifact.kind ===
+          "attempt.runtime_verification.self_bootstrap.published_active_entry" &&
+        artifact.path === syncedPublishedActiveEntryRelativePath &&
+        artifact.exists
+    ),
+    "execution review packet should expose the synced active entry snapshot"
+  );
   assert.equal(
     await readFile(syncedPublicationArtifactPath, "utf8"),
     await readFile(

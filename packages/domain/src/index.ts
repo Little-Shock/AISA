@@ -340,6 +340,12 @@ export const VerificationCommandResultSchema = z.object({
   stderr_file: z.string().min(1)
 });
 
+export const SyncedSelfBootstrapArtifactsSchema = z.object({
+  publication_artifact: z.string().min(1),
+  source_asset_snapshot: z.string().min(1),
+  published_active_entry: z.string().min(1)
+});
+
 export const AttemptRuntimeVerificationSchema = z.object({
   attempt_id: z.string(),
   run_id: z.string(),
@@ -354,6 +360,8 @@ export const AttemptRuntimeVerificationSchema = z.object({
   failure_code: RuntimeVerificationFailureCodeSchema.nullable(),
   failure_reason: z.string().nullable(),
   command_results: z.array(VerificationCommandResultSchema).default([]),
+  synced_self_bootstrap_artifacts:
+    SyncedSelfBootstrapArtifactsSchema.nullable().default(null),
   created_at: z.string().datetime()
 });
 

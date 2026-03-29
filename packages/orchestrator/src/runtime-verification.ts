@@ -41,6 +41,10 @@ interface GitStatusDelta {
   changedFiles: string[];
 }
 
+type SyncedSelfBootstrapArtifacts = NonNullable<
+  AttemptRuntimeVerification["synced_self_bootstrap_artifacts"]
+>;
+
 const CHECKPOINT_PREFLIGHT_FILE_NAME = "git-checkpoint-preflight.json";
 const LIVE_RUNTIME_SOURCE_PREFIXES = [
   "apps/control-api/src/",
@@ -56,16 +60,19 @@ const LIVE_RUNTIME_SOURCE_PREFIXES = [
 ] as const;
 const SELF_BOOTSTRAP_RUNTIME_SYNC_TARGETS = [
   {
+    artifactKey: "publication_artifact",
     reportKey: "retained_publication_artifact",
     targetFileName: SELF_BOOTSTRAP_NEXT_TASK_PROMOTION_ARTIFACT_FILE_NAME,
     label: "retained publication artifact"
   },
   {
+    artifactKey: "source_asset_snapshot",
     reportKey: "retained_source_asset_snapshot",
     targetFileName: SELF_BOOTSTRAP_NEXT_TASK_SOURCE_ASSET_SNAPSHOT_FILE_NAME,
     label: "retained source asset snapshot"
   },
   {
+    artifactKey: "published_active_entry",
     reportKey: "retained_published_active_entry",
     targetFileName: SELF_BOOTSTRAP_NEXT_TASK_ACTIVE_ENTRY_SNAPSHOT_FILE_NAME,
     label: "retained published active entry"
@@ -105,6 +112,7 @@ export async function runAttemptRuntimeVerification(input: {
       failure_code: null,
       failure_reason: null,
       command_results: [],
+      synced_self_bootstrap_artifacts: null,
       created_at: new Date().toISOString()
     });
   }
@@ -179,6 +187,7 @@ export async function runAttemptRuntimeVerification(input: {
       failure_reason:
         "Execution verification requires the git preflight baseline captured before dispatch, but that baseline is missing or unreadable.",
       command_results: [],
+      synced_self_bootstrap_artifacts: null,
       created_at: new Date().toISOString()
     });
   }
@@ -205,6 +214,7 @@ export async function runAttemptRuntimeVerification(input: {
       failure_reason:
         "Execution attempt finished without any new git-visible workspace changes beyond the preflight baseline, so the runtime cannot treat it as a verified implementation step.",
       command_results: [],
+      synced_self_bootstrap_artifacts: null,
       created_at: new Date().toISOString()
     });
   }
@@ -213,6 +223,7 @@ export async function runAttemptRuntimeVerification(input: {
   await mkdir(verificationDir, { recursive: true });
 
   const commandResults: VerificationCommandResult[] = [];
+  let syncedSelfBootstrapArtifacts: SyncedSelfBootstrapArtifacts | null = null;
   const commands = verificationPlan.commands;
 
   for (let index = 0; index < commands.length; index += 1) {
@@ -233,6 +244,7 @@ export async function runAttemptRuntimeVerification(input: {
         failure_code: "invalid_verification_plan",
         failure_reason: resolvedCwd.reason,
         command_results: commandResults,
+        synced_self_bootstrap_artifacts: syncedSelfBootstrapArtifacts,
         created_at: new Date().toISOString()
       });
     }
@@ -289,18 +301,22 @@ export async function runAttemptRuntimeVerification(input: {
           `Command: ${command.command}`
         ].join(" "),
         command_results: commandResults,
+        synced_self_bootstrap_artifacts: syncedSelfBootstrapArtifacts,
         created_at: new Date().toISOString()
       });
     }
 
     try {
-      await maybeSyncSelfBootstrapVerificationArtifacts({
+      const syncedArtifacts = await maybeSyncSelfBootstrapVerificationArtifacts({
         command: command.command,
         stdoutFile,
         workspaceRoot,
         repoRoot,
         attemptPaths: input.attemptPaths
       });
+      if (syncedArtifacts) {
+        syncedSelfBootstrapArtifacts = syncedArtifacts;
+      }
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
       const currentGitStatus = await readGitStatus(repoRoot);
@@ -326,6 +342,7 @@ export async function runAttemptRuntimeVerification(input: {
           reason
         ].join(" "),
         command_results: commandResults,
+        synced_self_bootstrap_artifacts: syncedSelfBootstrapArtifacts,
         created_at: new Date().toISOString()
       });
     }
@@ -350,6 +367,7 @@ export async function runAttemptRuntimeVerification(input: {
     failure_code: null,
     failure_reason: null,
     command_results: commandResults,
+    synced_self_bootstrap_artifacts: syncedSelfBootstrapArtifacts,
     created_at: new Date().toISOString()
   });
 }
@@ -375,6 +393,7 @@ async function buildFailedVerificationArtifact(input: {
     failure_code: input.failureCode,
     failure_reason: input.failureReason,
     command_results: [],
+    synced_self_bootstrap_artifacts: null,
     created_at: new Date().toISOString()
   });
 }
@@ -484,12 +503,13 @@ async function maybeSyncSelfBootstrapVerificationArtifacts(input: {
   workspaceRoot: string;
   repoRoot: string;
   attemptPaths: AttemptPaths;
-}): Promise<void> {
+}): Promise<SyncedSelfBootstrapArtifacts | null> {
   if (!isSelfBootstrapVerificationCommand(input.command)) {
-    return;
+    return null;
   }
 
   const report = await readSelfBootstrapVerificationReport(input.stdoutFile);
+  const syncedArtifacts = {} as SyncedSelfBootstrapArtifacts;
 
   for (const target of SELF_BOOTSTRAP_RUNTIME_SYNC_TARGETS) {
     const sourcePath = resolveReportedArtifactPath({
@@ -501,7 +521,10 @@ async function maybeSyncSelfBootstrapVerificationArtifacts(input: {
     });
     const targetPath = join(input.attemptPaths.artifactsDir, target.targetFileName);
     await cp(sourcePath, targetPath);
+    syncedArtifacts[target.artifactKey] = targetPath;
   }
+
+  return syncedArtifacts;
 }
 
 async function readSelfBootstrapVerificationReport(

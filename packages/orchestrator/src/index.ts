@@ -1774,6 +1774,19 @@ export class Orchestrator {
       addPath("verification_stderr", commandResult.stderr_file);
     }
 
+    addPath(
+      "attempt.runtime_verification.self_bootstrap.publication_artifact",
+      input.runtimeVerification?.synced_self_bootstrap_artifacts?.publication_artifact
+    );
+    addPath(
+      "attempt.runtime_verification.self_bootstrap.source_asset_snapshot",
+      input.runtimeVerification?.synced_self_bootstrap_artifacts?.source_asset_snapshot
+    );
+    addPath(
+      "attempt.runtime_verification.self_bootstrap.published_active_entry",
+      input.runtimeVerification?.synced_self_bootstrap_artifacts?.published_active_entry
+    );
+
     for (const entry of input.journal) {
       const artifactPath =
         entry.payload && typeof entry.payload === "object" && "artifact_path" in entry.payload
