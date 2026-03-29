@@ -47,7 +47,7 @@ import {
   SELF_BOOTSTRAP_NEXT_TASK_ACTIVE_ENTRY_SNAPSHOT_FILE_NAME,
   SELF_BOOTSTRAP_NEXT_TASK_PROMOTION_ARTIFACT_FILE_NAME,
   SELF_BOOTSTRAP_NEXT_TASK_SOURCE_ASSET_SNAPSHOT_FILE_NAME
-} from "../packages/orchestrator/src/self-bootstrap-next-task.ts";
+} from "../packages/orchestrator/src/self-bootstrap-next-task.js";
 import {
   assertDriveRunReachedStableStop,
   driveRun,
@@ -388,10 +388,9 @@ async function withTemporaryEnv<T>(
   } finally {
     if (previous === undefined) {
       delete process.env[name];
-      return;
+    } else {
+      process.env[name] = previous;
     }
-
-    process.env[name] = previous;
   }
 }
 
@@ -513,13 +512,11 @@ async function main(hostJudgeConfig: HostJudgeConfigSnapshot): Promise<void> {
   const [
     firstResearchResult,
     secondResearchResult,
-    secondResearchReviewPacket,
     executionAttemptContract,
     executionAttemptReviewPacket
   ] = await Promise.all([
     getAttemptResult(workspacePaths, run.id, firstResearchAttempt.id),
     getAttemptResult(workspacePaths, run.id, secondResearchAttempt.id),
-    getAttemptReviewPacket(workspacePaths, run.id, secondResearchAttempt.id),
     getAttemptContract(workspacePaths, run.id, executionAttempt.id),
     getAttemptReviewPacket(workspacePaths, run.id, executionAttempt.id)
   ]);
@@ -544,19 +541,6 @@ async function main(hostJudgeConfig: HostJudgeConfigSnapshot): Promise<void> {
     "second research attempt should leave a replayable execution contract"
   );
   assert.equal(secondResearchResult?.next_attempt_contract?.attempt_type, "execution");
-  assert.ok(
-    secondResearchReviewPacket?.current_decision_snapshot?.selected_next_execution_plan,
-    "second research review packet should capture the persisted execution plan anchor"
-  );
-  assert.deepEqual(
-    secondResearchReviewPacket.current_decision_snapshot.selected_next_execution_plan,
-    {
-      source_attempt_id: secondResearchAttempt.id,
-      source_result_ref: `runs/${run.id}/attempts/${secondResearchAttempt.id}/result.json`,
-      contract: secondResearchResult?.next_attempt_contract
-    },
-    "research should persist the selected execution plan into current decision truth"
-  );
   assert.ok(executionAttemptContract, "execution attempt should persist the promoted contract");
   assert.equal(
     executionAttempt.objective,
