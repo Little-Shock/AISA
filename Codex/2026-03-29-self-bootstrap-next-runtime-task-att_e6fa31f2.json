@@ -1,0 +1,68 @@
+{
+  "attempt_id": "att_e6fa31f2",
+  "title": "把 self-bootstrap 自己纳入 bootstrap:self 的健康门禁",
+  "summary": "当前 self-bootstrap 发布链和 runtime 主回归都能回放通过，但 `bootstrap:self` 采集 runtime 健康时只检查 `pnpm typecheck:runtime`、`pnpm verify:drive-run` 和带 `AISA_VERIFY_RUNTIME_SKIP_SELF_BOOTSTRAP=1` 的 `pnpm verify:runtime`。`RuntimeHealthSnapshot` 和自举 steer 里也还没有单独的 self-bootstrap 状态，所以 publish 链哪天坏掉，入口仍可能继续放行。下一项最小且更值的运行时任务，是把 `pnpm verify:self-bootstrap` 变成 bootstrap 前的显式健康门，并把结果写进快照和自举上下文。",
+  "findings": [
+    {
+      "type": "fact",
+      "content": "`bootstrap:self` 当前不会直接跑 `pnpm verify:self-bootstrap`，它只跑 `pnpm verify:runtime`，而且显式带了 `AISA_VERIFY_RUNTIME_SKIP_SELF_BOOTSTRAP=1`。",
+      "evidence": [
+        "scripts/bootstrap-self-run.ts",
+        "scripts/verify-runtime.ts"
+      ]
+    },
+    {
+      "type": "fact",
+      "content": "`RuntimeHealthSnapshot` 现在只有 `typecheck_runtime`、`drive_run`、`verify_runtime` 和两类 drift 体检，没有单独记录 self-bootstrap publish 链的健康状态。",
+      "evidence": [
+        "packages/domain/src/index.ts",
+        "scripts/bootstrap-self-run.ts"
+      ]
+    },
+    {
+      "type": "risk",
+      "content": "只要 self-bootstrap publish 链单独坏掉，当前自举入口就缺一层专门门禁，worker 还是会按旧的健康摘要继续读 `Codex/self-bootstrap-next-runtime-task-active.json` 往下跑。",
+      "evidence": [
+        "packages/planner/src/self-bootstrap.ts",
+        "scripts/bootstrap-self-run.ts",
+        "runs/run_943b20ef/attempts/att_e6fa31f2/artifacts/verify-self-bootstrap.stdout.json"
+      ]
+    }
+  ],
+  "recommended_next_attempt": {
+    "attempt_type": "execution",
+    "objective": "把 self-bootstrap 本身纳入 `bootstrap:self` 的 runtime 健康门禁。现在 `bootstrap:self` 只跑 `pnpm typecheck:runtime`、`pnpm verify:drive-run` 和带 `AISA_VERIFY_RUNTIME_SKIP_SELF_BOOTSTRAP=1` 的 `pnpm verify:runtime`，`RuntimeHealthSnapshot` 也没有 `self_bootstrap` 字段。补最小运行时改动，让自举前的健康快照和首条 steer 明确记录 `pnpm verify:self-bootstrap` 的命令、状态和结论；如果这条回归失败，`bootstrap:self` 要像其他健康门一样直接阻塞。",
+    "success_criteria": [
+      "`bootstrap:self` 生成的 runtime health snapshot 会新增 `self_bootstrap` 或等价 machine-readable 字段，里面能看到 `pnpm verify:self-bootstrap` 的命令、退出码、状态和摘要。",
+      "`pnpm verify:self-bootstrap` 回放继续通过，并能断言 self-bootstrap run 里的 runtime health snapshot 和首条 steer 已经带上这条健康信息。",
+      "`pnpm verify:runtime` 回放继续通过，runtime 主套件没有被新的 bootstrap 健康门改坏。"
+    ],
+    "required_evidence": [
+      "留下 self-bootstrap runtime health snapshot 或等价回放输出，能看到单独的 `self_bootstrap` 健康记录。",
+      "留下 `pnpm verify:self-bootstrap` 和 `pnpm verify:runtime` 的回放结果。"
+    ],
+    "forbidden_shortcuts": [
+      "不要只复用 `verify_runtime.summary` 改个字段名充数。",
+      "不要继续依赖 `AISA_VERIFY_RUNTIME_SKIP_SELF_BOOTSTRAP=1` 的结果来宣称 self-bootstrap 健康。",
+      "不要手工改写健康快照 JSON 绕过实际回放。"
+    ],
+    "expected_artifacts": [
+      "scripts/bootstrap-self-run.ts",
+      "packages/domain/src/index.ts",
+      "packages/planner/src/self-bootstrap.ts",
+      "scripts/verify-self-bootstrap.ts"
+    ],
+    "verification_plan": {
+      "commands": [
+        {
+          "purpose": "验证 bootstrap:self 会记录并暴露单独的 self-bootstrap 健康门",
+          "command": "pnpm verify:self-bootstrap"
+        },
+        {
+          "purpose": "验证 runtime 主套件没有被新的 bootstrap 健康门改坏",
+          "command": "pnpm verify:runtime"
+        }
+      ]
+    }
+  }
+}
