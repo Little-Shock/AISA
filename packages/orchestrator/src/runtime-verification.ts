@@ -1,7 +1,7 @@
 import { createWriteStream } from "node:fs";
-import { mkdir } from "node:fs/promises";
+import { cp, mkdir, readFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
-import { join, relative, resolve } from "node:path";
+import { isAbsolute, join, relative, resolve } from "node:path";
 import {
   isExecutionAttemptContractReady,
   type AttemptContract,
@@ -16,6 +16,11 @@ import {
 } from "@autoresearch/domain";
 import type { AttemptPaths } from "@autoresearch/state-store";
 import { readJsonFile, writeJsonFile } from "@autoresearch/state-store";
+import {
+  SELF_BOOTSTRAP_NEXT_TASK_ACTIVE_ENTRY_SNAPSHOT_FILE_NAME,
+  SELF_BOOTSTRAP_NEXT_TASK_PROMOTION_ARTIFACT_FILE_NAME,
+  SELF_BOOTSTRAP_NEXT_TASK_SOURCE_ASSET_SNAPSHOT_FILE_NAME
+} from "./self-bootstrap-next-task.js";
 
 export interface AttemptRuntimeVerificationOutcome {
   verification: AttemptRuntimeVerification;
@@ -49,6 +54,25 @@ const LIVE_RUNTIME_SOURCE_PREFIXES = [
   "packages/state-store/src/",
   "packages/worker-adapters/src/"
 ] as const;
+const SELF_BOOTSTRAP_RUNTIME_SYNC_TARGETS = [
+  {
+    reportKey: "retained_publication_artifact",
+    targetFileName: SELF_BOOTSTRAP_NEXT_TASK_PROMOTION_ARTIFACT_FILE_NAME,
+    label: "retained publication artifact"
+  },
+  {
+    reportKey: "retained_source_asset_snapshot",
+    targetFileName: SELF_BOOTSTRAP_NEXT_TASK_SOURCE_ASSET_SNAPSHOT_FILE_NAME,
+    label: "retained source asset snapshot"
+  },
+  {
+    reportKey: "retained_published_active_entry",
+    targetFileName: SELF_BOOTSTRAP_NEXT_TASK_ACTIVE_ENTRY_SNAPSHOT_FILE_NAME,
+    label: "retained published active entry"
+  }
+] as const;
+
+type SelfBootstrapVerificationReport = Record<string, unknown>;
 
 export function detectLiveRuntimeSourceDrift(changedFiles: string[]): string[] {
   return [...new Set(changedFiles)]
@@ -268,6 +292,43 @@ export async function runAttemptRuntimeVerification(input: {
         created_at: new Date().toISOString()
       });
     }
+
+    try {
+      await maybeSyncSelfBootstrapVerificationArtifacts({
+        command: command.command,
+        stdoutFile,
+        workspaceRoot,
+        repoRoot,
+        attemptPaths: input.attemptPaths
+      });
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      const currentGitStatus = await readGitStatus(repoRoot);
+      const currentGitStatusDelta = buildGitStatusDelta({
+        statusBefore: checkpointPreflight.status_before,
+        statusAfter: currentGitStatus
+      });
+
+      return await writeVerificationArtifact(input.attemptPaths, {
+        attempt_id: input.attempt.id,
+        run_id: input.run.id,
+        attempt_type: input.attempt.attempt_type,
+        status: "failed",
+        repo_root: repoRoot,
+        git_head: gitHead,
+        git_status: currentGitStatus,
+        preexisting_git_status: currentGitStatusDelta.preexistingGitStatus,
+        new_git_status: currentGitStatusDelta.newGitStatus,
+        changed_files: currentGitStatusDelta.changedFiles,
+        failure_code: "verification_command_failed",
+        failure_reason: [
+          `Verification command "${command.purpose}" did not preserve self-bootstrap evidence correctly.`,
+          reason
+        ].join(" "),
+        command_results: commandResults,
+        created_at: new Date().toISOString()
+      });
+    }
   }
 
   const finalGitStatus = await readGitStatus(repoRoot);
@@ -403,6 +464,85 @@ function resolveVerificationCwd(
     ok: true,
     cwd
   };
+}
+
+function isSelfBootstrapVerificationCommand(command: string): boolean {
+  const normalizedCommand = command.trim();
+
+  return (
+    /^pnpm\s+verify:self-bootstrap(?:\s|$)/u.test(normalizedCommand) ||
+    /scripts\/verify-self-bootstrap\.ts(?:\s|$)/u.test(normalizedCommand) ||
+    /self-bootstrap-sync-fixture\/emit-self-bootstrap-sync-evidence\.mjs(?:\s|$)/u.test(
+      normalizedCommand
+    )
+  );
+}
+
+async function maybeSyncSelfBootstrapVerificationArtifacts(input: {
+  command: string;
+  stdoutFile: string;
+  workspaceRoot: string;
+  repoRoot: string;
+  attemptPaths: AttemptPaths;
+}): Promise<void> {
+  if (!isSelfBootstrapVerificationCommand(input.command)) {
+    return;
+  }
+
+  const report = await readSelfBootstrapVerificationReport(input.stdoutFile);
+
+  for (const target of SELF_BOOTSTRAP_RUNTIME_SYNC_TARGETS) {
+    const sourcePath = resolveReportedArtifactPath({
+      repoRoot: input.repoRoot,
+      workspaceRoot: input.workspaceRoot,
+      report,
+      key: target.reportKey,
+      label: target.label
+    });
+    const targetPath = join(input.attemptPaths.artifactsDir, target.targetFileName);
+    await cp(sourcePath, targetPath);
+  }
+}
+
+async function readSelfBootstrapVerificationReport(
+  stdoutFile: string
+): Promise<SelfBootstrapVerificationReport> {
+  const raw = await readFile(stdoutFile, "utf8");
+  const parsed = JSON.parse(raw) as unknown;
+
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("verify:self-bootstrap should emit a JSON object report");
+  }
+
+  return parsed as SelfBootstrapVerificationReport;
+}
+
+function resolveReportedArtifactPath(input: {
+  repoRoot: string;
+  workspaceRoot: string;
+  report: SelfBootstrapVerificationReport;
+  key: (typeof SELF_BOOTSTRAP_RUNTIME_SYNC_TARGETS)[number]["reportKey"];
+  label: string;
+}): string {
+  const rawValue = input.report[input.key];
+
+  if (typeof rawValue !== "string" || rawValue.trim().length === 0) {
+    throw new Error(`verify:self-bootstrap should expose ${input.label}`);
+  }
+
+  const resolvedPath = isAbsolute(rawValue)
+    ? rawValue
+    : resolve(input.workspaceRoot, rawValue);
+  const relativeToRepoRoot = relative(input.repoRoot, resolvedPath);
+
+  if (
+    relativeToRepoRoot.startsWith("..") ||
+    isAbsolute(relativeToRepoRoot)
+  ) {
+    throw new Error(`${input.label} should stay inside the git workspace root`);
+  }
+
+  return resolvedPath;
 }
 
 async function runVerificationCommand(input: {

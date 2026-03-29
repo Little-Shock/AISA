@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { access, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -20,6 +20,7 @@ import {
   ensureWorkspace,
   getAttempt,
   getAttemptContract,
+  getAttemptReviewPacket,
   getAttemptResult,
   getAttemptRuntimeState,
   getCurrentDecision,
@@ -43,6 +44,11 @@ import {
 import { ensureRunManagedWorkspace } from "../packages/orchestrator/src/run-workspace.ts";
 import { createDefaultRunWorkspaceScopePolicy } from "../packages/orchestrator/src/workspace-scope.ts";
 import {
+  SELF_BOOTSTRAP_NEXT_TASK_ACTIVE_ENTRY_SNAPSHOT_FILE_NAME,
+  SELF_BOOTSTRAP_NEXT_TASK_PROMOTION_ARTIFACT_FILE_NAME,
+  SELF_BOOTSTRAP_NEXT_TASK_SOURCE_ASSET_SNAPSHOT_FILE_NAME
+} from "../packages/orchestrator/src/self-bootstrap-next-task.ts";
+import {
   assertDriveRunReachedStableStop,
   driveRun,
   resolveSandboxForAttempt
@@ -51,6 +57,67 @@ import {
   buildAttemptModeRules,
   prepareResearchShellGuard
 } from "../packages/worker-adapters/src/index.ts";
+
+const REVIEWER_CONFIG_ENV = "AISA_REVIEWERS_JSON";
+const SYNTHESIZER_CONFIG_ENV = "AISA_REVIEW_SYNTHESIZER_JSON";
+const CLOSED_BASELINE_REVIEWERS_JSON = JSON.stringify([
+  {
+    kind: "heuristic",
+    reviewer_id: "runtime-baseline-reviewer",
+    role: "runtime_reviewer",
+    adapter: "deterministic-heuristic",
+    provider: "local",
+    model: "baseline"
+  }
+]);
+const CLOSED_BASELINE_SYNTHESIZER_JSON = JSON.stringify({
+  kind: "deterministic"
+});
+
+type HostJudgeConfigSnapshot = {
+  reviewersJson: string | undefined;
+  synthesizerJson: string | undefined;
+};
+
+function assertClosedJudgeBaselineApplied(scriptName: string): void {
+  assert.equal(
+    process.env[REVIEWER_CONFIG_ENV],
+    CLOSED_BASELINE_REVIEWERS_JSON,
+    `${scriptName} must pin ${REVIEWER_CONFIG_ENV} to the closed runtime baseline.`
+  );
+  assert.equal(
+    process.env[SYNTHESIZER_CONFIG_ENV],
+    CLOSED_BASELINE_SYNTHESIZER_JSON,
+    `${scriptName} must pin ${SYNTHESIZER_CONFIG_ENV} to the closed runtime baseline.`
+  );
+}
+
+function assertHostJudgeConfigOverridden(
+  scriptName: string,
+  hostJudgeConfig: HostJudgeConfigSnapshot
+): void {
+  if (
+    hostJudgeConfig.reviewersJson !== undefined &&
+    hostJudgeConfig.reviewersJson !== CLOSED_BASELINE_REVIEWERS_JSON
+  ) {
+    assert.notEqual(
+      process.env[REVIEWER_CONFIG_ENV],
+      hostJudgeConfig.reviewersJson,
+      `${scriptName} must not inherit the host ${REVIEWER_CONFIG_ENV}.`
+    );
+  }
+
+  if (
+    hostJudgeConfig.synthesizerJson !== undefined &&
+    hostJudgeConfig.synthesizerJson !== CLOSED_BASELINE_SYNTHESIZER_JSON
+  ) {
+    assert.notEqual(
+      process.env[SYNTHESIZER_CONFIG_ENV],
+      hostJudgeConfig.synthesizerJson,
+      `${scriptName} must not inherit the host ${SYNTHESIZER_CONFIG_ENV}.`
+    );
+  }
+}
 
 class ProgressingAdapter {
   readonly type = "fake-codex";
@@ -123,6 +190,11 @@ class ProgressingAdapter {
                   {
                     purpose: "confirm the execution note was written",
                     command: 'test -f execution-note.md && rg -n "^checkpointed by att_" execution-note.md'
+                  },
+                  {
+                    purpose: "emit preserved self-bootstrap publication evidence",
+                    command:
+                      "node artifacts/self-bootstrap-sync-fixture/emit-self-bootstrap-sync-evidence.mjs"
                   }
                 ]
               }
@@ -146,6 +218,82 @@ class ProgressingAdapter {
     await writeFile(
       join(input.attempt.workspace_root, "execution-note.md"),
       `checkpointed by ${input.attempt.id}\n`,
+      "utf8"
+    );
+    const selfBootstrapFixtureDir = join(
+      input.attempt.workspace_root,
+      "artifacts",
+      "self-bootstrap-sync-fixture"
+    );
+    await mkdir(selfBootstrapFixtureDir, { recursive: true });
+
+    await writeFile(
+      join(
+        selfBootstrapFixtureDir,
+        "self-bootstrap-next-task-promotion.preserved.json"
+      ),
+      JSON.stringify(
+        {
+          status: "passed",
+          command:
+            "pnpm promote:self-bootstrap-next-task -- Codex/2026-03-29-self-bootstrap-next-runtime-task-att_fixture.json",
+          source_asset:
+            "Codex/2026-03-29-self-bootstrap-next-runtime-task-att_fixture.json"
+        },
+        null,
+        2
+      ) + "\n",
+      "utf8"
+    );
+    await writeFile(
+      join(
+        selfBootstrapFixtureDir,
+        SELF_BOOTSTRAP_NEXT_TASK_SOURCE_ASSET_SNAPSHOT_FILE_NAME
+      ),
+      JSON.stringify(
+        {
+          attempt_id: input.attempt.id,
+          title: "同步当前 execution attempt 的 self-bootstrap 证据",
+          summary: "fixture source asset snapshot"
+        },
+        null,
+        2
+      ) + "\n",
+      "utf8"
+    );
+    await writeFile(
+      join(
+        selfBootstrapFixtureDir,
+        SELF_BOOTSTRAP_NEXT_TASK_ACTIVE_ENTRY_SNAPSHOT_FILE_NAME
+      ),
+      JSON.stringify(
+        {
+          entry_type: "self_bootstrap_next_runtime_task_active",
+          source_anchor: {
+            asset_path:
+              "Codex/2026-03-29-self-bootstrap-next-runtime-task-att_fixture.json",
+            source_attempt_id: input.attempt.id
+          }
+        },
+        null,
+        2
+      ) + "\n",
+      "utf8"
+    );
+    await writeFile(
+      join(
+        selfBootstrapFixtureDir,
+        "emit-self-bootstrap-sync-evidence.mjs"
+      ),
+      [
+        'import { resolve } from "node:path";',
+        "const fixtureDir = resolve(process.cwd(), \"artifacts\", \"self-bootstrap-sync-fixture\");",
+        "console.log(JSON.stringify({",
+        '  retained_publication_artifact: resolve(fixtureDir, "self-bootstrap-next-task-promotion.preserved.json"),',
+        `  retained_source_asset_snapshot: resolve(fixtureDir, "${SELF_BOOTSTRAP_NEXT_TASK_SOURCE_ASSET_SNAPSHOT_FILE_NAME}"),`,
+        `  retained_published_active_entry: resolve(fixtureDir, "${SELF_BOOTSTRAP_NEXT_TASK_ACTIVE_ENTRY_SNAPSHOT_FILE_NAME}")`,
+        "}, null, 2));"
+      ].join("\n") + "\n",
       "utf8"
     );
 
@@ -227,7 +375,46 @@ class CompletedRuntimeStateExecutionAdapter {
   }
 }
 
-async function main(): Promise<void> {
+async function withTemporaryEnv<T>(
+  name: string,
+  value: string,
+  callback: () => Promise<T>
+): Promise<T> {
+  const previous = process.env[name];
+  process.env[name] = value;
+
+  try {
+    return await callback();
+  } finally {
+    if (previous === undefined) {
+      delete process.env[name];
+      return;
+    }
+
+    process.env[name] = previous;
+  }
+}
+
+async function withClosedJudgeBaseline<T>(
+  callback: (hostJudgeConfig: HostJudgeConfigSnapshot) => Promise<T>
+): Promise<T> {
+  const hostJudgeConfig: HostJudgeConfigSnapshot = {
+    reviewersJson: process.env[REVIEWER_CONFIG_ENV],
+    synthesizerJson: process.env[SYNTHESIZER_CONFIG_ENV]
+  };
+
+  return await withTemporaryEnv(REVIEWER_CONFIG_ENV, CLOSED_BASELINE_REVIEWERS_JSON, async () =>
+    await withTemporaryEnv(
+      SYNTHESIZER_CONFIG_ENV,
+      CLOSED_BASELINE_SYNTHESIZER_JSON,
+      async () => await callback(hostJudgeConfig)
+    )
+  );
+}
+
+async function main(hostJudgeConfig: HostJudgeConfigSnapshot): Promise<void> {
+  assertClosedJudgeBaselineApplied("verify-drive-run");
+  assertHostJudgeConfigOverridden("verify-drive-run", hostJudgeConfig);
   const rootDir = await mkdtemp(join(tmpdir(), "aisa-drive-run-"));
   const workspacePaths = resolveWorkspacePaths(rootDir);
   await ensureWorkspace(workspacePaths);
@@ -323,12 +510,23 @@ async function main(): Promise<void> {
   const executionAttempt = attempts.find((attempt) => attempt.id === checkpointEntry.attempt_id);
   assert.ok(executionAttempt, "checkpoint entry should point to a persisted attempt");
   assert.equal(executionAttempt.attempt_type, "execution");
-  const [firstResearchResult, secondResearchResult, executionAttemptContract] = await Promise.all([
+  const [
+    firstResearchResult,
+    secondResearchResult,
+    secondResearchReviewPacket,
+    executionAttemptContract
+  ] = await Promise.all([
     getAttemptResult(workspacePaths, run.id, firstResearchAttempt.id),
     getAttemptResult(workspacePaths, run.id, secondResearchAttempt.id),
+    getAttemptReviewPacket(workspacePaths, run.id, secondResearchAttempt.id),
     getAttemptContract(workspacePaths, run.id, executionAttempt.id)
   ]);
   const runtimeVerification = await getAttemptRuntimeVerification(
+    workspacePaths,
+    run.id,
+    executionAttempt.id
+  );
+  const executionAttemptPaths = resolveAttemptPaths(
     workspacePaths,
     run.id,
     executionAttempt.id
@@ -344,6 +542,19 @@ async function main(): Promise<void> {
     "second research attempt should leave a replayable execution contract"
   );
   assert.equal(secondResearchResult?.next_attempt_contract?.attempt_type, "execution");
+  assert.ok(
+    secondResearchReviewPacket?.current_decision_snapshot?.selected_next_execution_plan,
+    "second research review packet should capture the persisted execution plan anchor"
+  );
+  assert.deepEqual(
+    secondResearchReviewPacket.current_decision_snapshot.selected_next_execution_plan,
+    {
+      source_attempt_id: secondResearchAttempt.id,
+      source_result_ref: `runs/${run.id}/attempts/${secondResearchAttempt.id}/result.json`,
+      contract: secondResearchResult?.next_attempt_contract
+    },
+    "research should persist the selected execution plan into current decision truth"
+  );
   assert.ok(executionAttemptContract, "execution attempt should persist the promoted contract");
   assert.equal(
     executionAttempt.objective,
@@ -395,7 +606,7 @@ async function main(): Promise<void> {
     "all recorded attempts should be completed by the settled stop"
   );
   assert.equal(runtimeVerification.status, "passed");
-  assert.equal(runtimeVerification.command_results.length, 1);
+  assert.equal(runtimeVerification.command_results.length, 2);
   assert.deepEqual(runtimeVerification.changed_files, ["execution-note.md"]);
   assert.equal(checkpointEntry.attempt_id, executionAttempt.id);
   assert.equal(checkpoint.status, "created");
@@ -404,6 +615,53 @@ async function main(): Promise<void> {
   assert.match(checkpoint.commit.message, new RegExp(run.id));
   assert.match(checkpoint.commit.message, new RegExp(executionAttempt.id));
   assert.deepEqual(checkpoint.commit.changed_files, ["execution-note.md"]);
+  assert.equal(
+    runtimeVerification.command_results[1]?.command,
+    "node artifacts/self-bootstrap-sync-fixture/emit-self-bootstrap-sync-evidence.mjs"
+  );
+
+  const retainedFixtureDir = join(
+    executionWorkspaceRoot,
+    "artifacts",
+    "self-bootstrap-sync-fixture"
+  );
+  const syncedPublicationArtifactPath = join(
+    executionAttemptPaths.artifactsDir,
+    SELF_BOOTSTRAP_NEXT_TASK_PROMOTION_ARTIFACT_FILE_NAME
+  );
+  const syncedSourceAssetSnapshotPath = join(
+    executionAttemptPaths.artifactsDir,
+    SELF_BOOTSTRAP_NEXT_TASK_SOURCE_ASSET_SNAPSHOT_FILE_NAME
+  );
+  const syncedPublishedActiveEntryPath = join(
+    executionAttemptPaths.artifactsDir,
+    SELF_BOOTSTRAP_NEXT_TASK_ACTIVE_ENTRY_SNAPSHOT_FILE_NAME
+  );
+
+  assert.equal(
+    await readFile(syncedPublicationArtifactPath, "utf8"),
+    await readFile(
+      join(retainedFixtureDir, "self-bootstrap-next-task-promotion.preserved.json"),
+      "utf8"
+    ),
+    "runtime verification should sync the preserved publication artifact into the execution attempt"
+  );
+  assert.equal(
+    await readFile(syncedSourceAssetSnapshotPath, "utf8"),
+    await readFile(
+      join(retainedFixtureDir, SELF_BOOTSTRAP_NEXT_TASK_SOURCE_ASSET_SNAPSHOT_FILE_NAME),
+      "utf8"
+    ),
+    "runtime verification should sync the preserved source asset snapshot into the execution attempt"
+  );
+  assert.equal(
+    await readFile(syncedPublishedActiveEntryPath, "utf8"),
+    await readFile(
+      join(retainedFixtureDir, SELF_BOOTSTRAP_NEXT_TASK_ACTIVE_ENTRY_SNAPSHOT_FILE_NAME),
+      "utf8"
+    ),
+    "runtime verification should sync the preserved active entry snapshot into the execution attempt"
+  );
 
   assert.equal(resolveSandboxForAttempt("read-only", "research"), "read-only");
   assert.equal(resolveSandboxForAttempt("read-only", "execution"), "workspace-write");
@@ -464,7 +722,12 @@ async function main(): Promise<void> {
         attempt_types: attempts.map((attempt) => attempt.attempt_type),
         research_attempt_count: researchAttempts.length,
         execution_attempt_count: executionAttempts.length,
-        run_status: persistedCurrent?.run_status ?? null
+        run_status: persistedCurrent?.run_status ?? null,
+        synced_self_bootstrap_artifacts: {
+          publication_artifact: syncedPublicationArtifactPath,
+          source_asset_snapshot: syncedSourceAssetSnapshotPath,
+          published_active_entry: syncedPublishedActiveEntryPath
+        }
       },
       null,
       2
@@ -940,7 +1203,7 @@ function sleep(ms: number): Promise<void> {
   });
 }
 
-main().catch((error) => {
+withClosedJudgeBaseline(main).catch((error) => {
   console.error(error);
   process.exitCode = 1;
 });
