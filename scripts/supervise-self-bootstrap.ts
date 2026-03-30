@@ -690,6 +690,13 @@ function hasHardBoundaryBlocker(snapshot: RunSnapshot): boolean {
   );
 }
 
+function hasGovernanceDeadEndBlocker(snapshot: RunSnapshot): boolean {
+  const blockingReason = snapshot.current?.blocking_reason ?? "";
+  return /治理层拦下了|已证伪方案|缺失工件|missing artifact|Objective referenced missing artifacts|excluded plan|dispatch blocked/i.test(
+    blockingReason
+  );
+}
+
 function shouldRelaunchWaitingRun(
   snapshot: RunSnapshot,
   options: Pick<CliOptions, "waitingRelaunchMs">
@@ -699,6 +706,10 @@ function shouldRelaunchWaitingRun(
   }
 
   if (hasHardBoundaryBlocker(snapshot)) {
+    return false;
+  }
+
+  if (hasGovernanceDeadEndBlocker(snapshot)) {
     return false;
   }
 
