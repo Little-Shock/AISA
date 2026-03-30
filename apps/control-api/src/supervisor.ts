@@ -1,9 +1,19 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  resolveRuntimeControlApiPaths,
+  resolveRuntimeLayout
+} from "@autoresearch/orchestrator";
 
 const currentDir = dirname(fileURLToPath(import.meta.url));
 const packageRoot = resolve(currentDir, "..");
+const repositoryRoot = resolve(packageRoot, "..", "..");
+const runtimeLayout = resolveRuntimeLayout({
+  repositoryRoot,
+  env: process.env
+});
+const runtimeControlApiPaths = resolveRuntimeControlApiPaths(runtimeLayout);
 const restartExitCode = readPositiveIntegerEnv(
   "AISA_CONTROL_API_RESTART_EXIT_CODE",
   75
@@ -28,8 +38,21 @@ const maxRapidUnexpectedRestarts = readPositiveIntegerEnv(
   "AISA_CONTROL_API_MAX_RAPID_UNEXPECTED_RESTARTS",
   5
 );
-const childEntry = process.env.AISA_CONTROL_API_CHILD_ENTRY ?? resolve(packageRoot, "src/index.ts");
-const childCwd = process.env.AISA_CONTROL_API_CHILD_CWD ?? packageRoot;
+const childEntry =
+  process.env.AISA_CONTROL_API_CHILD_ENTRY ?? runtimeControlApiPaths.childEntry;
+const childCwd =
+  process.env.AISA_CONTROL_API_CHILD_CWD ?? runtimeControlApiPaths.packageRoot;
+const supervisorEntry =
+  process.env.AISA_CONTROL_API_SUPERVISOR_ENTRY ??
+  runtimeControlApiPaths.supervisorEntry;
+const supervisorCwd =
+  process.env.AISA_CONTROL_API_SUPERVISOR_CWD ??
+  runtimeControlApiPaths.packageRoot;
+const selfReexecOnExpectedRestart =
+  process.env.AISA_CONTROL_API_SUPERVISOR_SELF_REEXEC === "1" ||
+  (process.env.AISA_CONTROL_API_SUPERVISOR_SELF_REEXEC !== "0" &&
+    (process.env.AISA_RUNTIME_REPO_ROOT !== undefined ||
+      process.env.AISA_CONTROL_API_SUPERVISOR_ENTRY !== undefined));
 
 let shuttingDown = false;
 let activeChild: ChildProcess | null = null;
@@ -50,6 +73,10 @@ async function main(): Promise<void> {
         `[control-api-supervisor] child requested restart with exit code ${restartExitCode}; restarting in ${expectedRestartDelayMs}ms`
       );
       await delay(expectedRestartDelayMs);
+      if (selfReexecOnExpectedRestart) {
+        await relaunchSupervisorProcess();
+        return;
+      }
       continue;
     }
 
@@ -105,6 +132,26 @@ function runChild(): Promise<number | null> {
         activeChild = null;
       }
       resolve(code);
+    });
+  });
+}
+
+async function relaunchSupervisorProcess(): Promise<void> {
+  await new Promise<void>((resolveLaunch, reject) => {
+    const child = spawn(
+      process.execPath,
+      ["--import", "tsx", supervisorEntry],
+      {
+        cwd: supervisorCwd,
+        env: process.env,
+        detached: true,
+        stdio: "inherit"
+      }
+    );
+    child.once("error", reject);
+    child.once("spawn", () => {
+      child.unref();
+      resolveLaunch();
     });
   });
 }

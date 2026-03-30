@@ -617,7 +617,13 @@ async function main(hostJudgeConfig: HostJudgeConfigSnapshot): Promise<void> {
   ).stdout.trim();
   assert.equal(secondStop.stopReason, "run_settled");
   assert.doesNotThrow(() => assertDriveRunReachedStableStop(secondStop));
-  assert.equal(persistedCurrent?.run_status, "completed");
+  assert.equal(persistedCurrent?.run_status, "waiting_steer");
+  assert.equal(persistedCurrent?.waiting_for_human, true);
+  assert.equal(persistedCurrent?.recommended_next_action, "wait_for_human");
+  assert.match(
+    persistedCurrent?.blocking_reason ?? "",
+    /Promoted checkpoint/u
+  );
   assert.equal(executionAttempts.length, 1);
   assert.equal(researchAttempts.length, 2);
   assert.ok(

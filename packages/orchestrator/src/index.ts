@@ -132,6 +132,10 @@ import {
   type AttemptRuntimeVerificationOutcome
 } from "./runtime-verification.js";
 import {
+  maybePromoteVerifiedCheckpoint,
+  type RuntimePromotionOutcome
+} from "./runtime-promotion.js";
+import {
   assertAttemptWorkspaceWithinRunScope,
   createDefaultRunWorkspaceScopePolicy,
   lockRunWorkspaceRoot,
@@ -142,6 +146,7 @@ import {
   ensureRunManagedWorkspace,
   getEffectiveRunWorkspaceRoot
 } from "./run-workspace.js";
+import { type RuntimeLayout } from "./runtime-layout.js";
 
 export interface OrchestratorOptions {
   attemptHeartbeatIntervalMs?: number;
@@ -160,13 +165,16 @@ export interface OrchestratorOptions {
   synthesizerConfig?: AttemptEvaluationSynthesizerConfig | null;
   synthesizerConfigEnv?: NodeJS.ProcessEnv;
   requestRuntimeRestart?: (request: RuntimeRestartRequest) => Promise<void> | void;
+  runtimeLayout?: RuntimeLayout | null;
 }
 
 export type RuntimeRestartRequest = {
   runId: string;
   attemptId: string;
+  reason: "runtime_source_drift" | "runtime_promotion";
   affectedFiles: string[];
   message: string;
+  promotedSha?: string | null;
 };
 
 type RunDispatchLeaseRecord = {
@@ -304,6 +312,7 @@ export class Orchestrator {
   private readonly requestRuntimeRestart: ((
     request: RuntimeRestartRequest
   ) => Promise<void> | void) | null;
+  private readonly runtimeLayout: RuntimeLayout;
   private readonly instanceStartedAtMs: number;
 
   constructor(
@@ -365,6 +374,14 @@ export class Orchestrator {
         env: options.synthesizerConfigEnv ?? process.env
       });
     this.requestRuntimeRestart = options.requestRuntimeRestart ?? null;
+    this.runtimeLayout =
+      options.runtimeLayout ?? {
+        repositoryRoot: this.workspacePaths.rootDir,
+        runtimeRepoRoot: this.workspacePaths.rootDir,
+        devRepoRoot: this.workspacePaths.rootDir,
+        runtimeDataRoot: this.workspacePaths.rootDir,
+        managedWorkspaceRoot: this.runWorkspaceScopePolicy.managedWorkspaceRoot
+      };
     this.instanceStartedAtMs = Date.now();
   }
 
@@ -1299,21 +1316,51 @@ export class Orchestrator {
         attempt,
         checkpointOutcome
       );
-      const runtimeSourceDriftFiles = detectLiveRuntimeSourceDrift(
-        runtimeVerification.verification.changed_files
+      const promotionOutcome = await maybePromoteVerifiedCheckpoint({
+        layout: this.runtimeLayout,
+        run,
+        attempt,
+        attemptPaths,
+        checkpointOutcome
+      });
+      nextCurrent = this.applyRuntimePromotionOutcomeToCurrentDecision(
+        nextCurrent,
+        attempt,
+        promotionOutcome
       );
-      if (runtimeSourceDriftFiles.length > 0) {
+      const runtimeSourceDriftFiles = await detectLiveRuntimeSourceDrift({
+        changedFiles: runtimeVerification.verification.changed_files,
+        attemptWorkspaceRoot: attempt.workspace_root,
+        runtimeRepoRoot: this.runtimeLayout.runtimeRepoRoot
+      });
+      if (promotionOutcome.status === "promoted" && promotionOutcome.restart_required) {
         runtimeRestartRequest = {
           runId,
           attemptId: attempt.id,
+          reason: "runtime_promotion",
+          affectedFiles: [],
+          message: promotionOutcome.message,
+          promotedSha: promotionOutcome.checkpoint_sha
+        };
+      } else if (runtimeSourceDriftFiles.length > 0) {
+        runtimeRestartRequest = {
+          runId,
+          attemptId: attempt.id,
+          reason: "runtime_source_drift",
           affectedFiles: runtimeSourceDriftFiles,
-          message: this.buildRuntimeSourceDriftMessage(runtimeSourceDriftFiles)
+          message: this.buildRuntimeSourceDriftMessage(runtimeSourceDriftFiles),
+          promotedSha: null
         };
       }
       nextCurrent = this.applyRuntimeSourceDriftOutcomeToCurrentDecision(
         nextCurrent,
         attempt,
         runtimeSourceDriftFiles
+      );
+      nextCurrent = this.applyMissingRuntimeRestartHandlerOutcomeToCurrentDecision(
+        nextCurrent,
+        attempt,
+        runtimeRestartRequest
       );
       const governance = await this.buildSettledGovernanceState({
         runId,
@@ -1360,6 +1407,7 @@ export class Orchestrator {
       );
       await this.appendRuntimeVerificationJournal(runId, attempt.id, runtimeVerification);
       await this.appendCheckpointJournal(runId, attempt.id, checkpointOutcome);
+      await this.appendRuntimePromotionJournal(runId, attempt.id, promotionOutcome);
       await this.appendRuntimeSourceDriftJournal(
         runId,
         attempt.id,
@@ -2206,6 +2254,26 @@ export class Orchestrator {
     });
   }
 
+  private applyRuntimePromotionOutcomeToCurrentDecision(
+    current: CurrentDecision,
+    attempt: Attempt,
+    promotionOutcome: RuntimePromotionOutcome
+  ): CurrentDecision {
+    if (promotionOutcome.status !== "blocked") {
+      return current;
+    }
+
+    return updateCurrentDecision(current, {
+      run_status: "waiting_steer",
+      latest_attempt_id: attempt.id,
+      recommended_next_action: "wait_for_human",
+      recommended_attempt_type: attempt.attempt_type,
+      summary: promotionOutcome.message,
+      blocking_reason: promotionOutcome.message,
+      waiting_for_human: true
+    });
+  }
+
   private applyRuntimeSourceDriftOutcomeToCurrentDecision(
     current: CurrentDecision,
     attempt: Attempt,
@@ -2230,6 +2298,36 @@ export class Orchestrator {
       recommended_attempt_type: current.recommended_attempt_type ?? attempt.attempt_type,
       summary: message,
       blocking_reason: [current.blocking_reason, message].filter(Boolean).join(" "),
+      waiting_for_human: true
+    });
+  }
+
+  private applyMissingRuntimeRestartHandlerOutcomeToCurrentDecision(
+    current: CurrentDecision,
+    attempt: Attempt,
+    runtimeRestartRequest: RuntimeRestartRequest | null
+  ): CurrentDecision {
+    if (!runtimeRestartRequest || this.requestRuntimeRestart) {
+      return current;
+    }
+
+    const preservedNextAction =
+      current.recommended_next_action ??
+      (current.recommended_attempt_type === "execution"
+        ? "continue_execution"
+        : current.recommended_attempt_type === "research"
+          ? "continue_research"
+          : "wait_for_human");
+
+    return updateCurrentDecision(current, {
+      run_status: "waiting_steer",
+      latest_attempt_id: attempt.id,
+      recommended_next_action: preservedNextAction,
+      recommended_attempt_type: current.recommended_attempt_type ?? attempt.attempt_type,
+      summary: runtimeRestartRequest.message,
+      blocking_reason: [current.blocking_reason, runtimeRestartRequest.message]
+        .filter(Boolean)
+        .join(" "),
       waiting_for_human: true
     });
   }
@@ -2276,6 +2374,67 @@ export class Orchestrator {
         }
         })
       );
+  }
+
+  private async appendRuntimePromotionJournal(
+    runId: string,
+    attemptId: string,
+    promotionOutcome: RuntimePromotionOutcome
+  ): Promise<void> {
+    if (promotionOutcome.status === "promoted") {
+      await appendRunJournal(
+        this.workspacePaths,
+        createRunJournalEntry({
+          run_id: runId,
+          attempt_id: attemptId,
+          type: "attempt.runtime.promoted",
+          payload: {
+            checkpoint_sha: promotionOutcome.checkpoint_sha,
+            dev_repo_root: promotionOutcome.dev_repo_root,
+            runtime_repo_root: promotionOutcome.runtime_repo_root,
+            artifact_path: promotionOutcome.artifact_path,
+            restart_required: promotionOutcome.restart_required
+          }
+        })
+      );
+
+      if (promotionOutcome.restart_required) {
+        await appendRunJournal(
+          this.workspacePaths,
+          createRunJournalEntry({
+            run_id: runId,
+            attempt_id: attemptId,
+            type: "attempt.restart_required",
+            payload: {
+              reason: "runtime_promotion",
+              message: promotionOutcome.message,
+              affected_files: [],
+              artifact_path: promotionOutcome.artifact_path,
+              checkpoint_sha: promotionOutcome.checkpoint_sha
+            }
+          })
+        );
+      }
+      return;
+    }
+
+    await appendRunJournal(
+      this.workspacePaths,
+      createRunJournalEntry({
+        run_id: runId,
+        attempt_id: attemptId,
+        type:
+          promotionOutcome.status === "blocked"
+            ? "attempt.runtime.promotion.blocked"
+            : "attempt.runtime.promotion.skipped",
+        payload: {
+          reason: promotionOutcome.reason,
+          message: promotionOutcome.message,
+          artifact_path: promotionOutcome.artifact_path,
+          checkpoint_sha: promotionOutcome.checkpoint_sha
+        }
+      })
+    );
   }
 
   private async appendRuntimeSourceDriftJournal(
@@ -3946,3 +4105,16 @@ export {
   RunWorkspaceScopeError,
   type RunWorkspaceScopePolicy
 } from "./workspace-scope.js";
+
+export {
+  buildRuntimeWorkspaceScopeRoots,
+  resolveRuntimeControlApiPaths,
+  resolveRuntimeLayout,
+  type RuntimeControlApiPaths,
+  type RuntimeLayout
+} from "./runtime-layout.js";
+
+export {
+  maybePromoteVerifiedCheckpoint,
+  type RuntimePromotionOutcome
+} from "./runtime-promotion.js";

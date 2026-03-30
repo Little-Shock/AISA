@@ -14,6 +14,7 @@
     "verify:run-api": "node --import tsx scripts/verify-run-detail-api.ts",
     "verify:run-stream": "node --import tsx scripts/verify-run-stream.ts",
     "verify:run-loop": "node --import tsx scripts/verify-run-loop.ts",
+    "verify:runtime-lanes": "node --import tsx scripts/verify-runtime-lanes.ts",
     "verify:run-autonomy": "node --import tsx scripts/verify-run-autonomy.ts",
     "verify:governance": "node --import tsx scripts/verify-governance.ts",
     "verify:worker-adapter": "node --import tsx scripts/verify-worker-adapter.ts",

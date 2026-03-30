@@ -188,6 +188,15 @@ async function assertGovernanceReplay(): Promise<GovernanceReport> {
   return JSON.parse(result.stdout) as GovernanceReport;
 }
 
+async function assertRuntimeLaneReplay(): Promise<void> {
+  const result = await runTsxScript("scripts/verify-runtime-lanes.ts");
+  assert.equal(
+    result.exitCode,
+    0,
+    formatScriptFailure("scripts/verify-runtime-lanes.ts", result)
+  );
+}
+
 async function assertSelfBootstrapReplay(): Promise<void> {
   const result = await runTsxScript("scripts/verify-self-bootstrap.ts", {
     [SKIP_SELF_BOOTSTRAP_ENV]: "1"
@@ -236,6 +245,7 @@ async function assertHistoryContractDriftClean(): Promise<HistoryContractDriftRe
 async function main(): Promise<void> {
   await assertRunLoopReplay();
   await assertControlApiSupervisorReplay();
+  await assertRuntimeLaneReplay();
   await assertRunDetailApiReplay();
   await assertRunStreamReplay();
   const driveRun = await assertDriveRunReplay();

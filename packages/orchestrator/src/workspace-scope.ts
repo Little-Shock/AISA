@@ -47,12 +47,13 @@ export function parseRunWorkspaceScopeRoots(
 }
 
 export function createDefaultRunWorkspaceScopePolicy(
-  runtimeRoot: string
+  runtimeRoot: string,
+  managedWorkspaceRootOverride?: string
 ): RunWorkspaceScopePolicy {
   const normalizedRuntimeRoot = normalizeExistingScopeRoot(runtimeRoot);
-  const managedWorkspaceRoot = normalizeDerivedManagedWorkspaceRoot(
-    normalizedRuntimeRoot
-  );
+  const managedWorkspaceRoot = managedWorkspaceRootOverride
+    ? normalizeExistingScopeRoot(managedWorkspaceRootOverride)
+    : normalizeDerivedManagedWorkspaceRoot(normalizedRuntimeRoot);
   return {
     allowedRoots: sortScopeRoots([normalizedRuntimeRoot, managedWorkspaceRoot]),
     managedWorkspaceRoot
@@ -63,6 +64,7 @@ export async function createRunWorkspaceScopePolicy(input: {
   runtimeRoot: string;
   allowedRoots?: string[];
   envValue?: string;
+  managedWorkspaceRoot?: string;
 }): Promise<RunWorkspaceScopePolicy> {
   const normalizedRuntimeRoot = await normalizeScopeRoot(input.runtimeRoot);
   const configuredRoots =
@@ -74,9 +76,9 @@ export async function createRunWorkspaceScopePolicy(input: {
   const normalizedRoots = await Promise.all(
     rawRoots.map(async (root) => normalizeScopeRoot(root))
   );
-  const managedWorkspaceRoot = normalizeDerivedManagedWorkspaceRoot(
-    normalizedRuntimeRoot
-  );
+  const managedWorkspaceRoot = input.managedWorkspaceRoot
+    ? await normalizeScopeRoot(input.managedWorkspaceRoot)
+    : normalizeDerivedManagedWorkspaceRoot(normalizedRuntimeRoot);
 
   return {
     allowedRoots: sortScopeRoots([...normalizedRoots, managedWorkspaceRoot]),

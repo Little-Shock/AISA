@@ -10,6 +10,7 @@ import {
   type RuntimeHealthSnapshot
 } from "../packages/domain/src/index.ts";
 import { buildSelfBootstrapRunTemplate } from "../packages/planner/src/index.ts";
+import { resolveRuntimeLayout } from "../packages/orchestrator/src/index.ts";
 import {
   appendRunJournal,
   ensureWorkspace,
@@ -93,12 +94,18 @@ function runTsxScript(
   extraEnv?: NodeJS.ProcessEnv
 ): Promise<ScriptResult> {
   return new Promise((resolve, reject) => {
+    const childEnv: NodeJS.ProcessEnv = {
+      ...process.env,
+      ...extraEnv
+    };
+    for (const [key, value] of Object.entries(childEnv)) {
+      if (value === undefined) {
+        delete childEnv[key];
+      }
+    }
     const child = spawn(process.execPath, ["--import", "tsx", scriptPath], {
       cwd: rootDir,
-      env: {
-        ...process.env,
-        ...extraEnv
-      },
+      env: childEnv,
       stdio: ["ignore", "pipe", "pipe"]
     });
     let stdout = "";
@@ -153,7 +160,11 @@ async function captureRuntimeHealthSnapshot(input: {
     input.evidenceRoot,
     "scripts/verify-runtime.ts",
     {
-      [SKIP_SELF_BOOTSTRAP_ENV]: "1"
+      [SKIP_SELF_BOOTSTRAP_ENV]: "1",
+      AISA_DEV_REPO_ROOT: undefined,
+      AISA_RUNTIME_DATA_ROOT: undefined,
+      AISA_RUNTIME_REPO_ROOT: undefined,
+      AISA_MANAGED_WORKSPACE_ROOT: undefined
     }
   );
 
@@ -221,14 +232,17 @@ async function captureRuntimeHealthSnapshot(input: {
 }
 
 async function main(): Promise<void> {
-  const workspaceRoot = process.cwd();
   const sourceRoot = resolveSourceRoot();
-  const workspacePaths = resolveWorkspacePaths(workspaceRoot);
+  const runtimeLayout = resolveRuntimeLayout({
+    repositoryRoot: sourceRoot,
+    env: process.env
+  });
+  const workspacePaths = resolveWorkspacePaths(runtimeLayout.runtimeDataRoot);
   await ensureWorkspace(workspacePaths);
 
   const options = parseArgs(process.argv.slice(2));
   const baseTemplate = buildSelfBootstrapRunTemplate({
-    workspaceRoot,
+    workspaceRoot: runtimeLayout.devRepoRoot,
     ownerId: options.ownerId,
     focus: options.focus
   });
@@ -242,8 +256,8 @@ async function main(): Promise<void> {
   await saveRun(workspacePaths, run);
   const runtimeHealthSnapshot = await captureRuntimeHealthSnapshot({
     runId: run.id,
-    workspaceRoot,
-    evidenceRoot: sourceRoot
+    workspaceRoot: runtimeLayout.devRepoRoot,
+    evidenceRoot: runtimeLayout.runtimeRepoRoot
   });
   await saveRunRuntimeHealthSnapshot(workspacePaths, runtimeHealthSnapshot);
   await saveCurrentDecision(workspacePaths, current);
@@ -260,10 +274,7 @@ async function main(): Promise<void> {
     })
   );
   const runPaths = resolveRunPaths(workspacePaths, run.id);
-  const runtimeHealthSnapshotPath = relative(
-    workspaceRoot,
-    runPaths.runtimeHealthSnapshotFile
-  );
+  const runtimeHealthSnapshotPath = runPaths.runtimeHealthSnapshotFile;
   await appendRunJournal(
     workspacePaths,
     createRunJournalEntry({
@@ -279,7 +290,7 @@ async function main(): Promise<void> {
     })
   );
   const template = buildSelfBootstrapRunTemplate({
-    workspaceRoot,
+    workspaceRoot: runtimeLayout.devRepoRoot,
     ownerId: options.ownerId,
     focus: options.focus,
     runtimeHealthSnapshot: {

@@ -108,6 +108,7 @@ function runTsxScript(input: {
   sourceRoot: string;
   scriptPath: string;
   args?: string[];
+  extraEnv?: NodeJS.ProcessEnv;
 }): Promise<ScriptResult> {
   return new Promise((resolve, reject) => {
     const child = spawn(
@@ -120,7 +121,10 @@ function runTsxScript(input: {
       ],
       {
         cwd: input.cwd,
-        env: process.env,
+        env: {
+          ...process.env,
+          ...input.extraEnv
+        },
         stdio: ["ignore", "pipe", "pipe"]
       }
     );
@@ -224,7 +228,12 @@ async function main(): Promise<void> {
       "test-owner",
       "--focus",
       "Use runtime evidence to choose the next backend step."
-    ]
+    ],
+    extraEnv: {
+      AISA_DEV_REPO_ROOT: rootDir,
+      AISA_RUNTIME_DATA_ROOT: rootDir,
+      AISA_RUNTIME_REPO_ROOT: sourceRoot
+    }
   });
   assert.equal(
     bootstrapResult.exitCode,
@@ -326,7 +335,7 @@ async function main(): Promise<void> {
   assert.deepEqual(
     firstAttemptContext?.runtime_health_snapshot,
     {
-      path: bootstrapOutput.runtime_health_snapshot,
+      path: join("runs", run.id, "artifacts", "runtime-health-snapshot.json"),
       verify_runtime: {
         status: "passed",
         summary: runtimeHealthSnapshot?.verify_runtime.summary

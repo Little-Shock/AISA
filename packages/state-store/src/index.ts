@@ -1,5 +1,13 @@
-import { appendFile, mkdir, readFile, readdir, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import {
+  appendFile,
+  mkdir,
+  readFile,
+  readdir,
+  rename,
+  unlink,
+  writeFile
+} from "node:fs/promises";
+import { basename, dirname, join } from "node:path";
 import type {
   Attempt,
   AttemptContract,
@@ -306,7 +314,7 @@ export async function writeJsonFile(
   value: unknown
 ): Promise<void> {
   await mkdir(dirname(filePath), { recursive: true });
-  await writeFile(filePath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+  await writeFileAtomically(filePath, `${JSON.stringify(value, null, 2)}\n`);
 }
 
 export async function writeTextFile(
@@ -314,12 +322,29 @@ export async function writeTextFile(
   value: string
 ): Promise<void> {
   await mkdir(dirname(filePath), { recursive: true });
-  await writeFile(filePath, value.endsWith("\n") ? value : `${value}\n`, "utf8");
+  await writeFileAtomically(filePath, value.endsWith("\n") ? value : `${value}\n`);
 }
 
 export async function readJsonFile<T>(filePath: string): Promise<T> {
   const raw = await readFile(filePath, "utf8");
   return JSON.parse(raw) as T;
+}
+
+async function writeFileAtomically(filePath: string, value: string): Promise<void> {
+  const tempFilePath = join(
+    dirname(filePath),
+    `.${basename(filePath)}.tmp-${process.pid}-${Date.now()}-${Math.random()
+      .toString(16)
+      .slice(2)}`
+  );
+
+  try {
+    await writeFile(tempFilePath, value, "utf8");
+    await rename(tempFilePath, filePath);
+  } catch (error) {
+    await unlink(tempFilePath).catch(() => undefined);
+    throw error;
+  }
 }
 
 export async function saveGoal(

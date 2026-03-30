@@ -11,7 +11,10 @@ import {
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Attempt, CurrentDecision, Run, RunJournalEntry } from "../packages/domain/src/index.js";
-import { assessRunHealth } from "../packages/orchestrator/src/run-health.ts";
+import {
+  assessRunHealth,
+  resolveRuntimeLayout
+} from "../packages/orchestrator/src/index.ts";
 import {
   ensureWorkspace,
   getAttemptHeartbeat,
@@ -410,13 +413,16 @@ function describeError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-function buildControlApiLogPath(repoRoot: string): string {
-  return join(repoRoot, "artifacts", "control-api-supervisor.log");
+function buildControlApiLogPath(runtimeDataRoot: string): string {
+  return join(runtimeDataRoot, "artifacts", "control-api-supervisor.log");
 }
 
-async function startControlApiSupervisor(repoRoot: string): Promise<number | null> {
-  await mkdir(join(repoRoot, "artifacts"), { recursive: true });
-  const logPath = buildControlApiLogPath(repoRoot);
+async function startControlApiSupervisor(input: {
+  runtimeRepoRoot: string;
+  runtimeDataRoot: string;
+}): Promise<number | null> {
+  await mkdir(join(input.runtimeDataRoot, "artifacts"), { recursive: true });
+  const logPath = buildControlApiLogPath(input.runtimeDataRoot);
   const logFd = openSync(logPath, "a");
 
   try {
@@ -424,7 +430,7 @@ async function startControlApiSupervisor(repoRoot: string): Promise<number | nul
       process.execPath,
       ["--import", "tsx", "apps/control-api/src/supervisor.ts"],
       {
-        cwd: repoRoot,
+        cwd: input.runtimeRepoRoot,
         env: process.env,
         detached: true,
         stdio: ["ignore", logFd, logFd]
@@ -460,7 +466,8 @@ async function waitForControlApiHealth(
 }
 
 async function ensureControlApiAvailable(input: {
-  repoRoot: string;
+  runtimeRepoRoot: string;
+  runtimeDataRoot: string;
   apiBaseUrl: string;
   state: SupervisorState;
 }): Promise<ControlApiHealthResponse> {
@@ -479,7 +486,10 @@ async function ensureControlApiAvailable(input: {
 
   const lastLaunchAgeMs = ageMs(controlApiState.last_launch_requested_at);
   if (lastLaunchAgeMs === null || lastLaunchAgeMs > CONTROL_API_READY_TIMEOUT_MS) {
-    const pid = await startControlApiSupervisor(input.repoRoot);
+    const pid = await startControlApiSupervisor({
+      runtimeRepoRoot: input.runtimeRepoRoot,
+      runtimeDataRoot: input.runtimeDataRoot
+    });
     controlApiState.status = "recovering";
     controlApiState.last_launch_requested_at = nowIso();
     controlApiState.last_launch_pid = pid;
@@ -595,10 +605,10 @@ async function repairManagedWorkspaceNodeModules(run: Run): Promise<{
 }
 
 async function loadRunSnapshot(
-  workspaceRoot: string,
+  runtimeDataRoot: string,
   runId: string
 ): Promise<RunSnapshot> {
-  const workspacePaths = resolveWorkspacePaths(workspaceRoot);
+  const workspacePaths = resolveWorkspacePaths(runtimeDataRoot);
   const run = await getRun(workspacePaths, runId);
   const current = await getCurrentDecision(workspacePaths, runId);
   const attempts = await listAttempts(workspacePaths, runId);
@@ -758,7 +768,7 @@ function renderSnapshotLine(snapshot: RunSnapshot, completedAttempts: number, ta
 }
 
 async function ensureActiveRunId(
-  workspaceRoot: string,
+  runtimeDataRoot: string,
   apiBaseUrl: string,
   state: SupervisorState,
   options: Pick<CliOptions, "focus" | "ownerId" | "runId">
@@ -769,7 +779,7 @@ async function ensureActiveRunId(
 
   for (const runId of candidates) {
     try {
-      await getRun(resolveWorkspacePaths(workspaceRoot), runId);
+      await getRun(resolveWorkspacePaths(runtimeDataRoot), runId);
       trackRun(state, runId);
       return runId;
     } catch {
@@ -777,7 +787,7 @@ async function ensureActiveRunId(
     }
   }
 
-  const latestRunId = await findLatestSelfBootstrapRunId(workspaceRoot);
+  const latestRunId = await findLatestSelfBootstrapRunId(runtimeDataRoot);
   if (latestRunId) {
     trackRun(state, latestRunId);
     return latestRunId;
@@ -791,7 +801,8 @@ async function ensureActiveRunId(
 }
 
 async function runSupervisorCycle(input: {
-  workspaceRoot: string;
+  runtimeRepoRoot: string;
+  runtimeDataRoot: string;
   apiBaseUrl: string;
   state: SupervisorState;
   options: Pick<
@@ -804,17 +815,18 @@ async function runSupervisorCycle(input: {
   reachedTarget: boolean;
 }> {
   await ensureControlApiAvailable({
-    repoRoot: input.workspaceRoot,
+    runtimeRepoRoot: input.runtimeRepoRoot,
+    runtimeDataRoot: input.runtimeDataRoot,
     apiBaseUrl: input.apiBaseUrl,
     state: input.state
   });
   const runId = await ensureActiveRunId(
-    input.workspaceRoot,
+    input.runtimeDataRoot,
     input.apiBaseUrl,
     input.state,
     input.options
   );
-  const snapshot = await loadRunSnapshot(input.workspaceRoot, runId);
+  const snapshot = await loadRunSnapshot(input.runtimeDataRoot, runId);
   trackRun(input.state, runId);
   const completedAttempts = trackCompletedAttempts(input.state, snapshot);
   logLine(renderSnapshotLine(snapshot, completedAttempts, input.options.targetCompletedAttempts));
@@ -883,10 +895,16 @@ async function runSupervisorCycle(input: {
 }
 
 async function main(): Promise<void> {
-  const repoRoot = resolveRepositoryRoot();
+  const repositoryRoot = resolveRepositoryRoot();
+  const runtimeLayout = resolveRuntimeLayout({
+    repositoryRoot,
+    env: process.env
+  });
   const options = parseArgs(process.argv.slice(2));
-  const stateFile = options.stateFile ?? join(repoRoot, "artifacts", "self-bootstrap-supervisor-state.json");
-  const workspacePaths = resolveWorkspacePaths(repoRoot);
+  const stateFile =
+    options.stateFile ??
+    join(runtimeLayout.runtimeDataRoot, "artifacts", "self-bootstrap-supervisor-state.json");
+  const workspacePaths = resolveWorkspacePaths(runtimeLayout.runtimeDataRoot);
   await ensureWorkspace(workspacePaths);
 
   const state = (await loadSupervisorState(stateFile)) ?? createInitialSupervisorState(options.apiBaseUrl);
@@ -894,7 +912,8 @@ async function main(): Promise<void> {
 
   while (true) {
     const { completedAttempts, reachedTarget } = await runSupervisorCycle({
-      workspaceRoot: repoRoot,
+      runtimeRepoRoot: runtimeLayout.runtimeRepoRoot,
+      runtimeDataRoot: runtimeLayout.runtimeDataRoot,
       apiBaseUrl: options.apiBaseUrl,
       state,
       options

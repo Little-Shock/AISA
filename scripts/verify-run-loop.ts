@@ -3427,13 +3427,13 @@ function assertCase(scenario: ScenarioCase, observation: ScenarioObservation): v
       `${scenario.id}: runtime verification should record the changed runtime source file`
     );
     assert.ok(
-      executionPacket.restart_required_message?.includes("Restart before the next dispatch"),
+      executionPacket.restart_required_message?.includes("Promoted checkpoint"),
       `${scenario.id}: review packet should record the restart-required message`
     );
     assert.deepEqual(
       executionPacket.restart_required_affected_files,
-      ["packages/orchestrator/src/index.ts"],
-      `${scenario.id}: review packet should record the affected runtime files`
+      [],
+      `${scenario.id}: promotion-driven restart should not pretend the managed worktree edited the live repo in place`
     );
   }
 

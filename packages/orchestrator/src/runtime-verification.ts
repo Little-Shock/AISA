@@ -81,8 +81,25 @@ const SELF_BOOTSTRAP_RUNTIME_SYNC_TARGETS = [
 
 type SelfBootstrapVerificationReport = Record<string, unknown>;
 
-export function detectLiveRuntimeSourceDrift(changedFiles: string[]): string[] {
-  return [...new Set(changedFiles)]
+export async function detectLiveRuntimeSourceDrift(input: {
+  changedFiles: string[];
+  attemptWorkspaceRoot: string;
+  runtimeRepoRoot: string;
+}): Promise<string[]> {
+  const [attemptRepoRoot, runtimeRepoGitRoot] = await Promise.all([
+    resolveGitRepoRoot(input.attemptWorkspaceRoot),
+    resolveGitRepoRoot(input.runtimeRepoRoot)
+  ]);
+
+  if (!attemptRepoRoot || !runtimeRepoGitRoot) {
+    return [];
+  }
+
+  if (resolve(attemptRepoRoot) !== resolve(runtimeRepoGitRoot)) {
+    return [];
+  }
+
+  return [...new Set(input.changedFiles)]
     .filter((filePath) =>
       LIVE_RUNTIME_SOURCE_PREFIXES.some((prefix) => filePath.startsWith(prefix))
     )
