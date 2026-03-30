@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { readFile, stat } from "node:fs/promises";
-import { relative, resolve } from "node:path";
+import { open, readFile, stat, unlink } from "node:fs/promises";
+import { join, relative, resolve } from "node:path";
 import {
   createAttemptRuntimeState,
   createAttempt,
@@ -158,6 +158,34 @@ export type RuntimeRestartRequest = {
   message: string;
 };
 
+type RunDispatchLeaseRecord = {
+  version: 1;
+  run_id: string;
+  owner_id: string;
+  owner_pid: number;
+  purpose: string;
+  acquired_at: string;
+};
+
+type RunDispatchLease = {
+  release: () => Promise<void>;
+};
+
+class RunDispatchLeaseError extends Error {
+  constructor(
+    readonly code:
+      | "stale_live_owner"
+      | "invalid_lease_payload"
+      | "lease_owner_mismatch",
+    message: string
+  ) {
+    super(message);
+    this.name = "RunDispatchLeaseError";
+  }
+}
+
+const RUN_DISPATCH_LEASE_FILE_NAME = "run-dispatch-lease.json";
+
 export type ExecutionVerificationToolchainAssessment = {
   has_package_json: boolean;
   has_local_node_modules: boolean;
@@ -246,11 +274,13 @@ function formatVerificationCommands(commands: string[]): string {
 
 export class Orchestrator {
   private timer: NodeJS.Timeout | null = null;
+  private tickPromise: Promise<void> | null = null;
   private readonly activeBranches = new Set<string>();
   private readonly activeAttempts = new Set<string>();
   private readonly instanceId = `orch_${randomUUID().slice(0, 8)}`;
   private readonly attemptHeartbeatIntervalMs: number;
   private readonly attemptHeartbeatStaleMs: number;
+  private readonly runDispatchLeaseStaleMs: number;
   private readonly waitingHumanAutoResumeMs: number;
   private readonly maxAutomaticResumeCycles: number;
   private readonly providerRateLimitAutoResumeMs: number;
@@ -274,6 +304,10 @@ export class Orchestrator {
   ) {
     this.attemptHeartbeatIntervalMs = options.attemptHeartbeatIntervalMs ?? 1000;
     this.attemptHeartbeatStaleMs = options.attemptHeartbeatStaleMs ?? 5000;
+    this.runDispatchLeaseStaleMs = readPositiveIntegerEnv(
+      "AISA_RUN_DISPATCH_LEASE_STALE_MS",
+      60_000
+    );
     this.waitingHumanAutoResumeMs =
       options.waitingHumanAutoResumeMs ??
       readPositiveIntegerEnv("AISA_WAITING_HUMAN_AUTO_RESUME_MS", 120_000);
@@ -343,6 +377,18 @@ export class Orchestrator {
   }
 
   async tick(): Promise<void> {
+    if (this.tickPromise) {
+      return await this.tickPromise;
+    }
+
+    this.tickPromise = this.tickInternal().finally(() => {
+      this.tickPromise = null;
+    });
+
+    return await this.tickPromise;
+  }
+
+  private async tickInternal(): Promise<void> {
     const goals = await listGoals(this.workspacePaths);
 
     for (const goal of goals) {
@@ -691,7 +737,7 @@ export class Orchestrator {
             continue;
           }
 
-          await this.recoverRunningAttempt(run.id, refreshedAttempt, current);
+          await this.recoverRunningAttempt(run.id, refreshedAttempt.id);
         }
         continue;
       }
@@ -719,9 +765,85 @@ export class Orchestrator {
         continue;
       }
 
-      const nextAttempt = await this.planNextAttempt(run.id, current, attempts);
+      await this.createNextAttemptIfNeeded(run.id);
+    }
+  }
+
+  private async recoverRunningAttempt(
+    runId: string,
+    attemptId: string
+  ): Promise<void> {
+    await this.withRunDispatchLease(runId, "recover_running_attempt", async () => {
+      const [attempt, current] = await Promise.all([
+        getAttempt(this.workspacePaths, runId, attemptId),
+        getCurrentDecision(this.workspacePaths, runId)
+      ]);
+      if (attempt.status !== "running") {
+        return;
+      }
+
+      const message =
+        `尝试 ${attempt.id} 在编排器恢复时仍被标记为运行中。` +
+        "会先短暂等待人工接管，超时后自动恢复。";
+      const stoppedAttempt = updateAttempt(attempt, {
+        status: "stopped",
+        ended_at: new Date().toISOString()
+      });
+      const nextCurrent = updateCurrentDecision(
+        current ?? createCurrentDecision({ run_id: runId }),
+        {
+          run_status: "waiting_steer",
+          latest_attempt_id: attempt.id,
+          recommended_next_action: "wait_for_human",
+          recommended_attempt_type: attempt.attempt_type,
+          summary: message,
+          blocking_reason: message,
+          waiting_for_human: true
+        }
+      );
+
+      await appendRunJournal(
+        this.workspacePaths,
+        createRunJournalEntry({
+          run_id: runId,
+          attempt_id: attempt.id,
+          type: "attempt.recovery_required",
+          payload: {
+            previous_status: attempt.status,
+            recovery_policy: "auto_resume_after_human_window"
+          }
+        })
+      );
+      await this.saveSettledAttemptState({
+        runId,
+        attempt: stoppedAttempt,
+        currentSnapshot: nextCurrent
+      });
+    });
+  }
+
+  private async createNextAttemptIfNeeded(runId: string): Promise<void> {
+    await this.withRunDispatchLease(runId, "plan_next_attempt", async () => {
+      const [run, current, attempts] = await Promise.all([
+        getRun(this.workspacePaths, runId),
+        getCurrentDecision(this.workspacePaths, runId),
+        listAttempts(this.workspacePaths, runId)
+      ]);
+      if (!current || current.waiting_for_human || current.run_status !== "running") {
+        return;
+      }
+
+      if (attempts.some((attempt) => ["created", "queued", "running"].includes(attempt.status))) {
+        return;
+      }
+
+      if (this.hasActiveAttemptForRun(runId)) {
+        return;
+      }
+
+      const nextAttempt = await this.planNextAttempt(runId, current, attempts);
       if (!nextAttempt) {
-        continue;
+        return;
       }
 
       await saveAttempt(this.workspacePaths, nextAttempt.attempt);
@@ -738,50 +860,6 @@ export class Orchestrator {
           }
         })
       );
-    }
-  }
-
-  private async recoverRunningAttempt(
-    runId: string,
-    attempt: Attempt,
-    current: CurrentDecision | null
-  ): Promise<void> {
-    const message =
-      `尝试 ${attempt.id} 在编排器恢复时仍被标记为运行中。` +
-      "会先短暂等待人工接管，超时后自动恢复。";
-    const stoppedAttempt = updateAttempt(attempt, {
-      status: "stopped",
-      ended_at: new Date().toISOString()
-    });
-    const nextCurrent = updateCurrentDecision(
-      current ?? createCurrentDecision({ run_id: runId }),
-      {
-        run_status: "waiting_steer",
-        latest_attempt_id: attempt.id,
-        recommended_next_action: "wait_for_human",
-        recommended_attempt_type: attempt.attempt_type,
-        summary: message,
-        blocking_reason: message,
-        waiting_for_human: true
-      }
-    );
-
-    await appendRunJournal(
-      this.workspacePaths,
-        createRunJournalEntry({
-          run_id: runId,
-          attempt_id: attempt.id,
-          type: "attempt.recovery_required",
-          payload: {
-            previous_status: attempt.status,
-            recovery_policy: "auto_resume_after_human_window"
-          }
-        })
-      );
-    await this.saveSettledAttemptState({
-      runId,
-      attempt: stoppedAttempt,
-      currentSnapshot: nextCurrent
     });
   }
 
@@ -891,87 +969,101 @@ export class Orchestrator {
   }
 
   private async executeAttempt(runId: string, attemptId: string): Promise<void> {
-    const run = await getRun(this.workspacePaths, runId);
+    let run = await getRun(this.workspacePaths, runId);
     let attempt = await getAttempt(this.workspacePaths, runId, attemptId);
-    attempt = await this.ensureAttemptUsesRunWorkspace(run, attempt);
-    const attemptContract = await getAttemptContract(
-      this.workspacePaths,
-      runId,
-      attemptId
-    );
     const attemptPaths = resolveAttemptPaths(this.workspacePaths, runId, attemptId);
-    const steers = await listRunSteers(this.workspacePaths, runId);
-    const attempts = await listAttempts(this.workspacePaths, runId);
-    const current = await getCurrentDecision(this.workspacePaths, runId);
-    const previousAttempts = (
-      await Promise.all(
-        attempts
-          .filter((item) => item.id !== attempt.id)
-          .slice(-3)
-          .map(async (item) => ({
-            attempt: item,
-            result: await getAttemptResult(this.workspacePaths, runId, item.id)
-          }))
-      )
-    ).map(({ attempt: previousAttempt, result }) => ({
-      id: previousAttempt.id,
-      type: previousAttempt.attempt_type,
-      status: previousAttempt.status,
-      summary: result?.summary ?? ""
-    }));
-    const runtimeHealthSnapshot = await getRunRuntimeHealthSnapshot(
-      this.workspacePaths,
-      runId
-    );
-
-    const context = {
-      contract: {
-        title: run.title,
-        description: run.description,
-        success_criteria: run.success_criteria,
-        constraints: run.constraints,
-        workspace_root: attempt.workspace_root,
-        ...(run.managed_workspace_root
-          ? {
-              source_workspace_root: run.workspace_root
-            }
-          : {})
-      },
-      current_decision: current,
-      queued_steers: steers
-        .filter((runSteer) => runSteer.status === "queued")
-        .map((runSteer) => ({
-          id: runSteer.id,
-          content: runSteer.content
-        })),
-      previous_attempts: previousAttempts,
-      ...(runtimeHealthSnapshot
-        ? {
-            runtime_health_snapshot: {
-              path: relative(
-                this.workspacePaths.rootDir,
-                resolveRunPaths(this.workspacePaths, runId).runtimeHealthSnapshotFile
-              ),
-              verify_runtime: {
-                status: runtimeHealthSnapshot.verify_runtime.status,
-                summary: runtimeHealthSnapshot.verify_runtime.summary
-              },
-              history_contract_drift: {
-                status: runtimeHealthSnapshot.history_contract_drift.status,
-                summary: runtimeHealthSnapshot.history_contract_drift.summary,
-                drift_count: runtimeHealthSnapshot.history_contract_drift.drift_count
-              },
-              created_at: runtimeHealthSnapshot.created_at
-            }
-          }
-        : {})
-    };
-
+    let current = await getCurrentDecision(this.workspacePaths, runId);
     let heartbeatTimer: NodeJS.Timeout | null = null;
     let heartbeatStarted = false;
     let runtimeRestartRequest: RuntimeRestartRequest | null = null;
+    const startLease = await this.tryAcquireRunDispatchLease(
+      runId,
+      `start_attempt:${attemptId}`
+    );
+    if (!startLease) {
+      return;
+    }
+    let startLeaseReleased = false;
 
     try {
+      run = await getRun(this.workspacePaths, runId);
+      attempt = await getAttempt(this.workspacePaths, runId, attemptId);
+      current = await getCurrentDecision(this.workspacePaths, runId);
+      if (!["created", "queued"].includes(attempt.status)) {
+        return;
+      }
+
+      attempt = await this.ensureAttemptUsesRunWorkspace(run, attempt);
+      const attemptContract = await getAttemptContract(
+        this.workspacePaths,
+        runId,
+        attemptId
+      );
+      const steers = await listRunSteers(this.workspacePaths, runId);
+      const attempts = await listAttempts(this.workspacePaths, runId);
+      const previousAttempts = (
+        await Promise.all(
+          attempts
+            .filter((item) => item.id !== attempt.id)
+            .slice(-3)
+            .map(async (item) => ({
+              attempt: item,
+              result: await getAttemptResult(this.workspacePaths, runId, item.id)
+            }))
+        )
+      ).map(({ attempt: previousAttempt, result }) => ({
+        id: previousAttempt.id,
+        type: previousAttempt.attempt_type,
+        status: previousAttempt.status,
+        summary: result?.summary ?? ""
+      }));
+      const runtimeHealthSnapshot = await getRunRuntimeHealthSnapshot(
+        this.workspacePaths,
+        runId
+      );
+      const context = {
+        contract: {
+          title: run.title,
+          description: run.description,
+          success_criteria: run.success_criteria,
+          constraints: run.constraints,
+          workspace_root: attempt.workspace_root,
+          ...(run.managed_workspace_root
+            ? {
+                source_workspace_root: run.workspace_root
+              }
+            : {})
+        },
+        current_decision: current,
+        queued_steers: steers
+          .filter((runSteer) => runSteer.status === "queued")
+          .map((runSteer) => ({
+            id: runSteer.id,
+            content: runSteer.content
+          })),
+        previous_attempts: previousAttempts,
+        ...(runtimeHealthSnapshot
+          ? {
+              runtime_health_snapshot: {
+                path: relative(
+                  this.workspacePaths.rootDir,
+                  resolveRunPaths(this.workspacePaths, runId).runtimeHealthSnapshotFile
+                ),
+                verify_runtime: {
+                  status: runtimeHealthSnapshot.verify_runtime.status,
+                  summary: runtimeHealthSnapshot.verify_runtime.summary
+                },
+                history_contract_drift: {
+                  status: runtimeHealthSnapshot.history_contract_drift.status,
+                  summary: runtimeHealthSnapshot.history_contract_drift.summary,
+                  drift_count: runtimeHealthSnapshot.history_contract_drift.drift_count
+                },
+                created_at: runtimeHealthSnapshot.created_at
+              }
+            }
+          : {})
+      };
+
       await this.assertAttemptWorkspaceScope(run, attempt);
       attempt = updateAttempt(attempt, {
         status: "running",
@@ -1026,6 +1118,8 @@ export class Orchestrator {
           }
         })
       );
+      await startLease.release();
+      startLeaseReleased = true;
 
       const dispatchableAttemptContract = await this.requireDispatchableAttemptContract(
         attempt,
@@ -1216,6 +1310,10 @@ export class Orchestrator {
         error: null
       });
     } catch (error) {
+      if (!startLeaseReleased) {
+        await startLease.release();
+        startLeaseReleased = true;
+      }
       if (error instanceof RunWorkspaceScopeError) {
         await this.appendRunWorkspaceScopeBlockedEntry(run.id, attempt.id, error);
       }
@@ -1260,6 +1358,9 @@ export class Orchestrator {
         error: error instanceof Error ? error.message : String(error)
       });
     } finally {
+      if (!startLeaseReleased) {
+        await startLease.release();
+      }
       if (heartbeatTimer) {
         clearInterval(heartbeatTimer);
       }
@@ -2435,81 +2536,91 @@ export class Orchestrator {
 
   private async maybeAutoResumeWaitingRun(
     runId: string,
-    current: CurrentDecision,
-    attempts: Attempt[]
+    _current: CurrentDecision,
+    _attempts: Attempt[]
   ): Promise<void> {
-    if (current.run_status !== "waiting_steer" || this.waitingHumanAutoResumeMs <= 0) {
-      return;
-    }
+    await this.withRunDispatchLease(runId, "auto_resume_waiting_run", async () => {
+      const [current, attempts] = await Promise.all([
+        getCurrentDecision(this.workspacePaths, runId),
+        listAttempts(this.workspacePaths, runId)
+      ]);
+      if (
+        !current ||
+        current.run_status !== "waiting_steer" ||
+        this.waitingHumanAutoResumeMs <= 0
+      ) {
+        return;
+      }
 
-    const journal = await listRunJournal(this.workspacePaths, runId);
-    const autoResumePolicy = await this.getAutomaticResumePolicy({
-      current,
-      attempts,
-      journal
+      const journal = await listRunJournal(this.workspacePaths, runId);
+      const autoResumePolicy = await this.getAutomaticResumePolicy({
+        current,
+        attempts,
+        journal
+      });
+      const updatedAtMs = Date.parse(current.updated_at);
+      if (Number.isNaN(updatedAtMs) || Date.now() - updatedAtMs < autoResumePolicy.delayMs) {
+        return;
+      }
+
+      const automaticResumeCount = this.countAutomaticResumeCyclesSinceLastSteer(
+        journal,
+        autoResumePolicy.reasonPrefix
+      );
+
+      if (automaticResumeCount >= autoResumePolicy.maxCycles) {
+        await this.persistAutomaticResumeExhausted(runId, current, journal, automaticResumeCount);
+        return;
+      }
+
+      const blocker = await this.detectAutomaticResumeBlocker({
+        current,
+        attempts,
+        journal
+      });
+
+      if (blocker) {
+        await this.persistAutomaticResumeBlocked(runId, current, journal, blocker);
+        return;
+      }
+
+      const plan = await this.buildAutomaticResumePlan({
+        current,
+        attempts,
+        journal
+      });
+
+      if (!plan) {
+        await this.persistAutomaticResumeBlocked(runId, current, journal);
+        return;
+      }
+
+      await saveCurrentDecision(
+        this.workspacePaths,
+        updateCurrentDecision(current, {
+          run_status: "running",
+          recommended_next_action: plan.next_action,
+          recommended_attempt_type: plan.attempt_type,
+          summary: plan.summary,
+          blocking_reason: plan.blocking_reason,
+          waiting_for_human: false
+        })
+      );
+      await appendRunJournal(
+        this.workspacePaths,
+        createRunJournalEntry({
+          run_id: runId,
+          attempt_id: current.latest_attempt_id,
+          type: "run.auto_resume.scheduled",
+          payload: {
+            cycle: automaticResumeCount + 1,
+            next_action: plan.next_action,
+            attempt_type: plan.attempt_type,
+            reason: plan.reason
+          }
+        })
+      );
     });
-    const updatedAtMs = Date.parse(current.updated_at);
-    if (Number.isNaN(updatedAtMs) || Date.now() - updatedAtMs < autoResumePolicy.delayMs) {
-      return;
-    }
-
-    const automaticResumeCount = this.countAutomaticResumeCyclesSinceLastSteer(
-      journal,
-      autoResumePolicy.reasonPrefix
-    );
-
-    if (automaticResumeCount >= autoResumePolicy.maxCycles) {
-      await this.persistAutomaticResumeExhausted(runId, current, journal, automaticResumeCount);
-      return;
-    }
-
-    const blocker = await this.detectAutomaticResumeBlocker({
-      current,
-      attempts,
-      journal
-    });
-
-    if (blocker) {
-      await this.persistAutomaticResumeBlocked(runId, current, journal, blocker);
-      return;
-    }
-
-    const plan = await this.buildAutomaticResumePlan({
-      current,
-      attempts,
-      journal
-    });
-
-    if (!plan) {
-      await this.persistAutomaticResumeBlocked(runId, current, journal);
-      return;
-    }
-
-    await saveCurrentDecision(
-      this.workspacePaths,
-      updateCurrentDecision(current, {
-        run_status: "running",
-        recommended_next_action: plan.next_action,
-        recommended_attempt_type: plan.attempt_type,
-        summary: plan.summary,
-        blocking_reason: plan.blocking_reason,
-        waiting_for_human: false
-      })
-    );
-    await appendRunJournal(
-      this.workspacePaths,
-      createRunJournalEntry({
-        run_id: runId,
-        attempt_id: current.latest_attempt_id,
-        type: "run.auto_resume.scheduled",
-        payload: {
-          cycle: automaticResumeCount + 1,
-          next_action: plan.next_action,
-          attempt_type: plan.attempt_type,
-          reason: plan.reason
-        }
-      })
-    );
   }
 
   private async detectAutomaticResumeBlocker(input: {
@@ -3311,6 +3422,193 @@ export class Orchestrator {
         }
       })
     );
+  }
+
+  private async withRunDispatchLease(
+    runId: string,
+    purpose: string,
+    callback: () => Promise<void>
+  ): Promise<void> {
+    const lease = await this.tryAcquireRunDispatchLease(runId, purpose);
+    if (!lease) {
+      return;
+    }
+
+    try {
+      await callback();
+    } finally {
+      await lease.release();
+    }
+  }
+
+  private async tryAcquireRunDispatchLease(
+    runId: string,
+    purpose: string
+  ): Promise<RunDispatchLease | null> {
+    const leaseFile = this.getRunDispatchLeaseFile(runId);
+    const leaseRecord: RunDispatchLeaseRecord = {
+      version: 1,
+      run_id: runId,
+      owner_id: this.instanceId,
+      owner_pid: process.pid,
+      purpose,
+      acquired_at: new Date().toISOString()
+    };
+
+    while (true) {
+      try {
+        const handle = await open(leaseFile, "wx");
+        try {
+          await handle.writeFile(`${JSON.stringify(leaseRecord, null, 2)}\n`, "utf8");
+        } finally {
+          await handle.close();
+        }
+        return {
+          release: async () => {
+            await this.releaseRunDispatchLease(runId, leaseRecord);
+          }
+        };
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
+          throw error;
+        }
+
+        const existingLease = await this.inspectRunDispatchLease(runId);
+        if (existingLease.status === "held") {
+          return null;
+        }
+
+        await unlink(leaseFile).catch((unlinkError) => {
+          if ((unlinkError as NodeJS.ErrnoException).code !== "ENOENT") {
+            throw unlinkError;
+          }
+        });
+      }
+    }
+  }
+
+  private async inspectRunDispatchLease(runId: string): Promise<
+    | {
+        status: "held";
+      }
+    | {
+        status: "stale_dead_owner";
+      }
+  > {
+    const leaseFile = this.getRunDispatchLeaseFile(runId);
+    const leaseStats = await stat(leaseFile);
+    const ageMs = Date.now() - leaseStats.mtimeMs;
+    if (ageMs <= this.runDispatchLeaseStaleMs) {
+      return {
+        status: "held"
+      };
+    }
+
+    const raw = await readFile(leaseFile, "utf8");
+    let parsed: Partial<RunDispatchLeaseRecord>;
+    try {
+      parsed = JSON.parse(raw) as Partial<RunDispatchLeaseRecord>;
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      throw new RunDispatchLeaseError(
+        "invalid_lease_payload",
+        `Run ${runId} has an unreadable dispatch lease at ${leaseFile}: ${reason}`
+      );
+    }
+
+    if (
+      parsed.version !== 1 ||
+      parsed.run_id !== runId ||
+      typeof parsed.owner_id !== "string" ||
+      parsed.owner_id.length === 0 ||
+      typeof parsed.owner_pid !== "number" ||
+      !Number.isInteger(parsed.owner_pid) ||
+      parsed.owner_pid <= 0 ||
+      typeof parsed.purpose !== "string" ||
+      parsed.purpose.length === 0 ||
+      typeof parsed.acquired_at !== "string" ||
+      parsed.acquired_at.length === 0
+    ) {
+      throw new RunDispatchLeaseError(
+        "invalid_lease_payload",
+        `Run ${runId} has an invalid dispatch lease payload at ${leaseFile}.`
+      );
+    }
+
+    if (this.isProcessAlive(parsed.owner_pid)) {
+      throw new RunDispatchLeaseError(
+        "stale_live_owner",
+        `Run ${runId} dispatch lease is still owned by live pid ${parsed.owner_pid} after ${ageMs}ms.`
+      );
+    }
+
+    return {
+      status: "stale_dead_owner"
+    };
+  }
+
+  private async releaseRunDispatchLease(
+    runId: string,
+    expectedLease: RunDispatchLeaseRecord
+  ): Promise<void> {
+    const leaseFile = this.getRunDispatchLeaseFile(runId);
+    let raw: string;
+    try {
+      raw = await readFile(leaseFile, "utf8");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+        return;
+      }
+      throw error;
+    }
+
+    let parsed: Partial<RunDispatchLeaseRecord>;
+    try {
+      parsed = JSON.parse(raw) as Partial<RunDispatchLeaseRecord>;
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      throw new RunDispatchLeaseError(
+        "invalid_lease_payload",
+        `Run ${runId} dispatch lease became unreadable before release: ${reason}`
+      );
+    }
+
+    if (
+      parsed.run_id !== expectedLease.run_id ||
+      parsed.owner_id !== expectedLease.owner_id ||
+      parsed.owner_pid !== expectedLease.owner_pid ||
+      parsed.acquired_at !== expectedLease.acquired_at
+    ) {
+      throw new RunDispatchLeaseError(
+        "lease_owner_mismatch",
+        `Run ${runId} dispatch lease owner changed before release.`
+      );
+    }
+
+    await unlink(leaseFile);
+  }
+
+  private getRunDispatchLeaseFile(runId: string): string {
+    return join(
+      resolveRunPaths(this.workspacePaths, runId).artifactsDir,
+      RUN_DISPATCH_LEASE_FILE_NAME
+    );
+  }
+
+  private isProcessAlive(pid: number): boolean {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === "ESRCH") {
+        return false;
+      }
+      if (code === "EPERM") {
+        return true;
+      }
+      throw error;
+    }
   }
 
   private hasActiveAttemptForRun(runId: string): boolean {
