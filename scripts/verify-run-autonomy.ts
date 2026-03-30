@@ -710,31 +710,35 @@ async function verifyRepeatedAutoResumeExhausts(): Promise<void> {
   const autoResumeScheduled = journal.filter(
     (entry) => entry.type === "run.auto_resume.scheduled"
   ).length;
-  const autoResumeExhausted = journal.filter(
-    (entry) => entry.type === "run.auto_resume.exhausted"
+  const autoResumeBlocked = journal.filter(
+    (entry) => entry.type === "run.auto_resume.blocked"
   ).length;
 
   assert.ok(current, "current decision must exist");
   assert.equal(current.waiting_for_human, true, "run should eventually stop for human steer");
   assert.equal(current.run_status, "waiting_steer");
   assert.equal(current.recommended_next_action, "wait_for_human");
-  assert.equal(autoResumeScheduled, 2, "expected two automatic resume rounds before retreat");
-  assert.equal(autoResumeExhausted, 1, "expected a single exhaustion marker");
+  assert.equal(autoResumeScheduled, 1, "governance should allow only one skeptical auto-resume round");
+  assert.equal(autoResumeBlocked, 1, "governance should hard-block the repeated blocker");
   assert.ok(
-    current.blocking_reason?.includes("自动续跑已尝试 2 轮"),
-    "current decision should explain that the automatic budget was exhausted"
+    current.blocking_reason?.includes("Loop paused after repeated research attempts without fresh progress"),
+    "current decision should explain that governance blocked the repeated blocker"
   );
   assert.ok(
-    !journal.some((entry) => entry.type === "run.auto_resume.retreat"),
-    "the exhaustion path should stop for human steer instead of retreating into more research"
+    journal.some(
+      (entry) =>
+        entry.type === "run.auto_resume.blocked" &&
+        entry.payload.reason === "governance_repeated_blocker"
+    ),
+    "the repeated blocker should be blocked by governance before budget exhaustion"
   );
   assert.deepEqual(
     attempts.map((attempt) => attempt.attempt_type),
-    ["research", "research", "research", "research"]
+    ["research", "research", "research"]
   );
   assert.ok(
     attempts.every((attempt) => attempt.status === "completed"),
-    "all repeated research attempts should settle before the loop retreats"
+    "all repeated research attempts should settle before governance blocks further retries"
   );
 }
 

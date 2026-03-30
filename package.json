@@ -15,6 +15,7 @@
     "verify:run-stream": "node --import tsx scripts/verify-run-stream.ts",
     "verify:run-loop": "node --import tsx scripts/verify-run-loop.ts",
     "verify:run-autonomy": "node --import tsx scripts/verify-run-autonomy.ts",
+    "verify:governance": "node --import tsx scripts/verify-governance.ts",
     "verify:worker-adapter": "node --import tsx scripts/verify-worker-adapter.ts",
     "verify:self-bootstrap": "node --import tsx scripts/verify-self-bootstrap.ts",
     "bootstrap:self": "node --import tsx scripts/bootstrap-self-run.ts",

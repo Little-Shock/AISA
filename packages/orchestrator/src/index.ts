@@ -7,6 +7,7 @@ import {
   createAttemptContract,
   createCurrentDecision,
   createEvent,
+  createRunGovernanceState,
   createRunJournalEntry,
   createWorkerRun,
   finishWorkerRun,
@@ -17,6 +18,7 @@ import {
   updateBranch,
   updateCurrentDecision,
   updateGoal,
+  updateRunGovernanceState,
   updateRunSteer,
   updateSteer,
   type Attempt,
@@ -36,6 +38,7 @@ import {
   type Goal,
   type ReviewPacketArtifact,
   type Run,
+  type RunGovernanceState,
   type WorkerWriteback
 } from "@autoresearch/domain";
 import { appendEvent } from "@autoresearch/event-log";
@@ -72,6 +75,7 @@ import {
   getGoal,
   getPlanArtifacts,
   getRun,
+  getRunGovernanceState,
   getRunRuntimeHealthSnapshot,
   listAttempts,
   listAttemptReviewOpinions,
@@ -102,6 +106,7 @@ import {
   saveGoal,
   saveReport,
   saveRun,
+  saveRunGovernanceState,
   saveRunReport,
   saveRunSteer,
   saveSteer,
@@ -115,6 +120,12 @@ import {
   maybeCreateVerifiedExecutionCheckpoint,
   type AttemptCheckpointOutcome
 } from "./git-checkpoint.js";
+import {
+  buildGovernanceSignature,
+  buildGovernanceCheckpointContext,
+  deriveRunGovernanceState,
+  validateGovernedAttemptCandidate
+} from "./governance.js";
 import {
   detectLiveRuntimeSourceDrift,
   runAttemptRuntimeVerification,
@@ -876,7 +887,7 @@ export class Orchestrator {
     const latestResult = latestAttempt
       ? await getAttemptResult(this.workspacePaths, run.id, latestAttempt.id)
       : null;
-    const nextExecutionDraft = isExecutionContractDraftReady(
+    let nextExecutionDraft = isExecutionContractDraftReady(
       latestResult?.next_attempt_contract
     )
       ? latestResult.next_attempt_contract
@@ -924,9 +935,9 @@ export class Orchestrator {
       return null;
     }
 
-    const attemptType =
+    let attemptType =
       current.recommended_attempt_type ?? latestAttempt?.attempt_type ?? "research";
-    const objective =
+    let objective =
       queuedSteers.length > 0
         ? this.buildSteeredAttemptObjective(
             run,
@@ -939,10 +950,54 @@ export class Orchestrator {
             ? nextExecutionDraft.objective
             : attemptType === "execution" && latestResult?.recommended_next_steps[0]
               ? latestResult.recommended_next_steps[0]
-              : this.buildPlannedAttemptObjective(run, current, attemptType, latestResult);
+          : this.buildPlannedAttemptObjective(run, current, attemptType, latestResult);
 
     if (!objective) {
       return null;
+    }
+
+    const governance = await getRunGovernanceState(this.workspacePaths, runId);
+    const candidateDecision = await validateGovernedAttemptCandidate({
+      governance,
+      candidate: {
+        attemptType,
+        objective,
+        nextAction: current.recommended_next_action,
+        nextExecutionDraft
+      },
+      rootDir: this.workspacePaths.rootDir
+    });
+
+    if (candidateDecision.status === "blocked") {
+      await this.persistGovernanceDispatchBlocked({
+        runId,
+        current,
+        governance,
+        latestAttempt,
+        objective,
+        decision: candidateDecision
+      });
+      return null;
+    }
+
+    if (candidateDecision.status === "redirect") {
+      attemptType = candidateDecision.candidate.attemptType;
+      objective = candidateDecision.candidate.objective;
+      nextExecutionDraft = candidateDecision.candidate.nextExecutionDraft;
+      await appendRunJournal(
+        this.workspacePaths,
+        createRunJournalEntry({
+          run_id: runId,
+          attempt_id: latestAttempt?.id ?? null,
+          type: "run.governance.redirected",
+          payload: {
+            next_action: candidateDecision.candidate.nextAction,
+            attempt_type: candidateDecision.candidate.attemptType,
+            objective: candidateDecision.candidate.objective,
+            message: candidateDecision.message
+          }
+        })
+      );
     }
 
     const attempt = createAttempt({
@@ -962,7 +1017,7 @@ export class Orchestrator {
         run,
         attempt,
         nextExecutionDraft,
-        current.recommended_next_action,
+        candidateDecision.candidate.nextAction,
         latestAttempt
       )
     };
@@ -1225,12 +1280,19 @@ export class Orchestrator {
         evaluation: synthesis.evaluation,
         result: execution.writeback
       });
+      const provisionalGovernance = await this.buildSettledGovernanceState({
+        runId,
+        attempt,
+        currentSnapshot: nextCurrent,
+        previousGovernance: await getRunGovernanceState(this.workspacePaths, runId)
+      });
       const checkpointOutcome = await maybeCreateVerifiedExecutionCheckpoint({
         run,
         attempt,
         evaluation: synthesis.evaluation,
         attemptPaths,
-        preflight: checkpointPreflight
+        preflight: checkpointPreflight,
+        governanceContextLines: buildGovernanceCheckpointContext(provisionalGovernance)
       });
       nextCurrent = this.applyCheckpointOutcomeToCurrentDecision(
         nextCurrent,
@@ -1253,6 +1315,13 @@ export class Orchestrator {
         attempt,
         runtimeSourceDriftFiles
       );
+      const governance = await this.buildSettledGovernanceState({
+        runId,
+        attempt,
+        currentSnapshot: nextCurrent,
+        previousGovernance: await getRunGovernanceState(this.workspacePaths, runId)
+      });
+      nextCurrent = this.applyGovernanceToCurrentDecision(nextCurrent, governance);
       await saveRunReport(
         this.workspacePaths,
         runId,
@@ -1262,7 +1331,8 @@ export class Orchestrator {
           execution.writeback,
           synthesis.evaluation,
           runtimeVerification,
-          nextCurrent
+          nextCurrent,
+          governance
         )
       );
 
@@ -1296,10 +1366,12 @@ export class Orchestrator {
         runtimeSourceDriftFiles,
         runtimeVerification.artifact_path
       );
+      await this.appendGovernanceJournal(runId, attempt.id, governance);
       await this.saveSettledAttemptState({
         runId,
         attempt,
-        currentSnapshot: nextCurrent
+        currentSnapshot: nextCurrent,
+        governanceSnapshot: governance
       });
       await this.transitionAttemptRuntimeState({
         runId,
@@ -1344,10 +1416,18 @@ export class Orchestrator {
           }
         })
       );
+      const governance = await this.buildSettledGovernanceState({
+        runId,
+        attempt,
+        currentSnapshot: failedCurrentDecision,
+        previousGovernance: await getRunGovernanceState(this.workspacePaths, runId)
+      });
+      await this.appendGovernanceJournal(runId, attempt.id, governance);
       await this.saveSettledAttemptState({
         runId,
         attempt,
-        currentSnapshot: failedCurrentDecision
+        currentSnapshot: failedCurrentDecision,
+        governanceSnapshot: governance
       });
       await this.transitionAttemptRuntimeState({
         runId,
@@ -1382,6 +1462,7 @@ export class Orchestrator {
     runId: string;
     attempt: Attempt;
     currentSnapshot: CurrentDecision | null;
+    governanceSnapshot?: RunGovernanceState | null;
   }): Promise<void> {
     const [
       attemptContract,
@@ -1392,7 +1473,8 @@ export class Orchestrator {
       reviewInputPacket,
       reviewOpinions,
       runtimeVerification,
-      journal
+      journal,
+      previousGovernance
     ] = await Promise.all([
       getAttemptContract(this.workspacePaths, input.runId, input.attempt.id),
       getAttemptContext(this.workspacePaths, input.runId, input.attempt.id),
@@ -1402,7 +1484,8 @@ export class Orchestrator {
       getAttemptReviewInputPacket(this.workspacePaths, input.runId, input.attempt.id),
       listAttemptReviewOpinions(this.workspacePaths, input.runId, input.attempt.id),
       getAttemptRuntimeVerification(this.workspacePaths, input.runId, input.attempt.id),
-      listRunJournal(this.workspacePaths, input.runId)
+      listRunJournal(this.workspacePaths, input.runId),
+      getRunGovernanceState(this.workspacePaths, input.runId)
     ]);
     const effectiveReviewInputPacket =
       reviewInputPacket ??
@@ -1434,6 +1517,17 @@ export class Orchestrator {
     if (input.currentSnapshot) {
       await saveCurrentDecision(this.workspacePaths, input.currentSnapshot);
     }
+    const governanceSnapshot =
+      input.governanceSnapshot ??
+      deriveRunGovernanceState({
+        previous: previousGovernance,
+        attempt: input.attempt,
+        currentSnapshot: input.currentSnapshot,
+        evaluation,
+        result,
+        runtimeVerification
+      });
+    await saveRunGovernanceState(this.workspacePaths, governanceSnapshot);
   }
 
   private async transitionAttemptRuntimeState(input: {
@@ -1581,6 +1675,132 @@ export class Orchestrator {
         `尝试 ${input.reviewInputPacket.attempt_id} 的 reviewer 在 opinion 落盘前失败：${reason}`
       );
     }
+  }
+
+  private async buildSettledGovernanceState(input: {
+    runId: string;
+    attempt: Attempt;
+    currentSnapshot: CurrentDecision | null;
+    previousGovernance?: RunGovernanceState | null;
+  }): Promise<RunGovernanceState> {
+    const [result, evaluation, runtimeVerification, previousGovernance] = await Promise.all([
+      getAttemptResult(this.workspacePaths, input.runId, input.attempt.id),
+      getAttemptEvaluation(this.workspacePaths, input.runId, input.attempt.id),
+      getAttemptRuntimeVerification(this.workspacePaths, input.runId, input.attempt.id),
+      input.previousGovernance === undefined
+        ? getRunGovernanceState(this.workspacePaths, input.runId)
+        : Promise.resolve(input.previousGovernance)
+    ]);
+
+    return deriveRunGovernanceState({
+      previous: previousGovernance,
+      attempt: input.attempt,
+      currentSnapshot: input.currentSnapshot,
+      evaluation,
+      result,
+      runtimeVerification
+    });
+  }
+
+  private applyGovernanceToCurrentDecision(
+    current: CurrentDecision,
+    governance: RunGovernanceState
+  ): CurrentDecision {
+    if (governance.status !== "blocked" || governance.blocker_repeat_count < 2) {
+      return current;
+    }
+
+    return updateCurrentDecision(current, {
+      run_status: "waiting_steer",
+      recommended_next_action: "wait_for_human",
+      summary: governance.context_summary.headline,
+      blocking_reason:
+        governance.context_summary.blocker_summary ?? governance.context_summary.headline,
+      waiting_for_human: true
+    });
+  }
+
+  private async appendGovernanceJournal(
+    runId: string,
+    attemptId: string | null,
+    governance: RunGovernanceState
+  ): Promise<void> {
+    await appendRunJournal(
+      this.workspacePaths,
+      createRunJournalEntry({
+        run_id: runId,
+        attempt_id: attemptId,
+        type: "run.governance.updated",
+        payload: {
+          status: governance.status,
+          blocker_repeat_count: governance.blocker_repeat_count,
+          active_problem_signature: governance.active_problem_signature,
+          mainline_attempt_type: governance.mainline_attempt_type,
+          mainline_summary: governance.mainline_summary,
+          excluded_plan_count: governance.excluded_plans.length
+        }
+      })
+    );
+  }
+
+  private async persistGovernanceDispatchBlocked(input: {
+    runId: string;
+    current: CurrentDecision;
+    governance: RunGovernanceState | null;
+    latestAttempt: Attempt | null;
+    objective: string;
+    decision: Extract<
+      Awaited<ReturnType<typeof validateGovernedAttemptCandidate>>,
+      { status: "blocked" }
+    >;
+  }): Promise<void> {
+    const baseGovernance =
+      input.governance ??
+      createRunGovernanceState({
+        run_id: input.runId
+      });
+    const blockedGovernance = updateRunGovernanceState(baseGovernance, {
+      status: "blocked",
+      active_problem_summary: input.decision.message,
+      active_problem_signature:
+        buildGovernanceSignature(input.decision.message) ?? baseGovernance.active_problem_signature,
+      excluded_plans: input.decision.excludedPlan
+        ? [input.decision.excludedPlan, ...baseGovernance.excluded_plans]
+        : baseGovernance.excluded_plans,
+      next_allowed_actions: ["wait_for_human", "apply_steer"],
+      context_summary: {
+        headline: "治理层拦下了下一轮派发。",
+        progress_summary: null,
+        blocker_summary: input.decision.message,
+        avoid_summary: [`不要再按这个目标继续：${input.objective}`],
+        generated_at: new Date().toISOString()
+      }
+    });
+    const blockedCurrent = updateCurrentDecision(input.current, {
+      run_status: "waiting_steer",
+      latest_attempt_id: input.latestAttempt?.id ?? input.current.latest_attempt_id,
+      recommended_next_action: "wait_for_human",
+      summary: input.decision.message,
+      blocking_reason: input.decision.message,
+      waiting_for_human: true
+    });
+
+    await saveRunGovernanceState(this.workspacePaths, blockedGovernance);
+    await saveCurrentDecision(this.workspacePaths, blockedCurrent);
+    await appendRunJournal(
+      this.workspacePaths,
+      createRunJournalEntry({
+        run_id: input.runId,
+        attempt_id: input.latestAttempt?.id ?? null,
+        type: "run.governance.dispatch_blocked",
+        payload: {
+          reason: input.decision.reason,
+          message: input.decision.message,
+          objective: input.objective,
+          invalid_refs: input.decision.invalidRefs
+        }
+      })
+    );
   }
 
   private async runAttemptEvaluationSynthesis(input: {
@@ -2246,7 +2466,8 @@ export class Orchestrator {
     result: WorkerWriteback,
     evaluation: AttemptEvaluation,
     runtimeVerification: AttemptRuntimeVerificationOutcome,
-    current: CurrentDecision
+    current: CurrentDecision,
+    governance: RunGovernanceState | null
   ): string {
     return [
       `# 运行报告：${run.title}`,
@@ -2274,7 +2495,18 @@ export class Orchestrator {
       "",
       "## 下一动作",
       "",
-      current.recommended_next_action ?? "暂无"
+      current.recommended_next_action ?? "暂无",
+      "",
+      "## 治理结论",
+      "",
+      governance?.context_summary.headline ?? "暂无治理结论",
+      governance?.mainline_summary ? `主线：${governance.mainline_summary}` : "",
+      governance?.context_summary.blocker_summary
+        ? `阻塞：${governance.context_summary.blocker_summary}`
+        : "",
+      governance?.context_summary.avoid_summary[0]
+        ? `避免：${governance.context_summary.avoid_summary[0]}`
+        : ""
     ].join("\n");
   }
 
@@ -2574,6 +2806,7 @@ export class Orchestrator {
       }
 
       const blocker = await this.detectAutomaticResumeBlocker({
+        runId,
         current,
         attempts,
         journal
@@ -2585,6 +2818,7 @@ export class Orchestrator {
       }
 
       const plan = await this.buildAutomaticResumePlan({
+        runId,
         current,
         attempts,
         journal
@@ -2624,10 +2858,20 @@ export class Orchestrator {
   }
 
   private async detectAutomaticResumeBlocker(input: {
+    runId: string;
     current: CurrentDecision;
     attempts: Attempt[];
     journal: Awaited<ReturnType<typeof listRunJournal>>;
   }): Promise<{ reason: string; message: string } | null> {
+    const governance = await getRunGovernanceState(this.workspacePaths, input.runId);
+    if (governance?.status === "blocked" && governance.blocker_repeat_count >= 2) {
+      return {
+        reason: "governance_repeated_blocker",
+        message:
+          governance.context_summary.blocker_summary ?? governance.context_summary.headline
+      };
+    }
+
     const latestAttempt = this.getLatestAttempt(input.current, input.attempts);
     const workspaceScopeMessage = this.getRunWorkspaceScopeBlockedMessage(
       input.journal,
@@ -2684,6 +2928,7 @@ export class Orchestrator {
   }
 
   private async buildAutomaticResumePlan(input: {
+    runId: string;
     current: CurrentDecision;
     attempts: Attempt[];
     journal: Awaited<ReturnType<typeof listRunJournal>>;
@@ -2698,6 +2943,7 @@ export class Orchestrator {
     | null
   > {
     const latestAttempt = this.getLatestAttempt(input.current, input.attempts);
+    const governance = await getRunGovernanceState(this.workspacePaths, input.runId);
     if (!latestAttempt) {
       return {
         next_action: "start_first_attempt",
@@ -2828,6 +3074,23 @@ export class Orchestrator {
     }
 
     if (latestAttempt.status === "completed") {
+      if (
+        governance &&
+        governance.status !== "blocked" &&
+        governance.status !== "resolved" &&
+        governance.mainline_attempt_type === "execution" &&
+        governance.mainline_summary
+      ) {
+        return {
+          next_action: latestAttempt.attempt_type === "research" ? "start_execution" : "continue_execution",
+          attempt_type: "execution",
+          summary: "人工窗口超时，治理层要求沿着已经验证的 execution 主线继续。",
+          blocking_reason:
+            governance.context_summary.blocker_summary ?? governance.active_problem_summary,
+          reason: "governance_preserves_execution_mainline"
+        };
+      }
+
       const nextAttemptType =
         input.current.recommended_attempt_type ?? latestAttempt.attempt_type;
       if (nextAttemptType === "execution") {

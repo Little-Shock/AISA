@@ -51,6 +51,17 @@ type VerifyDriveRunReport = {
   };
 };
 
+type GovernanceReport = {
+  suite: string;
+  passed: number;
+  failed: number;
+  results: Array<{
+    id: string;
+    status: "pass" | "fail";
+    error?: string;
+  }>;
+};
+
 type ScriptResult = {
   exitCode: number | null;
   stdout: string;
@@ -166,6 +177,17 @@ async function assertRunAutonomyReplay(): Promise<RunAutonomyReport> {
   return JSON.parse(result.stdout) as RunAutonomyReport;
 }
 
+async function assertGovernanceReplay(): Promise<GovernanceReport> {
+  const result = await runTsxScript("scripts/verify-governance.ts");
+  assert.equal(
+    result.exitCode,
+    0,
+    formatScriptFailure("scripts/verify-governance.ts", result)
+  );
+
+  return JSON.parse(result.stdout) as GovernanceReport;
+}
+
 async function assertSelfBootstrapReplay(): Promise<void> {
   const result = await runTsxScript("scripts/verify-self-bootstrap.ts", {
     [SKIP_SELF_BOOTSTRAP_ENV]: "1"
@@ -218,6 +240,7 @@ async function main(): Promise<void> {
   await assertRunStreamReplay();
   const driveRun = await assertDriveRunReplay();
   const runAutonomy = await assertRunAutonomyReplay();
+  const governance = await assertGovernanceReplay();
   const skipSelfBootstrapReplay = process.env[SKIP_SELF_BOOTSTRAP_ENV] === "1";
 
   if (!skipSelfBootstrapReplay) {
@@ -253,6 +276,11 @@ async function main(): Promise<void> {
           status: "passed",
           passed: runAutonomy.passed,
           failed: runAutonomy.failed
+        },
+        governance: {
+          status: "passed",
+          passed: governance.passed,
+          failed: governance.failed
         },
         self_bootstrap: skipSelfBootstrapReplay
           ? {

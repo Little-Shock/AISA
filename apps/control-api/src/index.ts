@@ -47,6 +47,7 @@ import {
   getPlanArtifacts,
   getReport,
   getRun,
+  getRunGovernanceState,
   getRunReport,
   getWriteback,
   listAttemptRuntimeEvents,
@@ -248,9 +249,10 @@ export async function buildServer(
   };
 
   const buildRunDetailPayload = async (runId: string) => {
-    const [run, current, attempts, steers, journal, report] = await Promise.all([
+    const [run, current, governance, attempts, steers, journal, report] = await Promise.all([
       getRun(workspacePaths, runId),
       getCurrentDecision(workspacePaths, runId),
+      getRunGovernanceState(workspacePaths, runId),
       listAttempts(workspacePaths, runId),
       listRunSteers(workspacePaths, runId),
       listRunJournal(workspacePaths, runId),
@@ -282,6 +284,7 @@ export async function buildServer(
     return {
       run,
       current,
+      governance,
       run_health: runHealth,
       attempts,
       attempt_details: attemptDetails,
@@ -292,8 +295,9 @@ export async function buildServer(
   };
 
   const buildRunSummaryItem = async (run: Awaited<ReturnType<typeof listRuns>>[number]) => {
-    const [current, attempts] = await Promise.all([
+    const [current, governance, attempts] = await Promise.all([
       getCurrentDecision(workspacePaths, run.id),
+      getRunGovernanceState(workspacePaths, run.id),
       listAttempts(workspacePaths, run.id)
     ]);
     const latestAttempt =
@@ -315,6 +319,7 @@ export async function buildServer(
     return {
       run,
       current,
+      governance,
       run_health: assessRunHealth({
         current,
         latestAttempt,

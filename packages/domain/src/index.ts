@@ -181,6 +181,49 @@ export const CurrentDecisionSchema = z.object({
   updated_at: z.string().datetime()
 });
 
+export const RunGovernanceStatusSchema = z.enum([
+  "active",
+  "blocked",
+  "ready_to_commit",
+  "resolved"
+]);
+
+export const RunGovernanceExcludedPlanSchema = z.object({
+  plan_signature: z.string().min(1),
+  objective: z.string().min(1),
+  reason: z.string().min(1),
+  source_attempt_id: z.string().nullable().default(null),
+  source_attempt_status: AttemptStatusSchema.nullable().default(null),
+  evidence_refs: z.array(z.string().min(1)).default([]),
+  excluded_at: z.string().datetime()
+});
+
+export const RunGovernanceContextSummarySchema = z.object({
+  headline: z.string().min(1),
+  progress_summary: z.string().nullable().default(null),
+  blocker_summary: z.string().nullable().default(null),
+  avoid_summary: z.array(z.string().min(1)).default([]),
+  generated_at: z.string().datetime()
+});
+
+export const RunGovernanceStateSchema = z.object({
+  run_id: z.string(),
+  status: RunGovernanceStatusSchema,
+  active_problem_signature: z.string().nullable().default(null),
+  active_problem_summary: z.string().nullable().default(null),
+  blocker_repeat_count: z.number().int().nonnegative().default(0),
+  mainline_signature: z.string().nullable().default(null),
+  mainline_summary: z.string().nullable().default(null),
+  mainline_attempt_type: AttemptTypeSchema.nullable().default(null),
+  mainline_attempt_id: z.string().nullable().default(null),
+  excluded_plans: z.array(RunGovernanceExcludedPlanSchema).default([]),
+  next_allowed_actions: z.array(z.string().min(1)).default([]),
+  last_meaningful_progress_at: z.string().datetime().nullable().default(null),
+  last_meaningful_progress_attempt_id: z.string().nullable().default(null),
+  context_summary: RunGovernanceContextSummarySchema,
+  updated_at: z.string().datetime()
+});
+
 export const AttemptSynthesizerIdentitySchema = z.object({
   synthesizer_id: z.string().min(1),
   role: z.string().min(1),
@@ -618,6 +661,10 @@ export type Branch = z.infer<typeof BranchSchema>;
 export type WorkerRun = z.infer<typeof WorkerRunSchema>;
 export type Attempt = z.infer<typeof AttemptSchema>;
 export type CurrentDecision = z.infer<typeof CurrentDecisionSchema>;
+export type RunGovernanceStatus = z.infer<typeof RunGovernanceStatusSchema>;
+export type RunGovernanceExcludedPlan = z.infer<typeof RunGovernanceExcludedPlanSchema>;
+export type RunGovernanceContextSummary = z.infer<typeof RunGovernanceContextSummarySchema>;
+export type RunGovernanceState = z.infer<typeof RunGovernanceStateSchema>;
 export type AttemptEvaluation = z.infer<typeof AttemptEvaluationSchema>;
 export type RunSteer = z.infer<typeof RunSteerSchema>;
 export type RunJournalEntry = z.infer<typeof RunJournalEntrySchema>;
@@ -931,6 +978,49 @@ export function createCurrentDecision(input: {
   });
 }
 
+export function createRunGovernanceState(input: {
+  run_id: string;
+  status?: RunGovernanceStatus;
+  active_problem_signature?: string | null;
+  active_problem_summary?: string | null;
+  blocker_repeat_count?: number;
+  mainline_signature?: string | null;
+  mainline_summary?: string | null;
+  mainline_attempt_type?: AttemptType | null;
+  mainline_attempt_id?: string | null;
+  excluded_plans?: RunGovernanceExcludedPlan[];
+  next_allowed_actions?: string[];
+  last_meaningful_progress_at?: string | null;
+  last_meaningful_progress_attempt_id?: string | null;
+  context_summary?: Partial<RunGovernanceContextSummary>;
+}): RunGovernanceState {
+  const now = new Date().toISOString();
+
+  return RunGovernanceStateSchema.parse({
+    run_id: input.run_id,
+    status: input.status ?? "active",
+    active_problem_signature: input.active_problem_signature ?? null,
+    active_problem_summary: input.active_problem_summary ?? null,
+    blocker_repeat_count: input.blocker_repeat_count ?? 0,
+    mainline_signature: input.mainline_signature ?? null,
+    mainline_summary: input.mainline_summary ?? null,
+    mainline_attempt_type: input.mainline_attempt_type ?? null,
+    mainline_attempt_id: input.mainline_attempt_id ?? null,
+    excluded_plans: input.excluded_plans ?? [],
+    next_allowed_actions: input.next_allowed_actions ?? [],
+    last_meaningful_progress_at: input.last_meaningful_progress_at ?? null,
+    last_meaningful_progress_attempt_id: input.last_meaningful_progress_attempt_id ?? null,
+    context_summary: {
+      headline: input.context_summary?.headline ?? "尚未建立治理结论。",
+      progress_summary: input.context_summary?.progress_summary ?? null,
+      blocker_summary: input.context_summary?.blocker_summary ?? null,
+      avoid_summary: input.context_summary?.avoid_summary ?? [],
+      generated_at: input.context_summary?.generated_at ?? now
+    },
+    updated_at: now
+  });
+}
+
 export function isExecutionContractDraftReady(
   contract: AttemptContractDraft | null | undefined
 ): contract is AttemptContractDraft {
@@ -958,6 +1048,22 @@ export function updateCurrentDecision(
   return CurrentDecisionSchema.parse({
     ...currentDecision,
     ...patch,
+    updated_at: new Date().toISOString()
+  });
+}
+
+export function updateRunGovernanceState(
+  governanceState: RunGovernanceState,
+  patch: Partial<RunGovernanceState>
+): RunGovernanceState {
+  return RunGovernanceStateSchema.parse({
+    ...governanceState,
+    ...patch,
+    context_summary: {
+      ...governanceState.context_summary,
+      ...(patch.context_summary ?? {}),
+      generated_at: patch.context_summary?.generated_at ?? new Date().toISOString()
+    },
     updated_at: new Date().toISOString()
   });
 }
