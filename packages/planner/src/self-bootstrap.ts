@@ -89,7 +89,8 @@ function buildRuntimeHealthSnapshotHint(
     .map((drift) => `${drift.run_id}/${drift.attempt_id}`);
 
   return [
-    `先读 runtime 健康快照：${runtimeHealthSnapshot.path}。`,
+    "先看 context 里的 runtime_health_snapshot 结构化摘要。",
+    `快照来源锚点：${runtimeHealthSnapshot.path}。`,
     `当前 runtime 结论：${runtimeHealthSnapshot.snapshot.verify_runtime.summary}`,
     `历史 contract 漂移状态：${runtimeHealthSnapshot.snapshot.history_contract_drift.status}，数量 ${runtimeHealthSnapshot.snapshot.history_contract_drift.drift_count}。`,
     driftRefs.length > 0 ? `当前旧漂移现场：${driftRefs.join("，")}` : null

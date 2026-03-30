@@ -1,0 +1,273 @@
+.panel {
+  border: 1px solid var(--line);
+  background: var(--paper);
+  box-shadow: var(--shadow);
+  backdrop-filter: blur(20px);
+  border-radius: 30px;
+  padding: 22px;
+  min-width: 0;
+}
+
+.panelHead {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+  margin-bottom: 16px;
+  flex-wrap: wrap;
+}
+
+.panelHead > * {
+  min-width: 0;
+}
+
+.panelTitle {
+  margin: 0;
+  font-size: clamp(1.55rem, 2vw, 2rem);
+  letter-spacing: -0.03em;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.panelSubtitle {
+  margin: 6px 0 0;
+  color: var(--muted);
+  line-height: 1.65;
+  max-width: 720px;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.field {
+  display: grid;
+  gap: 8px;
+}
+
+.fieldLabel {
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.fieldInput,
+.fieldTextarea {
+  width: 100%;
+  border: 1px solid rgba(32, 27, 21, 0.12);
+  background: rgba(255, 252, 247, 0.92);
+  color: var(--ink);
+  border-radius: 18px;
+  padding: 14px 16px;
+  outline: none;
+  transition: border-color 160ms ease, transform 160ms ease, box-shadow 160ms ease;
+}
+
+.fieldInput:focus,
+.fieldTextarea:focus {
+  border-color: rgba(15, 92, 79, 0.38);
+  box-shadow: 0 0 0 4px rgba(15, 92, 79, 0.08);
+}
+
+.fieldTextarea {
+  min-height: 108px;
+  resize: vertical;
+  line-height: 1.7;
+}
+
+.fieldSelect {
+  appearance: none;
+}
+
+.statusPill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  padding: 6px 10px;
+  font-size: 12px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  max-width: 100%;
+  line-height: 1.35;
+  text-align: center;
+}
+
+.statusSuccess {
+  background: rgba(15, 92, 79, 0.1);
+  color: var(--emerald);
+}
+
+.statusDanger {
+  background: var(--rose-soft);
+  color: var(--rose);
+}
+
+.statusWarn {
+  background: var(--amber-soft);
+  color: var(--amber);
+}
+
+.statusNeutral {
+  background: rgba(32, 27, 21, 0.08);
+  color: var(--muted);
+}
+
+.inlineTag {
+  display: inline-flex;
+  align-items: center;
+  min-height: 30px;
+  padding: 5px 11px;
+  border-radius: 999px;
+  border: 1px solid rgba(32, 27, 21, 0.08);
+  background: rgba(255, 252, 247, 0.84);
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.inlineTagAmber {
+  background: var(--amber-soft);
+  color: var(--amber);
+}
+
+.infoCard {
+  padding: 16px;
+  border-radius: 20px;
+}
+
+.infoLabel {
+  display: block;
+  color: var(--muted);
+  font-size: 12px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.infoValue {
+  display: block;
+  margin-top: 10px;
+  line-height: 1.7;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+
+.miniMetric {
+  padding: 12px 14px;
+  border-radius: 18px;
+  background: rgba(255, 252, 247, 0.88);
+  border: 1px solid rgba(32, 27, 21, 0.07);
+}
+
+.miniMetric span {
+  display: block;
+  color: var(--muted);
+  font-size: 12px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.miniMetric strong {
+  display: block;
+  margin-top: 8px;
+  line-height: 1.6;
+}
+
+.subPanel {
+  padding: 18px;
+  border-radius: 24px;
+}
+
+.subPanelEmerald {
+  box-shadow: inset 0 0 0 1px rgba(15, 92, 79, 0.06);
+}
+
+.subPanelAmber {
+  box-shadow: inset 0 0 0 1px rgba(159, 97, 35, 0.06);
+}
+
+.subPanelTitle {
+  margin: 0 0 12px;
+  font-size: 1.15rem;
+}
+
+.sectionList {
+  margin-top: 16px;
+  min-width: 0;
+}
+
+.sectionListTitle {
+  margin-bottom: 8px;
+  color: var(--muted);
+  font-size: 12px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.sectionListList {
+  margin: 0;
+  padding-left: 18px;
+  line-height: 1.9;
+  min-width: 0;
+}
+
+.sectionListList li {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.monoBlock {
+  margin: 0;
+  padding: 14px 16px;
+  border-radius: 18px;
+  background: rgba(23, 20, 17, 0.92);
+  color: #f8f0e3;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+  font-family:
+    "SFMono-Regular",
+    "Menlo",
+    "Consolas",
+    monospace;
+  font-size: 12px;
+  line-height: 1.7;
+}
+
+.callout {
+  margin-top: 16px;
+  padding: 14px 16px;
+  border-radius: 18px;
+  border: 1px solid rgba(158, 67, 56, 0.16);
+}
+
+.callout strong {
+  display: block;
+  margin-bottom: 6px;
+}
+
+.callout p {
+  margin: 0;
+  line-height: 1.7;
+}
+
+.calloutRose {
+  background: var(--rose-soft);
+  color: var(--rose);
+}
+
+.calloutAmber {
+  background: var(--amber-soft);
+  color: var(--amber);
+}
+
+.emptyState {
+  color: var(--muted);
+  line-height: 1.8;
+}
+
+@media (max-width: 720px) {
+  .panel {
+    padding: 18px;
+    border-radius: 24px;
+  }
+}

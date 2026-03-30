@@ -1,12 +1,5 @@
 {
-  "entry_type": "self_bootstrap_next_runtime_task_active",
-  "updated_at": "2026-03-29T11:08:38Z",
-  "source_anchor": {
-    "asset_path": "Codex/2026-03-29-self-bootstrap-next-runtime-task-preflight-gate.json",
-    "source_attempt_id": "manual_2026_03_29_harness_reframe",
-    "payload_sha256": "9b0482d5228d454f29d90d9afb23b2d8fd44449ea4e3a08fb9ea11c35fd76c99",
-    "promoted_at": "2026-03-29T11:08:38Z"
-  },
+  "source_attempt_id": "manual_2026_03_29_harness_reframe",
   "title": "给 execution 加 preflight gate，先把合同钉死再发车",
   "summary": "当前 AISA 已经有 `attempt_contract.json` 和 dispatch 前的最小回放工具链检查，但 execution 是否可发车，仍主要取决于 `verification_plan.commands` 和 `required_evidence` 这两个最低条件。合同还不够完整时，系统也会继续推 execution，再靠 worker、reviewer 和 auto-resume 去兜。按新的 harness 方案，最值的下一步不是再堆编排层，而是先把 execution 前的合同审查做成正式关口。",
   "findings": [

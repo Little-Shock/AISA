@@ -22,6 +22,7 @@ import {
   getCurrentDecision,
   listAttempts,
   listRunJournal,
+  resolveAttemptPaths,
   resolveWorkspacePaths,
   saveAttempt,
   saveAttemptContract,
@@ -709,31 +710,35 @@ async function verifyRepeatedAutoResumeExhausts(): Promise<void> {
   const autoResumeScheduled = journal.filter(
     (entry) => entry.type === "run.auto_resume.scheduled"
   ).length;
-  const autoResumeExhausted = journal.filter(
-    (entry) => entry.type === "run.auto_resume.exhausted"
+  const autoResumeBlocked = journal.filter(
+    (entry) => entry.type === "run.auto_resume.blocked"
   ).length;
 
   assert.ok(current, "current decision must exist");
   assert.equal(current.waiting_for_human, true, "run should eventually stop for human steer");
   assert.equal(current.run_status, "waiting_steer");
   assert.equal(current.recommended_next_action, "wait_for_human");
-  assert.equal(autoResumeScheduled, 2, "expected two automatic resume rounds before retreat");
-  assert.equal(autoResumeExhausted, 1, "expected a single exhaustion marker");
+  assert.equal(autoResumeScheduled, 1, "governance should allow only one skeptical auto-resume round");
+  assert.equal(autoResumeBlocked, 1, "governance should hard-block the repeated blocker");
   assert.ok(
-    current.blocking_reason?.includes("自动续跑已尝试 2 轮"),
-    "current decision should explain that the automatic budget was exhausted"
+    current.blocking_reason?.includes("Loop paused after repeated research attempts without fresh progress"),
+    "current decision should explain that governance blocked the repeated blocker"
   );
   assert.ok(
-    !journal.some((entry) => entry.type === "run.auto_resume.retreat"),
-    "the exhaustion path should stop for human steer instead of retreating into more research"
+    journal.some(
+      (entry) =>
+        entry.type === "run.auto_resume.blocked" &&
+        entry.payload.reason === "governance_repeated_blocker"
+    ),
+    "the repeated blocker should be blocked by governance before budget exhaustion"
   );
   assert.deepEqual(
     attempts.map((attempt) => attempt.attempt_type),
-    ["research", "research", "research", "research"]
+    ["research", "research", "research"]
   );
   assert.ok(
     attempts.every((attempt) => attempt.status === "completed"),
-    "all repeated research attempts should settle before the loop retreats"
+    "all repeated research attempts should settle before governance blocks further retries"
   );
 }
 
@@ -1155,6 +1160,130 @@ async function verifyRateLimitedExecutionRetriesQuickly(): Promise<void> {
   );
 }
 
+async function verifyExecutionRateLimitBudgetDoesNotInheritResearchCycles(): Promise<void> {
+  const { run, workspacePaths, rootDir } = await bootstrapRun(
+    "execution-rate-limit-budget-does-not-inherit-research-cycles"
+  );
+  await writeExecutionWorkspacePackage(rootDir);
+  await initializeGitRepo(rootDir);
+
+  const priorResearch = updateAttempt(
+    createAttempt({
+      run_id: run.id,
+      attempt_type: "research",
+      worker: "fake-codex",
+      objective: "Seed earlier provider-limited research cycles.",
+      success_criteria: run.success_criteria,
+      workspace_root: run.workspace_root
+    }),
+    {
+      status: "failed",
+      started_at: new Date().toISOString(),
+      ended_at: new Date().toISOString()
+    }
+  );
+  const failedExecution = updateAttempt(
+    createAttempt({
+      run_id: run.id,
+      attempt_type: "execution",
+      worker: "fake-codex",
+      objective: "Retry execution after the provider recovers.",
+      success_criteria: run.success_criteria,
+      workspace_root: run.workspace_root
+    }),
+    {
+      status: "failed",
+      started_at: new Date().toISOString(),
+      ended_at: new Date().toISOString()
+    }
+  );
+
+  await saveAttempt(workspacePaths, priorResearch);
+  await saveAttempt(workspacePaths, failedExecution);
+  for (let cycle = 1; cycle <= 4; cycle += 1) {
+    await appendRunJournal(
+      workspacePaths,
+      createRunJournalEntry({
+        run_id: run.id,
+        attempt_id: priorResearch.id,
+        type: "run.auto_resume.scheduled",
+        payload: {
+          cycle,
+          next_action: "retry_attempt",
+          attempt_type: "research",
+          reason: "provider_rate_limited_retry_research"
+        }
+      })
+    );
+  }
+  await saveCurrentDecision(
+    workspacePaths,
+    createCurrentDecision({
+      run_id: run.id,
+      run_status: "waiting_steer",
+      latest_attempt_id: failedExecution.id,
+      recommended_next_action: "wait_for_human",
+      recommended_attempt_type: "execution",
+      summary: "Execution hit a transient provider limit after prior research retries.",
+      blocking_reason: "ERROR: exceeded retry limit, last status: 429 Too Many Requests",
+      waiting_for_human: true
+    })
+  );
+  await appendRunJournal(
+    workspacePaths,
+    createRunJournalEntry({
+      run_id: run.id,
+      attempt_id: failedExecution.id,
+      type: "attempt.failed",
+      payload: {
+        message: "ERROR: exceeded retry limit, last status: 429 Too Many Requests"
+      }
+    })
+  );
+
+  const orchestrator = new Orchestrator(
+    workspacePaths,
+    new FastRetryExecutionAdapter() as never,
+    undefined,
+    60_000,
+    {
+      waitingHumanAutoResumeMs: 5_000,
+      maxAutomaticResumeCycles: 2,
+      providerRateLimitAutoResumeMs: 30,
+      maxProviderRateLimitAutoResumeCycles: 4
+    }
+  );
+
+  await wait(60);
+  await settleUntil(orchestrator, {
+    workspacePaths,
+    runId: run.id,
+    predicate: (runStatus) => runStatus === "completed",
+    timeoutMs: 15_000,
+    delayMs: 120
+  });
+
+  const current = await getCurrentDecision(workspacePaths, run.id);
+  const journal = await listRunJournal(workspacePaths, run.id);
+  const executionSchedules = journal.filter(
+    (entry) =>
+      entry.type === "run.auto_resume.scheduled" &&
+      entry.payload.reason === "provider_rate_limited_retry_execution"
+  );
+
+  assert.ok(current, "current decision must exist");
+  assert.equal(current.run_status, "completed");
+  assert.equal(
+    executionSchedules.at(0)?.payload.cycle,
+    1,
+    "execution provider retry budget should start fresh instead of inheriting research cycles"
+  );
+  assert.ok(
+    !journal.some((entry) => entry.type === "run.auto_resume.exhausted"),
+    "execution should not exhaust its retry budget just because research already consumed provider retries"
+  );
+}
+
 async function verifyWorkerStalledExecutionRetriesQuickly(): Promise<void> {
   const { run, workspacePaths, rootDir } = await bootstrapRun("worker-stalled-execution-retry");
   await writeExecutionWorkspacePackage(rootDir);
@@ -1349,6 +1478,107 @@ async function verifyRateLimitedResearchRetriesQuickly(): Promise<void> {
   assert.ok(
     !journal.some((entry) => entry.type === "run.auto_resume.blocked"),
     "provider 429 should not be treated as a manual blocker"
+  );
+}
+
+async function verifyRateLimitedResearchRetriesUsingStdoutSignal(): Promise<void> {
+  const { run, workspacePaths } = await bootstrapRun("rate-limited-research-stdout-signal");
+
+  const failedResearch = updateAttempt(
+    createAttempt({
+      run_id: run.id,
+      attempt_type: "research",
+      worker: "fake-codex",
+      objective: "Retry research after a provider rate limit hidden inside worker stdout.",
+      success_criteria: run.success_criteria,
+      workspace_root: run.workspace_root
+    }),
+    {
+      status: "failed",
+      started_at: new Date().toISOString(),
+      ended_at: new Date().toISOString()
+    }
+  );
+
+  await saveAttempt(workspacePaths, failedResearch);
+  await writeFile(
+    resolveAttemptPaths(workspacePaths, run.id, failedResearch.id).stdoutFile,
+    [
+      '{"type":"turn.started"}',
+      '{"type":"error","message":"exceeded retry limit, last status: 429 Too Many Requests"}',
+      '{"type":"turn.failed","error":{"message":"exceeded retry limit, last status: 429 Too Many Requests"}}'
+    ].join("\n"),
+    "utf8"
+  );
+  await saveCurrentDecision(
+    workspacePaths,
+    createCurrentDecision({
+      run_id: run.id,
+      run_status: "waiting_steer",
+      latest_attempt_id: failedResearch.id,
+      recommended_next_action: "wait_for_human",
+      recommended_attempt_type: "research",
+      summary: "Research process exited unexpectedly.",
+      blocking_reason:
+        "Codex CLI exited with code 1 for attempt generic-failure auto resume exhausted.",
+      waiting_for_human: true
+    })
+  );
+  await appendRunJournal(
+    workspacePaths,
+    createRunJournalEntry({
+      run_id: run.id,
+      attempt_id: failedResearch.id,
+      type: "attempt.failed",
+      payload: {
+        message: "Codex CLI exited with code 1 for attempt generic-failure"
+      }
+    })
+  );
+
+  const orchestrator = new Orchestrator(
+    workspacePaths,
+    new LowSignalResearchAdapter() as never,
+    undefined,
+    60_000,
+    {
+      waitingHumanAutoResumeMs: 5_000,
+      maxAutomaticResumeCycles: 2,
+      providerRateLimitAutoResumeMs: 30,
+      maxProviderRateLimitAutoResumeCycles: 4
+    }
+  );
+
+  await wait(60);
+  await settleUntilSnapshot(orchestrator, {
+    workspacePaths,
+    runId: run.id,
+    predicate: ({ attempts }) => attempts[1]?.status === "completed",
+    timeoutMs: 2_000,
+    delayMs: 80
+  });
+
+  const current = await getCurrentDecision(workspacePaths, run.id);
+  const attempts = await listAttempts(workspacePaths, run.id);
+  const journal = await listRunJournal(workspacePaths, run.id);
+
+  assert.ok(current, "current decision must exist");
+  assert.equal(current.waiting_for_human, false);
+  assert.deepEqual(
+    attempts.slice(0, 2).map((attempt) => attempt.status),
+    ["failed", "completed"]
+  );
+  assert.ok(
+    journal.some(
+      (entry) =>
+        entry.type === "run.auto_resume.scheduled" &&
+        entry.payload.reason === "provider_rate_limited_retry_research"
+    ),
+    "stdout 429 signal should schedule a fast research retry instead of generic human wait"
+  );
+  assert.ok(
+    !journal.some((entry) => entry.type === "run.auto_resume.exhausted"),
+    "stdout 429 signal should not burn the generic auto-resume budget into exhaustion"
   );
 }
 
@@ -1856,12 +2086,20 @@ async function main(): Promise<void> {
       run: verifyRateLimitedExecutionRetriesQuickly
     },
     {
+      id: "execution_rate_limit_budget_does_not_inherit_research_cycles",
+      run: verifyExecutionRateLimitBudgetDoesNotInheritResearchCycles
+    },
+    {
       id: "worker_stalled_execution_retries_quickly",
       run: verifyWorkerStalledExecutionRetriesQuickly
     },
     {
       id: "rate_limited_research_retries_quickly",
       run: verifyRateLimitedResearchRetriesQuickly
+    },
+    {
+      id: "rate_limited_research_retries_using_stdout_signal",
+      run: verifyRateLimitedResearchRetriesUsingStdoutSignal
     },
     {
       id: "runtime_source_drift_blocks_auto_resume",

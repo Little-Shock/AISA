@@ -292,8 +292,16 @@ async function main(): Promise<void> {
   );
   assert.equal(runtimeHealthSnapshot?.history_contract_drift.drift_count, 0);
   assert.ok(
+    steers[0]?.content.includes("先看 context 里的 runtime_health_snapshot 结构化摘要。"),
+    "seeded steer should prefer the structured runtime health snapshot in context"
+  );
+  assert.ok(
     steers[0]?.content.includes(bootstrapOutput.runtime_health_snapshot),
     "seeded steer should point to the runtime health snapshot path"
+  );
+  assert.ok(
+    attempts[0]?.objective.includes("先看 context 里的 runtime_health_snapshot 结构化摘要。"),
+    "first attempt should prefer structured runtime evidence over guessed file paths"
   );
   assert.ok(
     steers[0]?.content.includes("ok"),

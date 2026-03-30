@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { closeSync, openSync } from "node:fs";
 import {
   lstat,
   mkdir,
@@ -10,6 +11,7 @@ import {
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Attempt, CurrentDecision, Run, RunJournalEntry } from "../packages/domain/src/index.js";
+import { assessRunHealth } from "../packages/orchestrator/src/run-health.ts";
 import {
   ensureWorkspace,
   getAttemptHeartbeat,
@@ -35,6 +37,15 @@ type CliOptions = {
   waitingRelaunchMs: number;
 };
 
+type ControlApiState = {
+  base_url: string;
+  status: "unknown" | "reachable" | "recovering" | "unreachable";
+  last_ok_at: string | null;
+  last_error: string | null;
+  last_launch_requested_at: string | null;
+  last_launch_pid: number | null;
+};
+
 type SupervisorState = {
   version: 1;
   started_at: string;
@@ -42,6 +53,7 @@ type SupervisorState = {
   active_run_id: string | null;
   supervised_run_ids: string[];
   completed_attempt_keys: string[];
+  control_api: ControlApiState;
   repair_log: Array<{
     ts: string;
     run_id: string;
@@ -64,11 +76,18 @@ type JsonResponse<T> = T & {
   message?: string;
 };
 
+type ControlApiHealthResponse = {
+  status: string;
+  degraded_run_count?: number;
+};
+
 const DEFAULT_OWNER_ID = "atou";
 const DEFAULT_TARGET_COMPLETED_ATTEMPTS = 40;
 const DEFAULT_POLL_MS = 15_000;
 const DEFAULT_STALE_ATTEMPT_MS = 180_000;
 const DEFAULT_WAITING_RELAUNCH_MS = 45_000;
+const CONTROL_API_READY_TIMEOUT_MS = 15_000;
+const CONTROL_API_POLL_MS = 400;
 const MAX_REPAIR_LOG_ENTRIES = 200;
 const SELF_BOOTSTRAP_RUN_TITLE = "AISA 自举下一步规划";
 
@@ -191,6 +210,17 @@ function logLine(message: string): void {
   console.log(`[${nowIso()}] ${message}`);
 }
 
+function createInitialControlApiState(baseUrl: string): ControlApiState {
+  return {
+    base_url: baseUrl,
+    status: "unknown",
+    last_ok_at: null,
+    last_error: null,
+    last_launch_requested_at: null,
+    last_launch_pid: null
+  };
+}
+
 async function loadSupervisorState(stateFile: string): Promise<SupervisorState | null> {
   try {
     const raw = await readFile(stateFile, "utf8");
@@ -212,6 +242,40 @@ async function loadSupervisorState(stateFile: string): Promise<SupervisorState |
         typeof parsed.active_run_id === "string" ? parsed.active_run_id : null,
       supervised_run_ids: parsed.supervised_run_ids.map((entry) => String(entry)),
       completed_attempt_keys: parsed.completed_attempt_keys.map((entry) => String(entry)),
+      control_api:
+        parsed.control_api &&
+        typeof parsed.control_api === "object" &&
+        !Array.isArray(parsed.control_api)
+          ? {
+              base_url:
+                typeof parsed.control_api.base_url === "string"
+                  ? parsed.control_api.base_url
+                  : "",
+              status:
+                parsed.control_api.status === "reachable" ||
+                parsed.control_api.status === "recovering" ||
+                parsed.control_api.status === "unreachable" ||
+                parsed.control_api.status === "unknown"
+                  ? parsed.control_api.status
+                  : "unknown",
+              last_ok_at:
+                typeof parsed.control_api.last_ok_at === "string"
+                  ? parsed.control_api.last_ok_at
+                  : null,
+              last_error:
+                typeof parsed.control_api.last_error === "string"
+                  ? parsed.control_api.last_error
+                  : null,
+              last_launch_requested_at:
+                typeof parsed.control_api.last_launch_requested_at === "string"
+                  ? parsed.control_api.last_launch_requested_at
+                  : null,
+              last_launch_pid:
+                typeof parsed.control_api.last_launch_pid === "number"
+                  ? parsed.control_api.last_launch_pid
+                  : null
+            }
+          : createInitialControlApiState(""),
       repair_log: parsed.repair_log.map((entry) => ({
         ts: String(entry.ts),
         run_id: String(entry.run_id),
@@ -232,7 +296,7 @@ async function saveSupervisorState(stateFile: string, state: SupervisorState): P
   await writeFile(stateFile, `${JSON.stringify(state, null, 2)}\n`, "utf8");
 }
 
-function createInitialSupervisorState(): SupervisorState {
+function createInitialSupervisorState(apiBaseUrl: string): SupervisorState {
   const ts = nowIso();
   return {
     version: 1,
@@ -241,6 +305,7 @@ function createInitialSupervisorState(): SupervisorState {
     active_run_id: null,
     supervised_run_ids: [],
     completed_attempt_keys: [],
+    control_api: createInitialControlApiState(apiBaseUrl),
     repair_log: []
   };
 }
@@ -305,6 +370,137 @@ async function postJson<TResponse>(
   }
 
   return payload;
+}
+
+async function getJson<TResponse>(
+  apiBaseUrl: string,
+  path: string
+): Promise<JsonResponse<TResponse>> {
+  const response = await fetch(new URL(path, apiBaseUrl));
+  const text = await response.text();
+  const payload = text.length > 0 ? (JSON.parse(text) as JsonResponse<TResponse>) : ({} as JsonResponse<TResponse>);
+
+  if (!response.ok) {
+    const message =
+      typeof payload.message === "string" && payload.message.length > 0
+        ? payload.message
+        : `HTTP ${response.status} ${response.statusText}`;
+    throw new Error(`${path} failed: ${message}`);
+  }
+
+  return payload;
+}
+
+function normalizeControlApiState(
+  state: SupervisorState,
+  apiBaseUrl: string
+): ControlApiState {
+  if (!state.control_api || state.control_api.base_url !== apiBaseUrl) {
+    state.control_api = createInitialControlApiState(apiBaseUrl);
+  }
+
+  return state.control_api;
+}
+
+async function fetchControlApiHealth(apiBaseUrl: string): Promise<ControlApiHealthResponse> {
+  return await getJson<ControlApiHealthResponse>(apiBaseUrl, "/health");
+}
+
+function describeError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function buildControlApiLogPath(repoRoot: string): string {
+  return join(repoRoot, "artifacts", "control-api-supervisor.log");
+}
+
+async function startControlApiSupervisor(repoRoot: string): Promise<number | null> {
+  await mkdir(join(repoRoot, "artifacts"), { recursive: true });
+  const logPath = buildControlApiLogPath(repoRoot);
+  const logFd = openSync(logPath, "a");
+
+  try {
+    const child = spawn(
+      process.execPath,
+      ["--import", "tsx", "apps/control-api/src/supervisor.ts"],
+      {
+        cwd: repoRoot,
+        env: process.env,
+        detached: true,
+        stdio: ["ignore", logFd, logFd]
+      }
+    );
+    child.unref();
+    return child.pid ?? null;
+  } finally {
+    closeSync(logFd);
+  }
+}
+
+async function waitForControlApiHealth(
+  apiBaseUrl: string,
+  timeoutMs: number,
+  pollMs: number
+): Promise<ControlApiHealthResponse> {
+  const deadline = Date.now() + timeoutMs;
+  let lastError: unknown = null;
+
+  while (Date.now() < deadline) {
+    try {
+      return await fetchControlApiHealth(apiBaseUrl);
+    } catch (error) {
+      lastError = error;
+      await sleep(pollMs);
+    }
+  }
+
+  throw new Error(
+    `control-api did not become reachable at ${apiBaseUrl} within ${timeoutMs}ms: ${describeError(lastError)}`
+  );
+}
+
+async function ensureControlApiAvailable(input: {
+  repoRoot: string;
+  apiBaseUrl: string;
+  state: SupervisorState;
+}): Promise<ControlApiHealthResponse> {
+  const controlApiState = normalizeControlApiState(input.state, input.apiBaseUrl);
+
+  try {
+    const health = await fetchControlApiHealth(input.apiBaseUrl);
+    controlApiState.status = "reachable";
+    controlApiState.last_ok_at = nowIso();
+    controlApiState.last_error = null;
+    return health;
+  } catch (error) {
+    controlApiState.status = "unreachable";
+    controlApiState.last_error = describeError(error);
+  }
+
+  const lastLaunchAgeMs = ageMs(controlApiState.last_launch_requested_at);
+  if (lastLaunchAgeMs === null || lastLaunchAgeMs > CONTROL_API_READY_TIMEOUT_MS) {
+    const pid = await startControlApiSupervisor(input.repoRoot);
+    controlApiState.status = "recovering";
+    controlApiState.last_launch_requested_at = nowIso();
+    controlApiState.last_launch_pid = pid;
+    recordRepair(
+      input.state,
+      input.state.active_run_id ?? "control-api",
+      "start_control_api",
+      `control-api unreachable at ${input.apiBaseUrl}; requested restart pid=${pid ?? "unknown"}`
+    );
+    logLine(`control-api 不可用，已请求重启 pid=${pid ?? "unknown"}`);
+  }
+
+  const health = await waitForControlApiHealth(
+    input.apiBaseUrl,
+    CONTROL_API_READY_TIMEOUT_MS,
+    CONTROL_API_POLL_MS
+  );
+  controlApiState.status = "reachable";
+  controlApiState.last_ok_at = nowIso();
+  controlApiState.last_error = null;
+  return health;
 }
 
 async function createSelfBootstrapRun(
@@ -536,23 +732,15 @@ function shouldRelaunchStaleAttempt(
   snapshot: RunSnapshot,
   options: Pick<CliOptions, "staleAttemptMs">
 ): boolean {
-  if (snapshot.current?.run_status !== "running") {
-    return false;
-  }
-
-  if (snapshot.latestAttempt?.status !== "running") {
-    return false;
-  }
-
-  if (snapshot.latestHeartbeat?.status === "active") {
-    const heartbeatAgeMs = ageMs(snapshot.latestHeartbeat.heartbeat_at);
-    if (heartbeatAgeMs !== null && heartbeatAgeMs < options.staleAttemptMs) {
-      return false;
-    }
-  }
-
-  const mostRecentActivityAgeMs = ageMs(getMostRecentActivityTs(snapshot));
-  return mostRecentActivityAgeMs !== null && mostRecentActivityAgeMs >= options.staleAttemptMs;
+  return (
+    assessRunHealth({
+      current: snapshot.current,
+      latestAttempt: snapshot.latestAttempt,
+      latestHeartbeat: snapshot.latestHeartbeat,
+      latestRuntimeState: snapshot.latestRuntimeState,
+      staleAfterMs: options.staleAttemptMs
+    }).status === "stale_running_attempt"
+  );
 }
 
 function renderSnapshotLine(snapshot: RunSnapshot, completedAttempts: number, target: number): string {
@@ -615,6 +803,11 @@ async function runSupervisorCycle(input: {
   completedAttempts: number;
   reachedTarget: boolean;
 }> {
+  await ensureControlApiAvailable({
+    repoRoot: input.workspaceRoot,
+    apiBaseUrl: input.apiBaseUrl,
+    state: input.state
+  });
   const runId = await ensureActiveRunId(
     input.workspaceRoot,
     input.apiBaseUrl,
@@ -696,7 +889,8 @@ async function main(): Promise<void> {
   const workspacePaths = resolveWorkspacePaths(repoRoot);
   await ensureWorkspace(workspacePaths);
 
-  const state = (await loadSupervisorState(stateFile)) ?? createInitialSupervisorState();
+  const state = (await loadSupervisorState(stateFile)) ?? createInitialSupervisorState(options.apiBaseUrl);
+  normalizeControlApiState(state, options.apiBaseUrl);
 
   while (true) {
     const { completedAttempts, reachedTarget } = await runSupervisorCycle({

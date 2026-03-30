@@ -93,6 +93,7 @@ export async function maybeCreateVerifiedExecutionCheckpoint(input: {
   evaluation: AttemptEvaluation;
   attemptPaths: AttemptPaths;
   preflight: GitCheckpointPreflight | null;
+  governanceContextLines?: string[];
 }): Promise<AttemptCheckpointOutcome> {
   if (input.attempt.attempt_type !== "execution") {
     return {
@@ -155,6 +156,8 @@ export async function maybeCreateVerifiedExecutionCheckpoint(input: {
     canAbsorbPreexistingManagedWorkspaceChanges
       ? input.preflight.status_before
       : []
+    ,
+    input.governanceContextLines ?? []
   );
   const commitEnv = {
     GIT_AUTHOR_NAME: CHECKPOINT_AUTHOR_NAME,
@@ -222,7 +225,8 @@ function buildCheckpointCommitBody(
   run: Run,
   attempt: Attempt,
   evaluation: AttemptEvaluation,
-  preexistingStatusBefore: string[]
+  preexistingStatusBefore: string[],
+  governanceContextLines: string[]
 ): string {
   const lines = [
     `Run: ${run.title}`,
@@ -238,6 +242,10 @@ function buildCheckpointCommitBody(
       `Preexisting Status Entries: ${preexistingStatusBefore.length}`,
       `Preexisting Status Before: ${preexistingStatusBefore.slice(0, 10).join("; ")}`
     );
+  }
+
+  if (governanceContextLines.length > 0) {
+    lines.push(`Governance: ${governanceContextLines.join(" | ")}`);
   }
 
   return lines.join("\n");

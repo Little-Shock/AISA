@@ -124,11 +124,46 @@ export async function driveRun(input: {
     }
   }
 
+  let latestSnapshotAfterDrain = latestSnapshot;
+  let drainPollCount = 0;
+  while (hasInFlightAttempts(latestSnapshotAfterDrain.attempts)) {
+    drainPollCount += 1;
+    await orchestrator.tick();
+    await sleep(input.pollIntervalMs ?? 1500);
+    latestSnapshotAfterDrain = await readRunSnapshot(workspacePaths, input.runId);
+
+    const completedAttemptCount = countCompletedAttempts(latestSnapshotAfterDrain.attempts);
+    if (
+      latestSnapshotAfterDrain.current &&
+      (latestSnapshotAfterDrain.current.run_status !== "running" ||
+        latestSnapshotAfterDrain.current.waiting_for_human)
+    ) {
+      return {
+        ...latestSnapshotAfterDrain,
+        stopReason: "run_settled",
+        pollCount: maxPolls + drainPollCount,
+        completedAttemptCount
+      };
+    }
+
+    if (
+      stopAfterCompletedAttempts !== null &&
+      completedAttemptCount >= stopAfterCompletedAttempts
+    ) {
+      return {
+        ...latestSnapshotAfterDrain,
+        stopReason: "completed_attempt_limit",
+        pollCount: maxPolls + drainPollCount,
+        completedAttemptCount
+      };
+    }
+  }
+
   return {
-    ...latestSnapshot,
+    ...latestSnapshotAfterDrain,
     stopReason: "max_polls_exhausted",
-    pollCount: maxPolls,
-    completedAttemptCount: countCompletedAttempts(latestSnapshot.attempts)
+    pollCount: maxPolls + drainPollCount,
+    completedAttemptCount: countCompletedAttempts(latestSnapshotAfterDrain.attempts)
   };
 }
 
@@ -200,6 +235,12 @@ async function readRunSnapshot(
 
 function countCompletedAttempts(attempts: Awaited<ReturnType<typeof listAttempts>>): number {
   return attempts.filter((attempt) => attempt.status === "completed").length;
+}
+
+function hasInFlightAttempts(
+  attempts: Awaited<ReturnType<typeof listAttempts>>
+): boolean {
+  return attempts.some((attempt) => ["created", "queued", "running"].includes(attempt.status));
 }
 
 function sleep(ms: number): Promise<void> {

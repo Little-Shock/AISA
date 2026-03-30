@@ -4,6 +4,8 @@
 
 当前文档：
 
+- `aisa-harness-prd-v1.md`
+- `aisa-harness-roadmap-v1.md`
 - `implementation-blueprint.md`
 - `remote-observability-cloudflare.md`
 - `decisions/0001-mvp-runtime.md`

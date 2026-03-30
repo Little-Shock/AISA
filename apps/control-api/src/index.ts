@@ -21,6 +21,7 @@ import {
 import { ContextManager } from "@autoresearch/context-manager";
 import { appendEvent, listEvents } from "@autoresearch/event-log";
 import {
+  assessRunHealth,
   createRunWorkspaceScopePolicy,
   lockRunWorkspaceRoot,
   Orchestrator,
@@ -46,6 +47,7 @@ import {
   getPlanArtifacts,
   getReport,
   getRun,
+  getRunGovernanceState,
   getRunReport,
   getWriteback,
   listAttemptRuntimeEvents,
@@ -130,6 +132,7 @@ export async function buildServer(
   const app = Fastify({
     logger: true
   });
+  const runHealthStaleMs = readPositiveIntegerEnv("AISA_RUN_HEALTH_STALE_MS", 180_000);
   const runWorkspaceScopePolicy = await createRunWorkspaceScopePolicy({
     runtimeRoot,
     allowedRoots: options.allowedRunWorkspaceRoots,
@@ -246,9 +249,10 @@ export async function buildServer(
   };
 
   const buildRunDetailPayload = async (runId: string) => {
-    const [run, current, attempts, steers, journal, report] = await Promise.all([
+    const [run, current, governance, attempts, steers, journal, report] = await Promise.all([
       getRun(workspacePaths, runId),
       getCurrentDecision(workspacePaths, runId),
+      getRunGovernanceState(workspacePaths, runId),
       listAttempts(workspacePaths, runId),
       listRunSteers(workspacePaths, runId),
       listRunJournal(workspacePaths, runId),
@@ -263,10 +267,25 @@ export async function buildServer(
         })
       )
     );
+    const latestAttempt =
+      attempts.find((attempt) => attempt.id === current?.latest_attempt_id) ??
+      attempts.at(-1) ??
+      null;
+    const latestAttemptDetail =
+      attemptDetails.find((detail) => detail.attempt.id === latestAttempt?.id) ?? null;
+    const runHealth = assessRunHealth({
+      current,
+      latestAttempt,
+      latestRuntimeState: latestAttemptDetail?.runtime_state ?? null,
+      latestHeartbeat: latestAttemptDetail?.heartbeat ?? null,
+      staleAfterMs: runHealthStaleMs
+    });
 
     return {
       run,
       current,
+      governance,
+      run_health: runHealth,
       attempts,
       attempt_details: attemptDetails,
       steers,
@@ -276,8 +295,9 @@ export async function buildServer(
   };
 
   const buildRunSummaryItem = async (run: Awaited<ReturnType<typeof listRuns>>[number]) => {
-    const [current, attempts] = await Promise.all([
+    const [current, governance, attempts] = await Promise.all([
       getCurrentDecision(workspacePaths, run.id),
+      getRunGovernanceState(workspacePaths, run.id),
       listAttempts(workspacePaths, run.id)
     ]);
     const latestAttempt =
@@ -299,6 +319,14 @@ export async function buildServer(
     return {
       run,
       current,
+      governance,
+      run_health: assessRunHealth({
+        current,
+        latestAttempt,
+        latestRuntimeState,
+        latestHeartbeat,
+        staleAfterMs: runHealthStaleMs
+      }),
       attempt_count: attempts.length,
       latest_attempt: latestAttempt
         ? {
@@ -320,12 +348,31 @@ export async function buildServer(
     };
   };
 
-  app.get("/health", async () => ({
-    status: "ok",
-    codex_command: process.env.CODEX_CLI_COMMAND ?? "codex",
-    codex_model: process.env.CODEX_MODEL ?? null,
-    allowed_run_workspace_roots: runWorkspaceScopePolicy.allowedRoots
-  }));
+  app.get("/health", async () => {
+    const runSummaries = await Promise.all((await listRuns(workspacePaths)).map((run) => buildRunSummaryItem(run)));
+    const degradedRuns = runSummaries
+      .filter((item) => item.run_health.likely_zombie)
+      .map((item) => ({
+        run_id: item.run.id,
+        title: item.run.title,
+        latest_attempt_id: item.run_health.latest_attempt_id,
+        status: item.run_health.status,
+        summary: item.run_health.summary,
+        latest_activity_at: item.run_health.latest_activity_at,
+        latest_activity_age_ms: item.run_health.latest_activity_age_ms
+      }));
+
+    return {
+      status: degradedRuns.length > 0 ? "degraded" : "ok",
+      codex_command: process.env.CODEX_CLI_COMMAND ?? "codex",
+      codex_model: process.env.CODEX_MODEL ?? null,
+      allowed_run_workspace_roots: runWorkspaceScopePolicy.allowedRoots,
+      run_health_stale_ms: runHealthStaleMs,
+      run_count: runSummaries.length,
+      degraded_run_count: degradedRuns.length,
+      degraded_runs: degradedRuns
+    };
+  });
 
   app.get("/runs", async () => {
     const runs = await listRuns(workspacePaths);
@@ -979,4 +1026,10 @@ function readRestartExitCode(): number {
   const raw = process.env.AISA_CONTROL_API_RESTART_EXIT_CODE;
   const parsed = raw ? Number.parseInt(raw, 10) : Number.NaN;
   return Number.isFinite(parsed) ? parsed : 75;
+}
+
+function readPositiveIntegerEnv(name: string, fallback: number): number {
+  const raw = process.env[name];
+  const parsed = raw ? Number.parseInt(raw, 10) : Number.NaN;
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }

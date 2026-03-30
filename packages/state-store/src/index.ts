@@ -20,6 +20,7 @@ import type {
   EvalResult,
   EvalSpec,
   Goal,
+  RunGovernanceState,
   RuntimeHealthSnapshot,
   Run,
   RunJournalEntry,
@@ -46,6 +47,7 @@ import {
   CurrentDecisionSchema,
   EvalResultSchema,
   GoalSchema,
+  RunGovernanceStateSchema,
   RuntimeHealthSnapshotSchema,
   RunJournalEntrySchema,
   RunSchema,
@@ -91,6 +93,7 @@ export interface RunPaths {
   artifactsDir: string;
   contractFile: string;
   currentFile: string;
+  governanceFile: string;
   reportFile: string;
   journalFile: string;
   runtimeHealthSnapshotFile: string;
@@ -138,6 +141,7 @@ export function resolveRunPaths(paths: WorkspacePaths, runId: string): RunPaths 
     artifactsDir: join(runDir, "artifacts"),
     contractFile: join(runDir, "contract.json"),
     currentFile: join(runDir, "current.json"),
+    governanceFile: join(runDir, "governance.json"),
     reportFile: join(runDir, "report.md"),
     journalFile: join(runDir, "journal.ndjson"),
     runtimeHealthSnapshotFile: join(
@@ -430,6 +434,28 @@ export async function getCurrentDecision(
       resolveRunPaths(paths, runId).currentFile
     );
     return CurrentDecisionSchema.parse(currentDecision);
+  } catch {
+    return null;
+  }
+}
+
+export async function saveRunGovernanceState(
+  paths: WorkspacePaths,
+  governanceState: RunGovernanceState
+): Promise<void> {
+  const runPaths = await ensureRunDirectories(paths, governanceState.run_id);
+  await writeJsonFile(runPaths.governanceFile, governanceState);
+}
+
+export async function getRunGovernanceState(
+  paths: WorkspacePaths,
+  runId: string
+): Promise<RunGovernanceState | null> {
+  try {
+    const governanceState = await readJsonFile<RunGovernanceState>(
+      resolveRunPaths(paths, runId).governanceFile
+    );
+    return RunGovernanceStateSchema.parse(governanceState);
   } catch {
     return null;
   }

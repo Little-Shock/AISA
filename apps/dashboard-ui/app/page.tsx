@@ -1,259 +1,55 @@
 "use client";
 
 import { startTransition, useEffect, useMemo, useRef, useState } from "react";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import { Button } from "@/components/ui/button";
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   activityLabel,
-  attemptTypeLabel,
   localizeUiText,
-  nextActionLabel,
   statusLabel,
   workerLabel
 } from "./copy";
-
-type GoalSummaryItem = {
-  goal: {
-    id: string;
-    title: string;
-    status: string;
-    workspace_root: string;
-  };
-  branch_count: number;
-  running_count: number;
-  kept_count: number;
-};
-
-type GoalDetail = {
-  goal: {
-    id: string;
-    title: string;
-    description: string;
-    status: string;
-    workspace_root: string;
-    success_criteria: string[];
-    constraints: string[];
-  };
-  branches: Array<{
-    branch: {
-      id: string;
-      hypothesis: string;
-      objective: string;
-      status: string;
-      assigned_worker: string;
-      score: number | null;
-      confidence: number | null;
-    };
-    writeback: {
-      summary: string;
-      recommended_next_steps: string[];
-    } | null;
-  }>;
-  steers: Array<{
-    id: string;
-    content: string;
-    status: string;
-    scope: string;
-  }>;
-  context: {
-    shared_facts: string[];
-    open_questions: string[];
-    constraints: string[];
-    branch_notes: Record<string, string>;
-  };
-  report: string;
-  events: Array<{
-    event_id: string;
-    type: string;
-    ts: string;
-  }>;
-};
-
-type AttemptRuntimeState = {
-  running: boolean;
-  phase: string | null;
-  active_since: string | null;
-  last_event_at: string | null;
-  progress_text: string | null;
-  recent_activities: string[];
-  completed_steps: string[];
-  process_content: string[];
-  final_output: string | null;
-  error: string | null;
-  session_id: string | null;
-  event_count: number;
-  updated_at: string;
-};
-
-type AttemptRuntimeEvent = {
-  id: string;
-  ts: string;
-  type: string;
-  summary: string;
-  seq: number;
-};
-
-type AttemptHeartbeat = {
-  status: string;
-  started_at: string;
-  heartbeat_at: string;
-  released_at: string | null;
-};
-
-type RunSummaryItem = {
-  run: {
-    id: string;
-    title: string;
-    description: string;
-    workspace_root: string;
-    created_at: string;
-  };
-  current: {
-    run_status: string;
-    latest_attempt_id: string | null;
-    recommended_next_action: string | null;
-    recommended_attempt_type: string | null;
-    summary: string;
-    blocking_reason: string | null;
-    waiting_for_human: boolean;
-    updated_at: string;
-  } | null;
-  attempt_count: number;
-  latest_attempt: {
-    id: string;
-    attempt_type: string;
-    status: string;
-    worker: string;
-    objective: string;
-    created_at: string;
-    started_at: string | null;
-    ended_at: string | null;
-  } | null;
-  latest_attempt_runtime_state: AttemptRuntimeState | null;
-  latest_attempt_heartbeat: AttemptHeartbeat | null;
-  task_focus: string;
-  verification_command_count: number;
-};
-
-type RunDetail = {
-  run: {
-    id: string;
-    title: string;
-    description: string;
-    workspace_root: string;
-    owner_id: string;
-    success_criteria: string[];
-    constraints: string[];
-    created_at: string;
-    updated_at: string;
-  };
-  current: {
-    run_status: string;
-    best_attempt_id: string | null;
-    latest_attempt_id: string | null;
-    recommended_next_action: string | null;
-    recommended_attempt_type: string | null;
-    summary: string;
-    blocking_reason: string | null;
-    waiting_for_human: boolean;
-    updated_at: string;
-  } | null;
-  attempts: Array<{
-    id: string;
-    attempt_type: string;
-    status: string;
-    worker: string;
-    objective: string;
-    success_criteria: string[];
-    workspace_root: string;
-    created_at: string;
-    started_at: string | null;
-    ended_at: string | null;
-  }>;
-  attempt_details: Array<{
-    attempt: {
-      id: string;
-      attempt_type: string;
-      status: string;
-      worker: string;
-      objective: string;
-      success_criteria: string[];
-      workspace_root: string;
-      created_at: string;
-      started_at: string | null;
-      ended_at: string | null;
-    };
-    contract: {
-      objective: string;
-      success_criteria: string[];
-      required_evidence: string[];
-      forbidden_shortcuts: string[];
-      expected_artifacts: string[];
-      verification_plan?: {
-        commands: Array<{
-          purpose: string;
-          command: string;
-          expected_exit_code?: number;
-        }>;
-      };
-    } | null;
-    result: {
-      summary: string;
-      findings: Array<{
-        type: string;
-        content: string;
-        evidence: string[];
-      }>;
-      recommended_next_steps: string[];
-      confidence: number;
-    } | null;
-    evaluation: {
-      verification_status: string;
-      recommendation: string;
-      suggested_attempt_type: string | null;
-      rationale: string;
-      missing_evidence: string[];
-      goal_progress: number;
-      evidence_quality: number;
-    } | null;
-    runtime_verification: {
-      status: string;
-      failure_code: string | null;
-      failure_reason: string | null;
-      changed_files: string[];
-      command_results: Array<{
-        purpose: string;
-        command: string;
-        passed: boolean;
-        exit_code: number;
-        expected_exit_code: number;
-      }>;
-    } | null;
-    runtime_state: AttemptRuntimeState | null;
-    runtime_events: AttemptRuntimeEvent[];
-    heartbeat: AttemptHeartbeat | null;
-    stdout_excerpt: string;
-    stderr_excerpt: string;
-    journal: Array<{
-      type: string;
-      ts: string;
-    }>;
-  }>;
-  steers: Array<{
-    id: string;
-    content: string;
-    status: string;
-    attempt_id: string | null;
-    created_at: string;
-  }>;
-  journal: Array<{
-    id: string;
-    type: string;
-    ts: string;
-    attempt_id: string | null;
-  }>;
-  report: string;
-};
-
-type ViewMode = "runs" | "goals";
+import { AttemptCard } from "./attempt-card";
+import {
+  countRunsByFocusLens,
+  deriveRunOperatorState,
+  formatClockTime,
+  formatDateTime,
+  formatDuration,
+  formatElapsed,
+  formatTimeOrFallback,
+  pickSelectedId,
+  splitLines
+} from "./dashboard-helpers";
+import {
+  EmptyState,
+  Field,
+  InfoCard,
+  InlineTag,
+  Panel,
+  SectionList,
+  StatusPill,
+  SubPanel,
+  TextAreaField
+} from "./dashboard-primitives";
+import type {
+  GoalDetail,
+  GoalSummaryItem,
+  RunDetail,
+  RunFocusLens,
+  RunInboxFilter,
+  RunSummaryItem,
+  ViewMode
+} from "./dashboard-types";
+import {
+  RunJournalPanel,
+  RunOverviewPanel,
+  RunReportPanel,
+  RunSteerPanel,
+  RunVerificationPanel
+} from "./run-detail-panels";
+import { InterventionQueuePanel, RunInboxPanel } from "./run-inbox";
 
 const apiBaseUrl = "/api/control";
 const controlApiDisplay = "same-origin /api/control";
@@ -280,6 +76,8 @@ function formatLoadError(fallback: string, cause: unknown): string {
 
 export default function Page() {
   const [viewMode, setViewMode] = useState<ViewMode>("runs");
+  const [runInboxFilter, setRunInboxFilter] = useState<RunInboxFilter>("all");
+  const [runFocusLens, setRunFocusLens] = useState<RunFocusLens>("all");
   const [goals, setGoals] = useState<GoalSummaryItem[]>([]);
   const [runs, setRuns] = useState<RunSummaryItem[]>([]);
   const [selectedGoalId, setSelectedGoalId] = useState<string | null>(null);
@@ -307,6 +105,8 @@ export default function Page() {
     workspace_root: defaultWorkspace
   });
   const [steerText, setSteerText] = useState("");
+  const [runSteerText, setRunSteerText] = useState("");
+  const [runSteerAttemptId, setRunSteerAttemptId] = useState("");
   const refreshInFlightRef = useRef(false);
 
   useEffect(() => {
@@ -328,6 +128,11 @@ export default function Page() {
 
     return () => window.clearInterval(timer);
   }, [selectedGoalId, selectedRunId]);
+
+  useEffect(() => {
+    setRunSteerText("");
+    setRunSteerAttemptId(runDetail?.current?.latest_attempt_id ?? "");
+  }, [runDetail?.run.id, runDetail?.current?.latest_attempt_id]);
 
   const selectedGoal = useMemo(
     () => goals.find((item) => item.goal.id === selectedGoalId) ?? null,
@@ -352,12 +157,43 @@ export default function Page() {
   }, [runDetail]);
   const selectedRunRuntimeState = selectedRunAttemptDetail?.runtime_state ?? null;
   const selectedRunHeartbeat = selectedRunAttemptDetail?.heartbeat ?? null;
+  const selectedRunOperatorState = useMemo(
+    () => (selectedRun ? deriveRunOperatorState(selectedRun, nowTs) : null),
+    [nowTs, selectedRun]
+  );
+  const operatorSnapshot = useMemo(
+    () => [
+      {
+        label: "人工接球",
+        value: String(countRunsByFocusLens(runs, "waiting_human", nowTs)).padStart(2, "0"),
+        hint: "等待人工 / blocking reason",
+        tone: "rose"
+      },
+      {
+        label: "Runtime 风险",
+        value: String(countRunsByFocusLens(runs, "runtime_fault", nowTs)).padStart(2, "0"),
+        hint: "报错 / 心跳陈旧",
+        tone: "rose"
+      },
+      {
+        label: "回放债务",
+        value: String(countRunsByFocusLens(runs, "replay_gap", nowTs)).padStart(2, "0"),
+        hint: "execution 无验证契约",
+        tone: "amber"
+      },
+      {
+        label: "冷启动池",
+        value: String(countRunsByFocusLens(runs, "unstarted", nowTs)).padStart(2, "0"),
+        hint: "还没首个 attempt",
+        tone: "emerald"
+      }
+    ],
+    [nowTs, runs]
+  );
 
   const overviewStats = useMemo(() => {
     const runningGoals = goals.filter((item) => item.goal.status === "running").length;
-    const runningRuns = runs.filter(
-      (item) => item.current?.run_status === "running"
-    ).length;
+    const runningRuns = runs.filter((item) => item.current?.run_status === "running").length;
     const runAttempts = runs.reduce((sum, item) => sum + item.attempt_count, 0);
     const waitingRuns = runs.filter((item) => item.current?.waiting_for_human).length;
 
@@ -375,8 +211,7 @@ export default function Page() {
     refreshState.lastSuccessAt !== null ? Math.max(nowTs - refreshState.lastSuccessAt, 0) : null;
   const dataState =
     refreshState.lastErrorAt !== null &&
-    (refreshState.lastSuccessAt === null ||
-      refreshState.lastErrorAt >= refreshState.lastSuccessAt)
+    (refreshState.lastSuccessAt === null || refreshState.lastErrorAt >= refreshState.lastSuccessAt)
       ? "offline"
       : latestSyncAgeMs !== null && latestSyncAgeMs > staleDataThresholdMs
         ? "stale"
@@ -429,10 +264,7 @@ export default function Page() {
     setSelectedGoalId(goalId);
 
     try {
-      const payload = await fetchControlJson<GoalDetail>(
-        `/goals/${goalId}`,
-        "加载目标详情失败"
-      );
+      const payload = await fetchControlJson<GoalDetail>(`/goals/${goalId}`, "加载目标详情失败");
       setDetail(payload);
       setError(null);
     } catch (cause) {
@@ -444,10 +276,7 @@ export default function Page() {
     setSelectedRunId(runId);
 
     try {
-      const payload = await fetchControlJson<RunDetail>(
-        `/runs/${runId}`,
-        "加载运行详情失败"
-      );
+      const payload = await fetchControlJson<RunDetail>(`/runs/${runId}`, "加载运行详情失败");
       setRunDetail(payload);
       syncRunSummaryFromDetail(payload);
       setError(null);
@@ -486,9 +315,7 @@ export default function Page() {
               latest_attempt_runtime_state: latestDetail?.runtime_state ?? null,
               latest_attempt_heartbeat: latestDetail?.heartbeat ?? null,
               task_focus:
-                latestDetail?.contract?.objective ??
-                latestDetail?.attempt.objective ??
-                item.task_focus,
+                latestDetail?.contract?.objective ?? latestDetail?.attempt.objective ?? item.task_focus,
               verification_command_count:
                 latestDetail?.contract?.verification_plan?.commands.length ??
                 item.verification_command_count
@@ -736,19 +563,53 @@ export default function Page() {
     }
   }
 
+  async function queueRunSteer(runId: string) {
+    if (!runSteerText.trim()) {
+      return;
+    }
+
+    setBusy(`run-steer:${runId}`);
+    setError(null);
+
+    try {
+      const response = await fetch(`${apiBaseUrl}/runs/${runId}/steers`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          content: runSteerText.trim(),
+          attempt_id: runSteerAttemptId || null
+        })
+      });
+
+      if (!response.ok) {
+        throw new Error("提交 run steer 失败");
+      }
+
+      setRunSteerText("");
+      await refreshDashboard({
+        goalId: selectedGoalId,
+        runId
+      });
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setBusy(null);
+    }
+  }
+
   return (
     <main className="dashboard-shell">
       <div className="dashboard-frame">
         <section className="hero-panel">
           <div className="hero-copy">
-            <div className="hero-eyebrow">AISA / 运行台</div>
+            <div className="hero-eyebrow">AISA / Operator Console</div>
             <h1 className="hero-title">
-              运行台与研究台
-              <span>先看运行任务的真实状态，再回头看旧的目标和分支面板。</span>
+              运行台优先
+              <span>先处理需要人工介入的运行，再回头看兼容保留的目标与分支面板。</span>
             </h1>
             <p className="hero-description">
-              这里把运行任务的真实事实拉到前台。能直接看到当前判断、尝试约定、写回结果、
-              回放验证、人工指令和日志尾部，方便盯住自举任务的真实状态。
+              这里把 run 的真实状态、阻塞原因、恢复提示、尝试证据和回放结果拉到前台。
+              目标不是讲更大的 swarm 故事，而是让一条运行任务能连续几小时到几天稳定推进。
             </p>
           </div>
 
@@ -772,25 +633,31 @@ export default function Page() {
             ))}
           </div>
 
-          <div className="mode-switch" aria-label="控制台模式">
-            <button
-              type="button"
-              className={`mode-switch-button${viewMode === "runs" ? " is-active" : ""}`}
-              onClick={() => setViewMode("runs")}
-            >
-              运行台
-            </button>
-            <button
-              type="button"
-              className={`mode-switch-button${viewMode === "goals" ? " is-active" : ""}`}
-              onClick={() => setViewMode("goals")}
-            >
-              目标台
-            </button>
-          </div>
+          <Tabs
+            value={viewMode}
+            onValueChange={(value) => setViewMode(value as ViewMode)}
+            className="gap-0"
+          >
+            <TabsList className="inline-flex rounded-full border border-black/8 bg-[rgba(255,251,245,0.78)] p-1 shadow-sm backdrop-blur">
+              <TabsTrigger value="runs" className="rounded-full px-4">
+                运行台
+              </TabsTrigger>
+              <TabsTrigger value="goals" className="rounded-full px-4">
+                目标台
+              </TabsTrigger>
+            </TabsList>
+          </Tabs>
         </section>
 
-        {error ? <section className="error-banner">{error}</section> : null}
+        {error ? (
+          <Alert
+            variant="destructive"
+            className="mt-[18px] rounded-[1.35rem] border-destructive/25 bg-[var(--rose-soft)] text-[var(--rose)]"
+          >
+            <AlertTitle>控制台错误</AlertTitle>
+            <AlertDescription className="text-current/90">{error}</AlertDescription>
+          </Alert>
+        ) : null}
 
         <section className={`live-strip live-strip-${dataState}`}>
           <div className="live-strip-status">
@@ -830,124 +697,51 @@ export default function Page() {
         <div className={`content-grid content-grid-${dataState}`}>
           <aside className="left-rail">
             {viewMode === "runs" ? (
-              <Panel
-                title={`运行池 · ${runs.length}`}
-                subtitle="这里展示所有运行任务，包括当前自举任务。卡片会显示最近同步和尝试活性。"
-              >
-                <div className="run-list">
-                  {runs.length === 0 ? (
-                    <EmptyState text="还没有运行任务。先用自举模板或接口新建一条。" />
-                  ) : (
-                    runs.map((item) => {
-                      const selected = item.run.id === selectedRunId;
-                      const runtimeState = item.latest_attempt_runtime_state;
-                      const taskFocus = truncateText(
-                        localizeUiText(item.task_focus || item.run.description),
-                        120
-                      );
-                      const taskSummary = truncateText(
-                        localizeUiText(
-                          item.current?.blocking_reason ??
-                            item.current?.summary ??
-                            item.run.description
-                        ),
-                        110
-                      );
-                      const workspaceLabel = abbreviateWorkspace(item.run.workspace_root);
-                      const latestRunSignalAt =
-                        item.current?.updated_at ??
-                        item.latest_attempt?.ended_at ??
-                        item.latest_attempt?.started_at ??
-                        item.run.created_at;
-                      const runningSince =
-                        item.latest_attempt?.status === "running"
-                          ? item.latest_attempt.started_at
-                          : null;
-                      const liveProgress = truncateText(
-                        localizeUiText(
-                          runtimeState?.progress_text ??
-                            runtimeState?.recent_activities.at(-1) ??
-                            ""
-                        ),
-                        110
-                      );
-                      return (
-                        <button
-                          key={item.run.id}
-                          type="button"
-                          className={`goal-card run-card${selected ? " is-selected" : ""}`}
-                          onClick={() => {
-                            void selectRun(item.run.id);
-                          }}
-                        >
-                          <div className="goal-card-head">
-                            <strong>{localizeUiText(item.run.title)}</strong>
-                            <StatusPill value={item.current?.run_status ?? "draft"} />
-                          </div>
-                          <div className="run-card-topline">
-                            <span className="run-card-id">{item.run.id}</span>
-                            {item.latest_attempt ? (
-                              <span className="run-card-id">
-                                {attemptTypeLabel(item.latest_attempt.attempt_type)} ·{" "}
-                                {workerLabel(item.latest_attempt.worker)}
-                              </span>
-                            ) : null}
-                          </div>
-                          <p className="run-card-focus">{taskFocus}</p>
-                          <div className="run-card-chips">
-                            <span className="run-card-chip">
-                              尝试 {item.attempt_count}
-                            </span>
-                            <span className="run-card-chip">
-                              {nextActionLabel(item.current?.recommended_next_action)}
-                            </span>
-                            {item.latest_attempt ? (
-                              <span className="run-card-chip">
-                                {item.latest_attempt.id}
-                              </span>
-                            ) : null}
-                            {runtimeState?.phase ? (
-                              <span className="run-card-chip">
-                                阶段 {runtimePhaseLabel(runtimeState.phase)}
-                              </span>
-                            ) : null}
-                            {runningSince ? (
-                              <span className="run-card-chip run-card-chip-live">
-                                已运行 {formatElapsed(runningSince, nowTs)}
-                              </span>
-                            ) : null}
-                            {item.verification_command_count > 0 ? (
-                              <span className="run-card-chip">
-                                回放 {item.verification_command_count}
-                              </span>
-                            ) : null}
-                            {item.current?.waiting_for_human ? (
-                              <span className="run-card-chip run-card-chip-alert">
-                                等待人工
-                              </span>
-                            ) : null}
-                          </div>
-                          <p className="run-card-summary">{taskSummary}</p>
-                          {liveProgress ? (
-                            <p className="run-card-summary">{liveProgress}</p>
-                          ) : null}
-                          <div className="goal-card-meta">
-                            {workspaceLabel} · 最近变化 {formatRelativeTime(latestRunSignalAt, nowTs)}
-                            {item.latest_attempt?.started_at
-                              ? ` · 开始 ${formatDateTime(item.latest_attempt.started_at)}`
-                              : ""}
-                          </div>
-                        </button>
-                      );
-                    })
-                  )}
-                </div>
-              </Panel>
+              <>
+                <Panel
+                  title="Operator Snapshot"
+                  subtitle="这里不再只是状态统计，而是 operator 当前最该处理的四类待办。"
+                >
+                  <div className="operator-snapshot-grid">
+                    {operatorSnapshot.map((item) => (
+                      <article
+                        key={item.label}
+                        className={`operator-snapshot-card operator-snapshot-card-${item.tone}`}
+                      >
+                        <span className="operator-snapshot-label">{item.label}</span>
+                        <strong className="operator-snapshot-value">{item.value}</strong>
+                        <span className="operator-snapshot-hint">{item.hint}</span>
+                      </article>
+                    ))}
+                  </div>
+                </Panel>
+                <InterventionQueuePanel
+                  runs={runs}
+                  nowTs={nowTs}
+                  selectedRunId={selectedRunId}
+                  onSelectRun={(runId) => {
+                    void selectRun(runId);
+                  }}
+                />
+                <RunInboxPanel
+                  runs={runs}
+                  nowTs={nowTs}
+                  selectedRunId={selectedRunId}
+                  activeFilter={runInboxFilter}
+                  focusLens={runFocusLens}
+                  onFilterChange={setRunInboxFilter}
+                  onFocusLensChange={setRunFocusLens}
+                  onSelectRun={(runId) => {
+                    void selectRun(runId);
+                  }}
+                />
+              </>
             ) : (
               <>
                 <Panel
                   title="发起新目标"
-                  subtitle="把一个高层问题收束成可并行探索的研究任务。"
+                  subtitle="这部分保留给旧 goal / branch 主线，作为兼容视图继续存在。"
+                  actions={<InlineTag label="Legacy Compatibility" tone="amber" />}
                 >
                   <div className="form-stack">
                     <Field
@@ -990,20 +784,21 @@ export default function Page() {
                         setGoalForm((current) => ({ ...current, workspace_root: value }))
                       }
                     />
-                    <button
+                    <Button
                       type="button"
-                      className="button button-primary"
+                      className="h-11 rounded-full px-5"
                       onClick={() => void createGoal()}
                       disabled={busy === "create"}
                     >
                       {busy === "create" ? "创建中..." : "创建目标"}
-                    </button>
+                    </Button>
                   </div>
                 </Panel>
 
                 <Panel
                   title={`目标池 · ${goals.length}`}
-                  subtitle="这里展示所有目标的整体推进状态。"
+                  subtitle="兼容保留的旧面板，用来查看 goal / branch 主线的历史与过渡状态。"
+                  actions={<InlineTag label="Legacy View" tone="amber" />}
                 >
                   <div className="goal-list">
                     {goals.length === 0 ? (
@@ -1043,190 +838,49 @@ export default function Page() {
             {viewMode === "runs" ? (
               runDetail && selectedRun ? (
                 <>
-                  <Panel
-                    title={runDetail.run.title}
-                    subtitle="只读运行台。看当前判断、尝试约定、写回、回放验证和日志，不在这里介入。"
-                    actions={
-                      <div className="action-row">
-                        <button
-                          type="button"
-                          className="button button-secondary"
-                          disabled={refreshState.isRefreshing}
-                          onClick={() => {
-                            void refreshDashboard({
-                              goalId: selectedGoalId,
-                              runId: runDetail.run.id
-                            });
-                          }}
-                        >
-                          {refreshState.isRefreshing ? "同步中..." : "刷新"}
-                        </button>
-                      </div>
-                    }
-                  >
-                    <div className={`run-live-banner run-live-banner-${dataState}`}>
-                      <div className="run-live-banner-main">
-                        <strong>{liveStatusText}</strong>
-                        <p>
-                          最近同步 {formatTimeOrFallback(refreshState.lastSuccessAt)}
-                          {selectedRunCurrentUpdatedAt
-                            ? ` · 当前状态更新于 ${formatDateTime(selectedRunCurrentUpdatedAt)}`
-                            : ""}
-                        </p>
-                      </div>
-                      <div className="run-live-banner-side">
-                        <span>{liveAttemptText}</span>
-                        <span>
-                          最近变化{" "}
-                          {formatRelativeTime(selectedRunCurrentUpdatedAt, nowTs)}
-                        </span>
-                      </div>
-                    </div>
+                  <RunOverviewPanel
+                    runDetail={runDetail}
+                    selectedRun={selectedRun}
+                    selectedRunOperatorState={selectedRunOperatorState}
+                    selectedRunRuntimeState={selectedRunRuntimeState}
+                    selectedRunHeartbeat={selectedRunHeartbeat}
+                    selectedRunAttemptDetail={selectedRunAttemptDetail}
+                    selectedRunCurrentUpdatedAt={selectedRunCurrentUpdatedAt}
+                    nowTs={nowTs}
+                    dataState={dataState}
+                    liveStatusText={liveStatusText}
+                    liveAttemptText={liveAttemptText}
+                    refreshLabel={refreshState.isRefreshing ? "同步中..." : "刷新"}
+                    lastSuccessAtLabel={formatTimeOrFallback(refreshState.lastSuccessAt)}
+                    onRefresh={() => {
+                      void refreshDashboard({
+                        goalId: selectedGoalId,
+                        runId: runDetail.run.id
+                      });
+                    }}
+                  />
 
-                    <div className="summary-grid">
-                      <InfoCard
-                        label="运行状态"
-                        value={statusLabel(runDetail.current?.run_status ?? "draft")}
-                      />
-                      <InfoCard
-                        label="下一动作"
-                        value={nextActionLabel(runDetail.current?.recommended_next_action)}
-                      />
-                      <InfoCard
-                        label="最新尝试"
-                        value={runDetail.current?.latest_attempt_id ?? "暂无"}
-                      />
-                      <InfoCard
-                        label="尝试数量"
-                        value={String(runDetail.attempts.length)}
-                      />
-                      <InfoCard
-                        label="状态更新时间"
-                        value={formatDateTime(selectedRunCurrentUpdatedAt)}
-                      />
-                      <InfoCard label="负责人" value={runDetail.run.owner_id} />
-                      <InfoCard label="工作区" value={runDetail.run.workspace_root} />
-                      <InfoCard
-                        label="实时阶段"
-                        value={runtimePhaseLabel(selectedRunRuntimeState?.phase)}
-                      />
-                      <InfoCard
-                        label="会话"
-                        value={selectedRunRuntimeState?.session_id ?? "暂无"}
-                      />
-                      <InfoCard
-                        label="事件数"
-                        value={String(selectedRunRuntimeState?.event_count ?? 0)}
-                      />
-                      <InfoCard
-                        label="心跳"
-                        value={
-                          selectedRunHeartbeat?.heartbeat_at
-                            ? `最近 ${formatRelativeTime(selectedRunHeartbeat.heartbeat_at, nowTs)}`
-                            : "暂无"
-                        }
-                      />
-                    </div>
+                  <div className="dual-grid">
+                    <RunSteerPanel
+                      runDetail={runDetail}
+                      selectedRunAttemptDetail={selectedRunAttemptDetail}
+                      steerText={runSteerText}
+                      steerAttemptId={runSteerAttemptId}
+                      onSteerTextChange={setRunSteerText}
+                      onSteerAttemptChange={setRunSteerAttemptId}
+                      onSubmit={() => {
+                        void queueRunSteer(runDetail.run.id);
+                      }}
+                      busy={busy === `run-steer:${runDetail.run.id}`}
+                    />
+                    <RunVerificationPanel
+                      selectedRunAttemptDetail={selectedRunAttemptDetail}
+                    />
+                  </div>
 
-                    <div className="dual-grid">
-                      <SubPanel title="当前分配任务" accent="emerald">
-                        <p className="body-copy">
-                          {localizeUiText(
-                            selectedRunAttemptDetail?.contract?.objective ??
-                              selectedRunAttemptDetail?.attempt.objective ??
-                              runDetail.run.description
-                          )}
-                        </p>
-                        <SectionList
-                          title="任务上下文"
-                          items={[
-                            `最新尝试：${selectedRunAttemptDetail?.attempt.id ?? runDetail.current?.latest_attempt_id ?? "暂无"}`,
-                            `尝试类型：${selectedRunAttemptDetail ? attemptTypeLabel(selectedRunAttemptDetail.attempt.attempt_type) : "暂无"}`,
-                            `执行器：${selectedRunAttemptDetail ? workerLabel(selectedRunAttemptDetail.attempt.worker) : "暂无"}`,
-                            `创建时间：${formatDateTime(selectedRunAttemptDetail?.attempt.created_at)}`,
-                            `契约回放命令：${String(selectedRunAttemptDetail?.contract?.verification_plan?.commands.length ?? 0)}`
-                          ]}
-                        />
-                        <SectionList
-                          title="当前成功标准"
-                          items={
-                            selectedRunAttemptDetail?.contract?.success_criteria ??
-                            selectedRunAttemptDetail?.attempt.success_criteria ??
-                            runDetail.run.success_criteria
-                          }
-                        />
-                        <SectionList
-                          title="最近活动"
-                          items={selectedRunRuntimeState?.recent_activities ?? []}
-                        />
-                        <SectionList
-                          title="已完成步骤"
-                          items={selectedRunRuntimeState?.completed_steps ?? []}
-                        />
-                        <CodeBlock
-                          title="过程内容"
-                          value={
-                            selectedRunRuntimeState?.process_content.length
-                              ? selectedRunRuntimeState.process_content.join("\n")
-                              : "还没有过程内容。"
-                          }
-                        />
-                        <SectionList
-                          title="运行层约定"
-                          items={[
-                            localizeUiText(runDetail.run.description),
-                            ...runDetail.run.constraints.map((constraint) =>
-                              localizeUiText(constraint)
-                            )
-                          ]}
-                        />
-                      </SubPanel>
+                  <RunReportPanel report={runDetail.report} />
 
-                      <SubPanel title="当前判断" accent="amber">
-                        <p className="body-copy">
-                          {localizeUiText(runDetail.current?.summary ?? "还没有当前判断。")}
-                        </p>
-                        <SectionList
-                          title="当前状态"
-                          items={[
-                            `运行状态：${statusLabel(runDetail.current?.run_status ?? "draft")}`,
-                            `建议的尝试类型：${runDetail.current?.recommended_attempt_type ? attemptTypeLabel(runDetail.current.recommended_attempt_type) : "暂无"}`,
-                            `等待人工：${runDetail.current?.waiting_for_human ? "是" : "否"}`,
-                            `最新尝试：${runDetail.current?.latest_attempt_id ?? "暂无"}`,
-                            `实时阶段：${runtimePhaseLabel(selectedRunRuntimeState?.phase)}`,
-                            `最近事件：${selectedRunRuntimeState?.last_event_at ? formatRelativeTime(selectedRunRuntimeState.last_event_at, nowTs) : "暂无"}`,
-                            `事件总数：${String(selectedRunRuntimeState?.event_count ?? 0)}`
-                          ]}
-                        />
-                        <SectionList
-                          title="排队中 / 已应用的人工指令"
-                          items={runDetail.steers.map((steer) => {
-                            const attemptPart = steer.attempt_id ? ` · ${steer.attempt_id}` : "";
-                            return `[${statusLabel(steer.status)}]${attemptPart} ${steer.content}`;
-                          })}
-                        />
-                        {runDetail.current?.blocking_reason ? (
-                          <Callout tone="rose" title="当前卡点">
-                            {localizeUiText(runDetail.current.blocking_reason)}
-                          </Callout>
-                        ) : null}
-                        <CodeBlock
-                          title="最终输出"
-                          value={selectedRunRuntimeState?.final_output || "还没有最终输出。"}
-                        />
-                        {selectedRunRuntimeState?.error ? (
-                          <Callout tone="rose" title="当前错误">
-                            {localizeUiText(selectedRunRuntimeState.error)}
-                          </Callout>
-                        ) : null}
-                      </SubPanel>
-                    </div>
-                  </Panel>
-
-                  <Panel
-                    title="尝试时间线"
-                    subtitle="每条尝试都展示约定、结果、判断、回放验证和日志尾部。"
-                  >
+                  <Panel title="尝试时间线" subtitle="每条尝试都展示约定、结果、判断、回放验证和日志尾部。">
                     <div className="attempt-list">
                       {runDetail.attempt_details.length === 0 ? (
                         <EmptyState text="还没有尝试细节。" />
@@ -1238,40 +892,11 @@ export default function Page() {
                     </div>
                   </Panel>
 
-                  <div className="dual-grid">
-                    <Panel
-                      title="运行报告"
-                      subtitle="如果循环已经生成运行级报告，这里会直接显示。"
-                    >
-                      <pre className="report-block">
-                        {localizeUiText(runDetail.report || "还没有运行报告。")}
-                      </pre>
-                    </Panel>
-
-                    <Panel
-                      title="运行日志"
-                      subtitle="这里只看以运行任务为中心的事实时间线。"
-                    >
-                      <div className="event-list">
-                        {[...runDetail.journal].reverse().slice(0, 24).map((entry) => (
-                          <article key={entry.id} className="event-row">
-                            <strong>{activityLabel(entry.type)}</strong>
-                            <span>
-                              {formatDateTime(entry.ts)}
-                              {entry.attempt_id ? ` · ${entry.attempt_id}` : ""}
-                            </span>
-                          </article>
-                        ))}
-                      </div>
-                    </Panel>
-                  </div>
+                  <RunJournalPanel journal={runDetail.journal} nowTs={nowTs} />
                 </>
               ) : (
-                <Panel
-                  title="还没有选中运行任务"
-                  subtitle="先从左侧运行池里选一条运行任务。"
-                >
-                  <EmptyState text="这块区域会展示运行约定、当前判断、尝试证据、运行日志和最终报告。" />
+                <Panel title="还没有选中运行任务" subtitle="先从左侧运行池里选一条运行任务。">
+                  <EmptyState text="这块区域会展示介入等级、恢复建议、运行约定、尝试证据、运行日志和最终报告。" />
                 </Panel>
               )
             ) : detail && selectedGoal ? (
@@ -1281,17 +906,18 @@ export default function Page() {
                   subtitle="目标简报、状态总览、人工 steer 都集中在这一屏。"
                   actions={
                     <div className="action-row">
-                      <button
+                      <Button
                         type="button"
-                        className="button button-primary"
+                        className="h-10 rounded-full px-5"
                         onClick={() => void launchGoal(detail.goal.id)}
                         disabled={busy === `launch:${detail.goal.id}`}
                       >
                         {busy === `launch:${detail.goal.id}` ? "启动中..." : "启动编排"}
-                      </button>
-                      <button
+                      </Button>
+                      <Button
                         type="button"
-                        className="button button-secondary"
+                        variant="outline"
+                        className="h-10 rounded-full border-emerald-900/12 bg-emerald-900/6 px-5 text-[var(--emerald)]"
                         disabled={refreshState.isRefreshing}
                         onClick={() => {
                           void refreshDashboard({
@@ -1301,7 +927,7 @@ export default function Page() {
                         }}
                       >
                         {refreshState.isRefreshing ? "同步中..." : "刷新"}
-                      </button>
+                      </Button>
                     </div>
                   }
                 >
@@ -1326,14 +952,15 @@ export default function Page() {
                         onChange={setSteerText}
                         placeholder="例如：下一轮优先比较状态模型和事件模型，不要继续讨论 UI。"
                       />
-                      <button
+                      <Button
                         type="button"
-                        className="button button-secondary wide"
+                        variant="outline"
+                        className="mt-2 h-11 w-full rounded-full border-emerald-900/12 bg-emerald-900/6 text-[var(--emerald)]"
                         onClick={() => void queueSteer(detail.goal.id)}
                         disabled={busy === `steer:${detail.goal.id}`}
                       >
                         {busy === `steer:${detail.goal.id}` ? "提交中..." : "加入 Steer 队列"}
-                      </button>
+                      </Button>
                       <SectionList
                         title="队列 / 已应用"
                         items={detail.steers.map(
@@ -1345,10 +972,7 @@ export default function Page() {
                 </Panel>
 
                 <div className="dual-grid">
-                  <Panel
-                    title="分支看板"
-                    subtitle="每个分支都是一个独立的研究假设与工作线程。"
-                  >
+                  <Panel title="分支看板" subtitle="每个分支都是一个独立的研究假设与工作线程。">
                     <div className="branch-list">
                       {detail.branches.map(({ branch, writeback }) => (
                         <article key={branch.id} className="branch-card">
@@ -1367,24 +991,22 @@ export default function Page() {
                             {localizeUiText(writeback?.summary ?? branch.objective)}
                           </p>
                           <div className="action-row">
-                            <button
+                            <Button
                               type="button"
-                              className="button button-ghost"
+                              variant="outline"
+                              className="h-9 rounded-full border-amber-900/12 bg-amber-900/8 px-4 text-[var(--amber)]"
                               onClick={() => void rerunBranch(detail.goal.id, branch.id)}
                               disabled={busy === `rerun:${branch.id}`}
                             >
                               {busy === `rerun:${branch.id}` ? "排队中..." : "重跑分支"}
-                            </button>
+                            </Button>
                           </div>
                         </article>
                       ))}
                     </div>
                   </Panel>
 
-                  <Panel
-                    title="当前最优报告"
-                    subtitle="系统会把分支结果压缩成一份持续更新的当前版本。"
-                  >
+                  <Panel title="当前最优报告" subtitle="系统会把分支结果压缩成一份持续更新的当前版本。">
                     <pre className="report-block">
                       {localizeUiText(
                         detail.report || "还没有报告。请先启动目标，让 Codex 分支开始执行。"
@@ -1394,18 +1016,12 @@ export default function Page() {
                 </div>
 
                 <div className="dual-grid">
-                  <Panel
-                    title="共享上下文板"
-                    subtitle="把事实、问题、约束从各分支回写到共享面板。"
-                  >
+                  <Panel title="共享上下文板" subtitle="把事实、问题、约束从各分支回写到共享面板。">
                     <SectionList title="共享事实" items={detail.context.shared_facts} />
                     <SectionList title="开放问题" items={detail.context.open_questions} />
                   </Panel>
 
-                  <Panel
-                    title="事件时间线"
-                    subtitle="所有关键动作都记录为可追踪的运行事实。"
-                  >
+                  <Panel title="事件时间线" subtitle="所有关键动作都记录为可追踪的运行事实。">
                     <div className="event-list">
                       {detail.events.slice(-16).reverse().map((event) => (
                         <article key={event.event_id} className="event-row">
@@ -1418,10 +1034,7 @@ export default function Page() {
                 </div>
               </>
             ) : (
-              <Panel
-                title="还没有选中目标"
-                subtitle="先从左侧目标池里选一个，或者直接创建新目标。"
-              >
+              <Panel title="还没有选中目标" subtitle="先从左侧目标池里选一个，或者直接创建新目标。">
                 <EmptyState text="这块区域会展示目标概览、分支看板、共享上下文、实时报告和事件时间线。" />
               </Panel>
             )}
@@ -1430,521 +1043,4 @@ export default function Page() {
       </div>
     </main>
   );
-}
-
-function AttemptCard({
-  detail
-}: {
-  detail: RunDetail["attempt_details"][number];
-}) {
-  const contractCommands =
-    detail.contract?.verification_plan?.commands.map((command) => {
-      const exitCode =
-        typeof command.expected_exit_code === "number"
-          ? ` · exit ${command.expected_exit_code}`
-          : "";
-      return `${command.purpose} · ${command.command}${exitCode}`;
-    }) ?? [];
-  const replayCommands =
-    detail.runtime_verification?.command_results.map((command) => {
-      const verdict = command.passed ? "通过" : "失败";
-      return `${verdict} · ${command.purpose} · ${command.command} · ${command.exit_code}/${command.expected_exit_code}`;
-    }) ?? [];
-
-  return (
-    <article className="attempt-card">
-      <div className="attempt-card-head">
-        <div>
-          <div className="attempt-id">{detail.attempt.id}</div>
-          <div className="attempt-meta-line">
-            {attemptTypeLabel(detail.attempt.attempt_type)} · 执行器{" "}
-            {workerLabel(detail.attempt.worker)} · 创建{" "}
-            {formatDateTime(detail.attempt.created_at)}
-          </div>
-        </div>
-        <StatusPill value={detail.attempt.status} />
-      </div>
-
-      <p className="attempt-objective">{localizeUiText(detail.attempt.objective)}</p>
-
-      <div className="attempt-stats">
-        <MiniMetric label="开始" value={formatDateTime(detail.attempt.started_at)} />
-        <MiniMetric label="结束" value={formatDateTime(detail.attempt.ended_at)} />
-        <MiniMetric
-          label="耗时"
-          value={formatAttemptElapsed(detail.attempt.started_at, detail.attempt.ended_at)}
-        />
-        <MiniMetric
-          label="阶段"
-          value={runtimePhaseLabel(detail.runtime_state?.phase)}
-        />
-        <MiniMetric
-          label="判断"
-          value={statusLabel(detail.evaluation?.recommendation ?? "未判断")}
-        />
-        <MiniMetric
-          label="回放"
-          value={statusLabel(detail.runtime_verification?.status ?? "未运行")}
-        />
-      </div>
-
-      <div className="attempt-grid">
-        <div className="attempt-section">
-          <div className="attempt-section-title">尝试约定</div>
-          <SectionList
-            title="成功标准"
-            items={detail.contract?.success_criteria ?? detail.attempt.success_criteria}
-          />
-          <SectionList
-            title="必留证据"
-            items={detail.contract?.required_evidence ?? []}
-          />
-          <SectionList
-            title="禁止取巧"
-            items={detail.contract?.forbidden_shortcuts ?? []}
-          />
-          <SectionList title="期望产物" items={detail.contract?.expected_artifacts ?? []} />
-          <SectionList title="契约回放命令" items={contractCommands} />
-          <SectionList
-            title="最近活动"
-            items={detail.runtime_state?.recent_activities ?? []}
-          />
-          <SectionList
-            title="已完成步骤"
-            items={detail.runtime_state?.completed_steps ?? []}
-          />
-        </div>
-
-        <div className="attempt-section">
-          <div className="attempt-section-title">结果与判断</div>
-          <p className="body-copy">
-            {localizeUiText(detail.result?.summary ?? "还没有写回结果。")}
-          </p>
-          <SectionList
-            title="下一步"
-            items={detail.result?.recommended_next_steps ?? []}
-          />
-          <SectionList
-            title="判断缺口"
-            items={detail.evaluation?.missing_evidence ?? []}
-          />
-          <SectionList
-            title="运行时回放"
-            items={replayCommands}
-          />
-          <SectionList
-            title="实时运行态"
-            items={[
-              `阶段：${runtimePhaseLabel(detail.runtime_state?.phase)}`,
-              `会话：${detail.runtime_state?.session_id ?? "暂无"}`,
-              `事件总数：${String(detail.runtime_state?.event_count ?? 0)}`,
-              `最近事件：${detail.runtime_state?.last_event_at ? formatDateTime(detail.runtime_state.last_event_at) : "暂无"}`,
-              `心跳：${detail.heartbeat?.heartbeat_at ? formatDateTime(detail.heartbeat.heartbeat_at) : "暂无"}`
-            ]}
-          />
-          {detail.runtime_verification?.failure_reason ? (
-            <Callout tone="rose" title="回放失败原因">
-              {localizeUiText(detail.runtime_verification.failure_reason)}
-            </Callout>
-          ) : null}
-          {detail.runtime_state?.error ? (
-            <Callout tone="rose" title="运行错误">
-              {localizeUiText(detail.runtime_state.error)}
-            </Callout>
-          ) : null}
-          <SectionList
-            title="改动文件"
-            items={detail.runtime_verification?.changed_files ?? []}
-          />
-          {detail.evaluation ? (
-            <CodeBlock
-              title="判断摘要"
-              value={[
-                `推荐动作：${statusLabel(detail.evaluation.recommendation)}`,
-                `建议类型：${detail.evaluation.suggested_attempt_type ? attemptTypeLabel(detail.evaluation.suggested_attempt_type) : "无"}`,
-                `目标进度：${detail.evaluation.goal_progress.toFixed(2)}`,
-                `证据质量：${detail.evaluation.evidence_quality.toFixed(2)}`,
-                `验证状态：${statusLabel(detail.evaluation.verification_status)}`,
-                "",
-                localizeUiText(detail.evaluation.rationale)
-              ].join("\n")}
-            />
-          ) : null}
-        </div>
-      </div>
-
-      <div className="attempt-grid">
-        <div className="attempt-section">
-          <div className="attempt-section-title">日志尾部</div>
-          <CodeBlock
-            title="错误输出"
-            value={detail.stderr_excerpt || "暂无错误输出。"}
-          />
-        </div>
-
-        <div className="attempt-section">
-          <div className="attempt-section-title">辅助输出</div>
-          <CodeBlock
-            title="过程内容"
-            value={
-              detail.runtime_state?.process_content.length
-                ? detail.runtime_state.process_content.join("\n")
-                : "暂无过程内容。"
-            }
-          />
-          <CodeBlock
-            title="最终输出"
-            value={detail.runtime_state?.final_output || "暂无最终输出。"}
-          />
-          <CodeBlock
-            title="标准输出"
-            value={detail.stdout_excerpt || "暂无标准输出。"}
-          />
-          <SectionList
-            title="事件流"
-            items={detail.runtime_events.map(
-              (event) => `${formatDateTime(event.ts)} · ${event.summary || event.type}`
-            )}
-          />
-          <SectionList
-            title="尝试时间线"
-            items={detail.journal.map(
-              (entry) => `${formatDateTime(entry.ts)} · ${activityLabel(entry.type)}`
-            )}
-          />
-        </div>
-      </div>
-    </article>
-  );
-}
-
-function pickSelectedId<T>(
-  items: T[],
-  currentId: string | null,
-  readId: (item: T) => string
-): string | null {
-  if (currentId && items.some((item) => readId(item) === currentId)) {
-    return currentId;
-  }
-
-  return items[0] ? readId(items[0]) : null;
-}
-
-function splitLines(value: string): string[] {
-  return value
-    .split("\n")
-    .flatMap((item) => item.split(","))
-    .map((item) => item.trim())
-    .filter(Boolean);
-}
-
-function truncateText(value: string, maxLength: number): string {
-  if (value.length <= maxLength) {
-    return value;
-  }
-
-  return `${value.slice(0, maxLength).trimEnd()}...`;
-}
-
-function abbreviateWorkspace(value: string): string {
-  const normalized = value.replace(/\\/g, "/");
-  const segments = normalized.split("/").filter(Boolean);
-  if (segments.length <= 4) {
-    return value;
-  }
-
-  return `.../${segments.slice(-3).join("/")}`;
-}
-
-function runtimePhaseLabel(value: string | null | undefined): string {
-  switch (value) {
-    case "starting":
-      return "启动中";
-    case "running":
-      return "运行中";
-    case "reasoning":
-      return "思考中";
-    case "planning":
-      return "规划中";
-    case "tool":
-      return "调用工具";
-    case "verifying":
-      return "验证中";
-    case "reviewing":
-      return "评审中";
-    case "synthesizing":
-      return "汇总结论";
-    case "writing":
-      return "写入改动";
-    case "message":
-      return "生成内容";
-    case "finalizing":
-      return "整理输出";
-    case "completed":
-      return "已完成";
-    case "failed":
-      return "已失败";
-    default:
-      return value ? localizeUiText(value) : "暂无";
-  }
-}
-
-function formatDateTime(value: string | null | undefined): string {
-  if (!value) {
-    return "未记录";
-  }
-
-  const parsed = new Date(value);
-  if (Number.isNaN(parsed.getTime())) {
-    return "未记录";
-  }
-
-  return parsed.toLocaleString("zh-CN");
-}
-
-function toTimestamp(value: string | number | null | undefined): number | null {
-  if (value === null || value === undefined) {
-    return null;
-  }
-
-  const timestamp = typeof value === "number" ? value : new Date(value).getTime();
-  return Number.isFinite(timestamp) ? timestamp : null;
-}
-
-function formatClockTime(value: number | null): string {
-  if (value === null) {
-    return "未同步";
-  }
-
-  return new Date(value).toLocaleTimeString("zh-CN", {
-    hour12: false
-  });
-}
-
-function formatTimeOrFallback(value: number | null): string {
-  return value === null ? "未同步" : formatClockTime(value);
-}
-
-function formatDuration(durationMs: number): string {
-  const safeDuration = Math.max(0, durationMs);
-  const totalSeconds = Math.floor(safeDuration / 1000);
-  const days = Math.floor(totalSeconds / 86400);
-  const hours = Math.floor((totalSeconds % 86400) / 3600);
-  const minutes = Math.floor((totalSeconds % 3600) / 60);
-  const seconds = totalSeconds % 60;
-
-  if (days > 0) {
-    return `${days} 天 ${hours} 小时`;
-  }
-
-  if (hours > 0) {
-    return `${hours} 小时 ${minutes} 分`;
-  }
-
-  if (minutes > 0) {
-    return `${minutes} 分 ${seconds} 秒`;
-  }
-
-  return `${seconds} 秒`;
-}
-
-function formatElapsed(
-  value: string | number | null | undefined,
-  nowTs: number
-): string {
-  const timestamp = toTimestamp(value);
-  if (timestamp === null) {
-    return "未开始";
-  }
-
-  return formatDuration(nowTs - timestamp);
-}
-
-function formatRelativeTime(
-  value: string | number | null | undefined,
-  nowTs: number
-): string {
-  const timestamp = toTimestamp(value);
-  if (timestamp === null) {
-    return "未记录";
-  }
-
-  const elapsed = Math.max(0, nowTs - timestamp);
-  if (elapsed < 3000) {
-    return "刚刚";
-  }
-
-  return `${formatDuration(elapsed)}前`;
-}
-
-function formatAttemptElapsed(
-  startedAt: string | null | undefined,
-  endedAt: string | null | undefined
-): string {
-  const start = toTimestamp(startedAt);
-  if (start === null) {
-    return "未开始";
-  }
-
-  const end = toTimestamp(endedAt) ?? Date.now();
-  return formatDuration(end - start);
-}
-
-function Panel({
-  title,
-  subtitle,
-  children,
-  actions
-}: {
-  title: string;
-  subtitle?: string;
-  children: React.ReactNode;
-  actions?: React.ReactNode;
-}) {
-  return (
-    <section className="panel">
-      <div className="panel-head">
-        <div>
-          <h2 className="panel-title">{localizeUiText(title)}</h2>
-          {subtitle ? <p className="panel-subtitle">{localizeUiText(subtitle)}</p> : null}
-        </div>
-        {actions}
-      </div>
-      {children}
-    </section>
-  );
-}
-
-function SubPanel({
-  title,
-  accent,
-  children
-}: {
-  title: string;
-  accent: "emerald" | "amber";
-  children: React.ReactNode;
-}) {
-  return (
-    <div className={`sub-panel sub-panel-${accent}`}>
-      <h3 className="sub-panel-title">{localizeUiText(title)}</h3>
-      {children}
-    </div>
-  );
-}
-
-function Field({
-  label,
-  value,
-  onChange
-}: {
-  label: string;
-  value: string;
-  onChange: (value: string) => void;
-}) {
-  return (
-    <label className="field">
-      <span className="field-label">{localizeUiText(label)}</span>
-      <input
-        value={value}
-        onChange={(event) => onChange(event.target.value)}
-        className="field-input"
-      />
-    </label>
-  );
-}
-
-function TextAreaField({
-  label,
-  value,
-  onChange,
-  placeholder
-}: {
-  label: string;
-  value: string;
-  onChange: (value: string) => void;
-  placeholder?: string;
-}) {
-  return (
-    <label className="field">
-      <span className="field-label">{localizeUiText(label)}</span>
-      <textarea
-        value={value}
-        placeholder={placeholder ? localizeUiText(placeholder) : undefined}
-        onChange={(event) => onChange(event.target.value)}
-        className="field-textarea"
-        rows={4}
-      />
-    </label>
-  );
-}
-
-function StatusPill({ value }: { value: string }) {
-  return <span className={`status-pill status-${value}`}>{statusLabel(value)}</span>;
-}
-
-function InfoCard({ label, value }: { label: string; value: string }) {
-  return (
-    <article className="info-card">
-      <span className="info-label">{localizeUiText(label)}</span>
-      <strong className="info-value">{value}</strong>
-    </article>
-  );
-}
-
-function MiniMetric({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="mini-metric">
-      <span>{localizeUiText(label)}</span>
-      <strong>{value}</strong>
-    </div>
-  );
-}
-
-function SectionList({ title, items }: { title: string; items: string[] }) {
-  return (
-    <section className="section-list">
-      <div className="section-list-title">{localizeUiText(title)}</div>
-      <ul>
-        {(items.length > 0 ? items : ["暂无内容"]).map((item, index) => (
-          <li key={`${title}-${index}-${item}`}>{localizeUiText(item)}</li>
-        ))}
-      </ul>
-    </section>
-  );
-}
-
-function CodeBlock({
-  title,
-  value
-}: {
-  title: string;
-  value: string;
-}) {
-  return (
-    <section className="section-list">
-      <div className="section-list-title">{localizeUiText(title)}</div>
-      <pre className="mono-block">{value}</pre>
-    </section>
-  );
-}
-
-function Callout({
-  title,
-  tone,
-  children
-}: {
-  title: string;
-  tone: "rose";
-  children: React.ReactNode;
-}) {
-  return (
-    <div className={`callout callout-${tone}`}>
-      <strong>{localizeUiText(title)}</strong>
-      <p>{children}</p>
-    </div>
-  );
-}
-
-function EmptyState({ text }: { text: string }) {
-  return <p className="empty-state">{localizeUiText(text)}</p>;
 }

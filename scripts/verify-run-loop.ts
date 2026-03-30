@@ -27,6 +27,7 @@ import { synthesizeAttemptEvaluation } from "../packages/judge/src/index.js";
 import {
   appendRunJournal,
   ensureWorkspace,
+  getAttemptHeartbeat,
   getAttemptContext,
   getAttemptEvaluation,
   getAttemptEvaluationSynthesisRecord,
@@ -53,7 +54,8 @@ import {
 const REVIEWER_CONFIG_ENV = "AISA_REVIEWERS_JSON";
 const SYNTHESIZER_CONFIG_ENV = "AISA_REVIEW_SYNTHESIZER_JSON";
 const CLI_REVIEWER_FAILURE_TIMEOUT_MS = 1_000;
-const CLI_SYNTHESIZER_FAILURE_TIMEOUT_MS = 1_000;
+const CLI_REVIEWER_RESPONSE_TIMEOUT_MS = 5_000;
+const CLI_SYNTHESIZER_FAILURE_TIMEOUT_MS = 5_000;
 
 type CliReviewerFailureMode = "invalid_json" | "nonzero_exit" | "timeout";
 type CliSynthesizerFailureMode = "invalid_json" | "nonzero_exit";
@@ -693,7 +695,13 @@ async function waitForRunningAttemptsToSettle(
 
   while (Date.now() < deadline) {
     const attempts = await listAttempts(workspacePaths, runId);
-    if (!attempts.some((attempt) => attempt.status === "running")) {
+    const hasRunningAttempt = attempts.some((attempt) => attempt.status === "running");
+    const hasActiveHeartbeat = await hasActiveAttemptHeartbeats(
+      workspacePaths,
+      runId,
+      attempts
+    );
+    if (!hasRunningAttempt && !hasActiveHeartbeat) {
       return;
     }
     await sleep(50);
@@ -717,7 +725,23 @@ async function isRunQuiescent(
     return false;
   }
 
+  if (await hasActiveAttemptHeartbeats(workspacePaths, runId, attempts)) {
+    return false;
+  }
+
   return current.run_status !== "running";
+}
+
+async function hasActiveAttemptHeartbeats(
+  workspacePaths: ReturnType<typeof resolveWorkspacePaths>,
+  runId: string,
+  attempts: Awaited<ReturnType<typeof listAttempts>>
+): Promise<boolean> {
+  const heartbeats = await Promise.all(
+    attempts.map((attempt) => getAttemptHeartbeat(workspacePaths, runId, attempt.id))
+  );
+
+  return heartbeats.some((heartbeat) => heartbeat?.status === "active");
 }
 
 function sleep(ms: number): Promise<void> {
@@ -1830,7 +1854,10 @@ async function runCliReviewerFailureCase(
       command: process.execPath,
       args: [join(process.cwd(), "scripts", "fixture-reviewer-cli.mjs"), mode],
       cwd: process.cwd(),
-      timeout_ms: CLI_REVIEWER_FAILURE_TIMEOUT_MS
+      timeout_ms:
+        mode === "timeout"
+          ? CLI_REVIEWER_FAILURE_TIMEOUT_MS
+          : CLI_REVIEWER_RESPONSE_TIMEOUT_MS
     }
   ];
 
@@ -2657,6 +2684,200 @@ async function runConcurrentOwnerCase(input: {
   return collectObservation(input.workspacePaths, input.run.id);
 }
 
+async function assertConcurrentTickCallsCreateSingleAttempt(): Promise<void> {
+  const rootDir = await mkdtemp(join(tmpdir(), "aisa-concurrent-tick-create-"));
+  const { run, workspacePaths } = await bootstrapRun(rootDir, "concurrent-tick-create");
+  const orchestrator = new Orchestrator(
+    workspacePaths,
+    new ContextCaptureAdapter() as never,
+    undefined,
+    60_000
+  );
+
+  await Promise.all([orchestrator.tick(), orchestrator.tick(), orchestrator.tick()]);
+
+  const [attempts, journal] = await Promise.all([
+    listAttempts(workspacePaths, run.id),
+    listRunJournal(workspacePaths, run.id)
+  ]);
+  assert.equal(attempts.length, 1, "concurrent tick calls should only create one attempt");
+  assert.equal(
+    journal.filter((entry) => entry.type === "attempt.created").length,
+    1,
+    "concurrent tick calls should only append one attempt.created entry"
+  );
+  await assertRunDispatchLeaseReleased(rootDir, run.id);
+}
+
+async function assertConcurrentOrchestratorsCreateSingleAttempt(): Promise<void> {
+  const rootDir = await mkdtemp(join(tmpdir(), "aisa-concurrent-orch-create-"));
+  const { run, workspacePaths } = await bootstrapRun(rootDir, "concurrent-orch-create");
+  const primary = new Orchestrator(
+    workspacePaths,
+    new ContextCaptureAdapter() as never,
+    undefined,
+    60_000
+  );
+  const secondary = new Orchestrator(
+    workspacePaths,
+    new ContextCaptureAdapter() as never,
+    undefined,
+    60_000
+  );
+
+  await Promise.all([primary.tick(), secondary.tick()]);
+
+  const [attempts, journal] = await Promise.all([
+    listAttempts(workspacePaths, run.id),
+    listRunJournal(workspacePaths, run.id)
+  ]);
+  assert.equal(attempts.length, 1, "concurrent orchestrators should only create one attempt");
+  assert.equal(
+    journal.filter((entry) => entry.type === "attempt.created").length,
+    1,
+    "concurrent orchestrators should only append one attempt.created entry"
+  );
+  await assertRunDispatchLeaseReleased(rootDir, run.id);
+}
+
+async function seedCreatedResearchAttempt(input: {
+  run: Run;
+  workspacePaths: ReturnType<typeof resolveWorkspacePaths>;
+}): Promise<Attempt> {
+  const attempt = createAttempt({
+    run_id: input.run.id,
+    attempt_type: "research",
+    worker: "fake-codex",
+    objective: "Capture grounded repository context for the next step.",
+    success_criteria: input.run.success_criteria,
+    workspace_root: input.run.workspace_root
+  });
+  await saveAttempt(input.workspacePaths, attempt);
+  await saveAttemptContract(
+    input.workspacePaths,
+    createAttemptContract({
+      attempt_id: attempt.id,
+      run_id: input.run.id,
+      attempt_type: attempt.attempt_type,
+      objective: attempt.objective,
+      success_criteria: attempt.success_criteria,
+      required_evidence: ["Ground the next step in repository evidence."],
+      expected_artifacts: ["review_packet.json"]
+    })
+  );
+  await saveCurrentDecision(
+    input.workspacePaths,
+    createCurrentDecision({
+      run_id: input.run.id,
+      run_status: "running",
+      latest_attempt_id: attempt.id,
+      recommended_next_action: "continue_research",
+      recommended_attempt_type: "research",
+      summary: "Prepared a pending research attempt for concurrent start verification."
+    })
+  );
+  await appendRunJournal(
+    input.workspacePaths,
+    createRunJournalEntry({
+      run_id: input.run.id,
+      attempt_id: attempt.id,
+      type: "attempt.created",
+      payload: {
+        attempt_type: attempt.attempt_type,
+        objective: attempt.objective
+      }
+    })
+  );
+
+  return attempt;
+}
+
+async function assertConcurrentOrchestratorsStartPendingAttemptOnce(): Promise<void> {
+  const rootDir = await mkdtemp(join(tmpdir(), "aisa-concurrent-orch-start-"));
+  const { run, workspacePaths } = await bootstrapRun(rootDir, "concurrent-orch-start");
+  const seededAttempt = await seedCreatedResearchAttempt({
+    run,
+    workspacePaths
+  });
+  const primary = new Orchestrator(
+    workspacePaths,
+    new ScenarioAdapter("running_attempt_owned_elsewhere") as never,
+    undefined,
+    60_000
+  );
+  const secondary = new Orchestrator(
+    workspacePaths,
+    new ScenarioAdapter("running_attempt_owned_elsewhere") as never,
+    undefined,
+    60_000
+  );
+
+  await Promise.all([primary.tick(), secondary.tick()]);
+  await waitForAttemptToLeavePendingState(workspacePaths, run.id, seededAttempt.id, 3_000);
+  await waitForRunningAttemptsToSettle(workspacePaths, run.id, 3_000);
+
+  const [attempts, journal] = await Promise.all([
+    listAttempts(workspacePaths, run.id),
+    listRunJournal(workspacePaths, run.id)
+  ]);
+  assert.equal(attempts.length, 1, "concurrent orchestrators should not clone the pending attempt");
+  assert.equal(
+    journal.filter(
+      (entry) => entry.attempt_id === seededAttempt.id && entry.type === "attempt.started"
+    ).length,
+    1,
+    "concurrent orchestrators should only start the pending attempt once"
+  );
+  await assertRunDispatchLeaseReleased(rootDir, run.id);
+}
+
+async function waitForAttemptToLeavePendingState(
+  workspacePaths: ReturnType<typeof resolveWorkspacePaths>,
+  runId: string,
+  attemptId: string,
+  timeoutMs = 1_500
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+
+  while (Date.now() < deadline) {
+    const attempt = (await listAttempts(workspacePaths, runId)).find((item) => item.id === attemptId);
+    if (!attempt) {
+      throw new Error(`Attempt disappeared before dispatch check: ${attemptId}`);
+    }
+
+    if (!["created", "queued"].includes(attempt.status)) {
+      return;
+    }
+
+    await sleep(25);
+  }
+
+  throw new Error(`Attempt stayed pending too long: ${attemptId}`);
+}
+
+async function assertRunDispatchLeaseReleased(
+  workspaceRoot: string,
+  runId: string
+): Promise<void> {
+  const leasePath = join(
+    workspaceRoot,
+    "runs",
+    runId,
+    "artifacts",
+    "run-dispatch-lease.json"
+  );
+  try {
+    await lstat(leasePath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return;
+    }
+    throw error;
+  }
+
+  throw new Error(`Run dispatch lease should have been released: ${leasePath}`);
+}
+
 async function initializeGitRepo(rootDir: string, leaveDirty: boolean): Promise<void> {
   await writeFile(
     join(rootDir, ".gitignore"),
@@ -3448,6 +3669,48 @@ async function main(): Promise<void> {
   } catch (error) {
     results.push({
       id: "missing_runtime_health_snapshot_context",
+      status: "fail",
+      error: error instanceof Error ? error.message : String(error)
+    });
+  }
+
+  try {
+    await assertConcurrentTickCallsCreateSingleAttempt();
+    results.push({
+      id: "concurrent_tick_calls_create_single_attempt",
+      status: "pass"
+    });
+  } catch (error) {
+    results.push({
+      id: "concurrent_tick_calls_create_single_attempt",
+      status: "fail",
+      error: error instanceof Error ? error.message : String(error)
+    });
+  }
+
+  try {
+    await assertConcurrentOrchestratorsCreateSingleAttempt();
+    results.push({
+      id: "concurrent_orchestrators_create_single_attempt",
+      status: "pass"
+    });
+  } catch (error) {
+    results.push({
+      id: "concurrent_orchestrators_create_single_attempt",
+      status: "fail",
+      error: error instanceof Error ? error.message : String(error)
+    });
+  }
+
+  try {
+    await assertConcurrentOrchestratorsStartPendingAttemptOnce();
+    results.push({
+      id: "concurrent_orchestrators_start_pending_attempt_once",
+      status: "pass"
+    });
+  } catch (error) {
+    results.push({
+      id: "concurrent_orchestrators_start_pending_attempt_once",
       status: "fail",
       error: error instanceof Error ? error.message : String(error)
     });

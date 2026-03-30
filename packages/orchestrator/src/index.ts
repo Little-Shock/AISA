@@ -1,12 +1,13 @@
 import { randomUUID } from "node:crypto";
-import { readFile, stat } from "node:fs/promises";
-import { relative, resolve } from "node:path";
+import { open, readFile, stat, unlink } from "node:fs/promises";
+import { join, relative, resolve } from "node:path";
 import {
   createAttemptRuntimeState,
   createAttempt,
   createAttemptContract,
   createCurrentDecision,
   createEvent,
+  createRunGovernanceState,
   createRunJournalEntry,
   createWorkerRun,
   finishWorkerRun,
@@ -17,6 +18,7 @@ import {
   updateBranch,
   updateCurrentDecision,
   updateGoal,
+  updateRunGovernanceState,
   updateRunSteer,
   updateSteer,
   type Attempt,
@@ -36,6 +38,7 @@ import {
   type Goal,
   type ReviewPacketArtifact,
   type Run,
+  type RunGovernanceState,
   type WorkerWriteback
 } from "@autoresearch/domain";
 import { appendEvent } from "@autoresearch/event-log";
@@ -58,6 +61,7 @@ import {
   getAttemptContext,
   getAttemptHeartbeat,
   getAttemptEvaluation,
+  getAttemptLogExcerpt,
   getAttemptEvaluationSynthesisRecord,
   getAttemptReviewInputPacket,
   getAttemptReviewPacket,
@@ -71,6 +75,7 @@ import {
   getGoal,
   getPlanArtifacts,
   getRun,
+  getRunGovernanceState,
   getRunRuntimeHealthSnapshot,
   listAttempts,
   listAttemptReviewOpinions,
@@ -101,6 +106,7 @@ import {
   saveGoal,
   saveReport,
   saveRun,
+  saveRunGovernanceState,
   saveRunReport,
   saveRunSteer,
   saveSteer,
@@ -114,6 +120,12 @@ import {
   maybeCreateVerifiedExecutionCheckpoint,
   type AttemptCheckpointOutcome
 } from "./git-checkpoint.js";
+import {
+  buildGovernanceSignature,
+  buildGovernanceCheckpointContext,
+  deriveRunGovernanceState,
+  validateGovernedAttemptCandidate
+} from "./governance.js";
 import {
   detectLiveRuntimeSourceDrift,
   runAttemptRuntimeVerification,
@@ -156,6 +168,34 @@ export type RuntimeRestartRequest = {
   affectedFiles: string[];
   message: string;
 };
+
+type RunDispatchLeaseRecord = {
+  version: 1;
+  run_id: string;
+  owner_id: string;
+  owner_pid: number;
+  purpose: string;
+  acquired_at: string;
+};
+
+type RunDispatchLease = {
+  release: () => Promise<void>;
+};
+
+class RunDispatchLeaseError extends Error {
+  constructor(
+    readonly code:
+      | "stale_live_owner"
+      | "invalid_lease_payload"
+      | "lease_owner_mismatch",
+    message: string
+  ) {
+    super(message);
+    this.name = "RunDispatchLeaseError";
+  }
+}
+
+const RUN_DISPATCH_LEASE_FILE_NAME = "run-dispatch-lease.json";
 
 export type ExecutionVerificationToolchainAssessment = {
   has_package_json: boolean;
@@ -245,11 +285,13 @@ function formatVerificationCommands(commands: string[]): string {
 
 export class Orchestrator {
   private timer: NodeJS.Timeout | null = null;
+  private tickPromise: Promise<void> | null = null;
   private readonly activeBranches = new Set<string>();
   private readonly activeAttempts = new Set<string>();
   private readonly instanceId = `orch_${randomUUID().slice(0, 8)}`;
   private readonly attemptHeartbeatIntervalMs: number;
   private readonly attemptHeartbeatStaleMs: number;
+  private readonly runDispatchLeaseStaleMs: number;
   private readonly waitingHumanAutoResumeMs: number;
   private readonly maxAutomaticResumeCycles: number;
   private readonly providerRateLimitAutoResumeMs: number;
@@ -273,6 +315,10 @@ export class Orchestrator {
   ) {
     this.attemptHeartbeatIntervalMs = options.attemptHeartbeatIntervalMs ?? 1000;
     this.attemptHeartbeatStaleMs = options.attemptHeartbeatStaleMs ?? 5000;
+    this.runDispatchLeaseStaleMs = readPositiveIntegerEnv(
+      "AISA_RUN_DISPATCH_LEASE_STALE_MS",
+      60_000
+    );
     this.waitingHumanAutoResumeMs =
       options.waitingHumanAutoResumeMs ??
       readPositiveIntegerEnv("AISA_WAITING_HUMAN_AUTO_RESUME_MS", 120_000);
@@ -342,6 +388,18 @@ export class Orchestrator {
   }
 
   async tick(): Promise<void> {
+    if (this.tickPromise) {
+      return await this.tickPromise;
+    }
+
+    this.tickPromise = this.tickInternal().finally(() => {
+      this.tickPromise = null;
+    });
+
+    return await this.tickPromise;
+  }
+
+  private async tickInternal(): Promise<void> {
     const goals = await listGoals(this.workspacePaths);
 
     for (const goal of goals) {
@@ -690,7 +748,7 @@ export class Orchestrator {
             continue;
           }
 
-          await this.recoverRunningAttempt(run.id, refreshedAttempt, current);
+          await this.recoverRunningAttempt(run.id, refreshedAttempt.id);
         }
         continue;
       }
@@ -718,9 +776,85 @@ export class Orchestrator {
         continue;
       }
 
-      const nextAttempt = await this.planNextAttempt(run.id, current, attempts);
+      await this.createNextAttemptIfNeeded(run.id);
+    }
+  }
+
+  private async recoverRunningAttempt(
+    runId: string,
+    attemptId: string
+  ): Promise<void> {
+    await this.withRunDispatchLease(runId, "recover_running_attempt", async () => {
+      const [attempt, current] = await Promise.all([
+        getAttempt(this.workspacePaths, runId, attemptId),
+        getCurrentDecision(this.workspacePaths, runId)
+      ]);
+      if (attempt.status !== "running") {
+        return;
+      }
+
+      const message =
+        `尝试 ${attempt.id} 在编排器恢复时仍被标记为运行中。` +
+        "会先短暂等待人工接管，超时后自动恢复。";
+      const stoppedAttempt = updateAttempt(attempt, {
+        status: "stopped",
+        ended_at: new Date().toISOString()
+      });
+      const nextCurrent = updateCurrentDecision(
+        current ?? createCurrentDecision({ run_id: runId }),
+        {
+          run_status: "waiting_steer",
+          latest_attempt_id: attempt.id,
+          recommended_next_action: "wait_for_human",
+          recommended_attempt_type: attempt.attempt_type,
+          summary: message,
+          blocking_reason: message,
+          waiting_for_human: true
+        }
+      );
+
+      await appendRunJournal(
+        this.workspacePaths,
+        createRunJournalEntry({
+          run_id: runId,
+          attempt_id: attempt.id,
+          type: "attempt.recovery_required",
+          payload: {
+            previous_status: attempt.status,
+            recovery_policy: "auto_resume_after_human_window"
+          }
+        })
+      );
+      await this.saveSettledAttemptState({
+        runId,
+        attempt: stoppedAttempt,
+        currentSnapshot: nextCurrent
+      });
+    });
+  }
+
+  private async createNextAttemptIfNeeded(runId: string): Promise<void> {
+    await this.withRunDispatchLease(runId, "plan_next_attempt", async () => {
+      const [run, current, attempts] = await Promise.all([
+        getRun(this.workspacePaths, runId),
+        getCurrentDecision(this.workspacePaths, runId),
+        listAttempts(this.workspacePaths, runId)
+      ]);
+      if (!current || current.waiting_for_human || current.run_status !== "running") {
+        return;
+      }
+
+      if (attempts.some((attempt) => ["created", "queued", "running"].includes(attempt.status))) {
+        return;
+      }
+
+      if (this.hasActiveAttemptForRun(runId)) {
+        return;
+      }
+
+      const nextAttempt = await this.planNextAttempt(runId, current, attempts);
       if (!nextAttempt) {
-        continue;
+        return;
       }
 
       await saveAttempt(this.workspacePaths, nextAttempt.attempt);
@@ -737,50 +871,6 @@ export class Orchestrator {
           }
         })
       );
-    }
-  }
-
-  private async recoverRunningAttempt(
-    runId: string,
-    attempt: Attempt,
-    current: CurrentDecision | null
-  ): Promise<void> {
-    const message =
-      `尝试 ${attempt.id} 在编排器恢复时仍被标记为运行中。` +
-      "会先短暂等待人工接管，超时后自动恢复。";
-    const stoppedAttempt = updateAttempt(attempt, {
-      status: "stopped",
-      ended_at: new Date().toISOString()
-    });
-    const nextCurrent = updateCurrentDecision(
-      current ?? createCurrentDecision({ run_id: runId }),
-      {
-        run_status: "waiting_steer",
-        latest_attempt_id: attempt.id,
-        recommended_next_action: "wait_for_human",
-        recommended_attempt_type: attempt.attempt_type,
-        summary: message,
-        blocking_reason: message,
-        waiting_for_human: true
-      }
-    );
-
-    await appendRunJournal(
-      this.workspacePaths,
-        createRunJournalEntry({
-          run_id: runId,
-          attempt_id: attempt.id,
-          type: "attempt.recovery_required",
-          payload: {
-            previous_status: attempt.status,
-            recovery_policy: "auto_resume_after_human_window"
-          }
-        })
-      );
-    await this.saveSettledAttemptState({
-      runId,
-      attempt: stoppedAttempt,
-      currentSnapshot: nextCurrent
     });
   }
 
@@ -797,7 +887,7 @@ export class Orchestrator {
     const latestResult = latestAttempt
       ? await getAttemptResult(this.workspacePaths, run.id, latestAttempt.id)
       : null;
-    const nextExecutionDraft = isExecutionContractDraftReady(
+    let nextExecutionDraft = isExecutionContractDraftReady(
       latestResult?.next_attempt_contract
     )
       ? latestResult.next_attempt_contract
@@ -845,9 +935,9 @@ export class Orchestrator {
       return null;
     }
 
-    const attemptType =
+    let attemptType =
       current.recommended_attempt_type ?? latestAttempt?.attempt_type ?? "research";
-    const objective =
+    let objective =
       queuedSteers.length > 0
         ? this.buildSteeredAttemptObjective(
             run,
@@ -860,10 +950,54 @@ export class Orchestrator {
             ? nextExecutionDraft.objective
             : attemptType === "execution" && latestResult?.recommended_next_steps[0]
               ? latestResult.recommended_next_steps[0]
-              : this.buildPlannedAttemptObjective(run, current, attemptType, latestResult);
+          : this.buildPlannedAttemptObjective(run, current, attemptType, latestResult);
 
     if (!objective) {
       return null;
+    }
+
+    const governance = await getRunGovernanceState(this.workspacePaths, runId);
+    const candidateDecision = await validateGovernedAttemptCandidate({
+      governance,
+      candidate: {
+        attemptType,
+        objective,
+        nextAction: current.recommended_next_action,
+        nextExecutionDraft
+      },
+      rootDir: this.workspacePaths.rootDir
+    });
+
+    if (candidateDecision.status === "blocked") {
+      await this.persistGovernanceDispatchBlocked({
+        runId,
+        current,
+        governance,
+        latestAttempt,
+        objective,
+        decision: candidateDecision
+      });
+      return null;
+    }
+
+    if (candidateDecision.status === "redirect") {
+      attemptType = candidateDecision.candidate.attemptType;
+      objective = candidateDecision.candidate.objective;
+      nextExecutionDraft = candidateDecision.candidate.nextExecutionDraft;
+      await appendRunJournal(
+        this.workspacePaths,
+        createRunJournalEntry({
+          run_id: runId,
+          attempt_id: latestAttempt?.id ?? null,
+          type: "run.governance.redirected",
+          payload: {
+            next_action: candidateDecision.candidate.nextAction,
+            attempt_type: candidateDecision.candidate.attemptType,
+            objective: candidateDecision.candidate.objective,
+            message: candidateDecision.message
+          }
+        })
+      );
     }
 
     const attempt = createAttempt({
@@ -883,94 +1017,108 @@ export class Orchestrator {
         run,
         attempt,
         nextExecutionDraft,
-        current.recommended_next_action,
+        candidateDecision.candidate.nextAction,
         latestAttempt
       )
     };
   }
 
   private async executeAttempt(runId: string, attemptId: string): Promise<void> {
-    const run = await getRun(this.workspacePaths, runId);
+    let run = await getRun(this.workspacePaths, runId);
     let attempt = await getAttempt(this.workspacePaths, runId, attemptId);
-    attempt = await this.ensureAttemptUsesRunWorkspace(run, attempt);
-    const attemptContract = await getAttemptContract(
-      this.workspacePaths,
-      runId,
-      attemptId
-    );
     const attemptPaths = resolveAttemptPaths(this.workspacePaths, runId, attemptId);
-    const steers = await listRunSteers(this.workspacePaths, runId);
-    const attempts = await listAttempts(this.workspacePaths, runId);
-    const current = await getCurrentDecision(this.workspacePaths, runId);
-    const previousAttempts = (
-      await Promise.all(
-        attempts
-          .filter((item) => item.id !== attempt.id)
-          .slice(-3)
-          .map(async (item) => ({
-            attempt: item,
-            result: await getAttemptResult(this.workspacePaths, runId, item.id)
-          }))
-      )
-    ).map(({ attempt: previousAttempt, result }) => ({
-      id: previousAttempt.id,
-      type: previousAttempt.attempt_type,
-      status: previousAttempt.status,
-      summary: result?.summary ?? ""
-    }));
-    const runtimeHealthSnapshot = await getRunRuntimeHealthSnapshot(
-      this.workspacePaths,
-      runId
-    );
-
-    const context = {
-      contract: {
-        title: run.title,
-        description: run.description,
-        success_criteria: run.success_criteria,
-        constraints: run.constraints,
-        workspace_root: attempt.workspace_root,
-        ...(run.managed_workspace_root
-          ? {
-              source_workspace_root: run.workspace_root
-            }
-          : {})
-      },
-      current_decision: current,
-      queued_steers: steers
-        .filter((runSteer) => runSteer.status === "queued")
-        .map((runSteer) => ({
-          id: runSteer.id,
-          content: runSteer.content
-        })),
-      previous_attempts: previousAttempts,
-      ...(runtimeHealthSnapshot
-        ? {
-            runtime_health_snapshot: {
-              path: relative(
-                this.workspacePaths.rootDir,
-                resolveRunPaths(this.workspacePaths, runId).runtimeHealthSnapshotFile
-              ),
-              verify_runtime: {
-                status: runtimeHealthSnapshot.verify_runtime.status,
-                summary: runtimeHealthSnapshot.verify_runtime.summary
-              },
-              history_contract_drift: {
-                status: runtimeHealthSnapshot.history_contract_drift.status,
-                summary: runtimeHealthSnapshot.history_contract_drift.summary,
-                drift_count: runtimeHealthSnapshot.history_contract_drift.drift_count
-              },
-              created_at: runtimeHealthSnapshot.created_at
-            }
-          }
-        : {})
-    };
-
+    let current = await getCurrentDecision(this.workspacePaths, runId);
     let heartbeatTimer: NodeJS.Timeout | null = null;
     let heartbeatStarted = false;
     let runtimeRestartRequest: RuntimeRestartRequest | null = null;
+    const startLease = await this.tryAcquireRunDispatchLease(
+      runId,
+      `start_attempt:${attemptId}`
+    );
+    if (!startLease) {
+      return;
+    }
+    let startLeaseReleased = false;
 
     try {
+      run = await getRun(this.workspacePaths, runId);
+      attempt = await getAttempt(this.workspacePaths, runId, attemptId);
+      current = await getCurrentDecision(this.workspacePaths, runId);
+      if (!["created", "queued"].includes(attempt.status)) {
+        return;
+      }
+
+      attempt = await this.ensureAttemptUsesRunWorkspace(run, attempt);
+      const attemptContract = await getAttemptContract(
+        this.workspacePaths,
+        runId,
+        attemptId
+      );
+      const steers = await listRunSteers(this.workspacePaths, runId);
+      const attempts = await listAttempts(this.workspacePaths, runId);
+      const previousAttempts = (
+        await Promise.all(
+          attempts
+            .filter((item) => item.id !== attempt.id)
+            .slice(-3)
+            .map(async (item) => ({
+              attempt: item,
+              result: await getAttemptResult(this.workspacePaths, runId, item.id)
+            }))
+        )
+      ).map(({ attempt: previousAttempt, result }) => ({
+        id: previousAttempt.id,
+        type: previousAttempt.attempt_type,
+        status: previousAttempt.status,
+        summary: result?.summary ?? ""
+      }));
+      const runtimeHealthSnapshot = await getRunRuntimeHealthSnapshot(
+        this.workspacePaths,
+        runId
+      );
+      const context = {
+        contract: {
+          title: run.title,
+          description: run.description,
+          success_criteria: run.success_criteria,
+          constraints: run.constraints,
+          workspace_root: attempt.workspace_root,
+          ...(run.managed_workspace_root
+            ? {
+                source_workspace_root: run.workspace_root
+              }
+            : {})
+        },
+        current_decision: current,
+        queued_steers: steers
+          .filter((runSteer) => runSteer.status === "queued")
+          .map((runSteer) => ({
+            id: runSteer.id,
+            content: runSteer.content
+          })),
+        previous_attempts: previousAttempts,
+        ...(runtimeHealthSnapshot
+          ? {
+              runtime_health_snapshot: {
+                path: relative(
+                  this.workspacePaths.rootDir,
+                  resolveRunPaths(this.workspacePaths, runId).runtimeHealthSnapshotFile
+                ),
+                verify_runtime: {
+                  status: runtimeHealthSnapshot.verify_runtime.status,
+                  summary: runtimeHealthSnapshot.verify_runtime.summary
+                },
+                history_contract_drift: {
+                  status: runtimeHealthSnapshot.history_contract_drift.status,
+                  summary: runtimeHealthSnapshot.history_contract_drift.summary,
+                  drift_count: runtimeHealthSnapshot.history_contract_drift.drift_count
+                },
+                created_at: runtimeHealthSnapshot.created_at
+              }
+            }
+          : {})
+      };
+
       await this.assertAttemptWorkspaceScope(run, attempt);
       attempt = updateAttempt(attempt, {
         status: "running",
@@ -1025,6 +1173,8 @@ export class Orchestrator {
           }
         })
       );
+      await startLease.release();
+      startLeaseReleased = true;
 
       const dispatchableAttemptContract = await this.requireDispatchableAttemptContract(
         attempt,
@@ -1130,12 +1280,19 @@ export class Orchestrator {
         evaluation: synthesis.evaluation,
         result: execution.writeback
       });
+      const provisionalGovernance = await this.buildSettledGovernanceState({
+        runId,
+        attempt,
+        currentSnapshot: nextCurrent,
+        previousGovernance: await getRunGovernanceState(this.workspacePaths, runId)
+      });
       const checkpointOutcome = await maybeCreateVerifiedExecutionCheckpoint({
         run,
         attempt,
         evaluation: synthesis.evaluation,
         attemptPaths,
-        preflight: checkpointPreflight
+        preflight: checkpointPreflight,
+        governanceContextLines: buildGovernanceCheckpointContext(provisionalGovernance)
       });
       nextCurrent = this.applyCheckpointOutcomeToCurrentDecision(
         nextCurrent,
@@ -1158,6 +1315,13 @@ export class Orchestrator {
         attempt,
         runtimeSourceDriftFiles
       );
+      const governance = await this.buildSettledGovernanceState({
+        runId,
+        attempt,
+        currentSnapshot: nextCurrent,
+        previousGovernance: await getRunGovernanceState(this.workspacePaths, runId)
+      });
+      nextCurrent = this.applyGovernanceToCurrentDecision(nextCurrent, governance);
       await saveRunReport(
         this.workspacePaths,
         runId,
@@ -1167,7 +1331,8 @@ export class Orchestrator {
           execution.writeback,
           synthesis.evaluation,
           runtimeVerification,
-          nextCurrent
+          nextCurrent,
+          governance
         )
       );
 
@@ -1201,10 +1366,12 @@ export class Orchestrator {
         runtimeSourceDriftFiles,
         runtimeVerification.artifact_path
       );
+      await this.appendGovernanceJournal(runId, attempt.id, governance);
       await this.saveSettledAttemptState({
         runId,
         attempt,
-        currentSnapshot: nextCurrent
+        currentSnapshot: nextCurrent,
+        governanceSnapshot: governance
       });
       await this.transitionAttemptRuntimeState({
         runId,
@@ -1215,6 +1382,10 @@ export class Orchestrator {
         error: null
       });
     } catch (error) {
+      if (!startLeaseReleased) {
+        await startLease.release();
+        startLeaseReleased = true;
+      }
       if (error instanceof RunWorkspaceScopeError) {
         await this.appendRunWorkspaceScopeBlockedEntry(run.id, attempt.id, error);
       }
@@ -1245,10 +1416,18 @@ export class Orchestrator {
           }
         })
       );
+      const governance = await this.buildSettledGovernanceState({
+        runId,
+        attempt,
+        currentSnapshot: failedCurrentDecision,
+        previousGovernance: await getRunGovernanceState(this.workspacePaths, runId)
+      });
+      await this.appendGovernanceJournal(runId, attempt.id, governance);
       await this.saveSettledAttemptState({
         runId,
         attempt,
-        currentSnapshot: failedCurrentDecision
+        currentSnapshot: failedCurrentDecision,
+        governanceSnapshot: governance
       });
       await this.transitionAttemptRuntimeState({
         runId,
@@ -1259,6 +1438,9 @@ export class Orchestrator {
         error: error instanceof Error ? error.message : String(error)
       });
     } finally {
+      if (!startLeaseReleased) {
+        await startLease.release();
+      }
       if (heartbeatTimer) {
         clearInterval(heartbeatTimer);
       }
@@ -1280,6 +1462,7 @@ export class Orchestrator {
     runId: string;
     attempt: Attempt;
     currentSnapshot: CurrentDecision | null;
+    governanceSnapshot?: RunGovernanceState | null;
   }): Promise<void> {
     const [
       attemptContract,
@@ -1290,7 +1473,8 @@ export class Orchestrator {
       reviewInputPacket,
       reviewOpinions,
       runtimeVerification,
-      journal
+      journal,
+      previousGovernance
     ] = await Promise.all([
       getAttemptContract(this.workspacePaths, input.runId, input.attempt.id),
       getAttemptContext(this.workspacePaths, input.runId, input.attempt.id),
@@ -1300,7 +1484,8 @@ export class Orchestrator {
       getAttemptReviewInputPacket(this.workspacePaths, input.runId, input.attempt.id),
       listAttemptReviewOpinions(this.workspacePaths, input.runId, input.attempt.id),
       getAttemptRuntimeVerification(this.workspacePaths, input.runId, input.attempt.id),
-      listRunJournal(this.workspacePaths, input.runId)
+      listRunJournal(this.workspacePaths, input.runId),
+      getRunGovernanceState(this.workspacePaths, input.runId)
     ]);
     const effectiveReviewInputPacket =
       reviewInputPacket ??
@@ -1332,6 +1517,17 @@ export class Orchestrator {
     if (input.currentSnapshot) {
       await saveCurrentDecision(this.workspacePaths, input.currentSnapshot);
     }
+    const governanceSnapshot =
+      input.governanceSnapshot ??
+      deriveRunGovernanceState({
+        previous: previousGovernance,
+        attempt: input.attempt,
+        currentSnapshot: input.currentSnapshot,
+        evaluation,
+        result,
+        runtimeVerification
+      });
+    await saveRunGovernanceState(this.workspacePaths, governanceSnapshot);
   }
 
   private async transitionAttemptRuntimeState(input: {
@@ -1479,6 +1675,132 @@ export class Orchestrator {
         `尝试 ${input.reviewInputPacket.attempt_id} 的 reviewer 在 opinion 落盘前失败：${reason}`
       );
     }
+  }
+
+  private async buildSettledGovernanceState(input: {
+    runId: string;
+    attempt: Attempt;
+    currentSnapshot: CurrentDecision | null;
+    previousGovernance?: RunGovernanceState | null;
+  }): Promise<RunGovernanceState> {
+    const [result, evaluation, runtimeVerification, previousGovernance] = await Promise.all([
+      getAttemptResult(this.workspacePaths, input.runId, input.attempt.id),
+      getAttemptEvaluation(this.workspacePaths, input.runId, input.attempt.id),
+      getAttemptRuntimeVerification(this.workspacePaths, input.runId, input.attempt.id),
+      input.previousGovernance === undefined
+        ? getRunGovernanceState(this.workspacePaths, input.runId)
+        : Promise.resolve(input.previousGovernance)
+    ]);
+
+    return deriveRunGovernanceState({
+      previous: previousGovernance,
+      attempt: input.attempt,
+      currentSnapshot: input.currentSnapshot,
+      evaluation,
+      result,
+      runtimeVerification
+    });
+  }
+
+  private applyGovernanceToCurrentDecision(
+    current: CurrentDecision,
+    governance: RunGovernanceState
+  ): CurrentDecision {
+    if (governance.status !== "blocked" || governance.blocker_repeat_count < 2) {
+      return current;
+    }
+
+    return updateCurrentDecision(current, {
+      run_status: "waiting_steer",
+      recommended_next_action: "wait_for_human",
+      summary: governance.context_summary.headline,
+      blocking_reason:
+        governance.context_summary.blocker_summary ?? governance.context_summary.headline,
+      waiting_for_human: true
+    });
+  }
+
+  private async appendGovernanceJournal(
+    runId: string,
+    attemptId: string | null,
+    governance: RunGovernanceState
+  ): Promise<void> {
+    await appendRunJournal(
+      this.workspacePaths,
+      createRunJournalEntry({
+        run_id: runId,
+        attempt_id: attemptId,
+        type: "run.governance.updated",
+        payload: {
+          status: governance.status,
+          blocker_repeat_count: governance.blocker_repeat_count,
+          active_problem_signature: governance.active_problem_signature,
+          mainline_attempt_type: governance.mainline_attempt_type,
+          mainline_summary: governance.mainline_summary,
+          excluded_plan_count: governance.excluded_plans.length
+        }
+      })
+    );
+  }
+
+  private async persistGovernanceDispatchBlocked(input: {
+    runId: string;
+    current: CurrentDecision;
+    governance: RunGovernanceState | null;
+    latestAttempt: Attempt | null;
+    objective: string;
+    decision: Extract<
+      Awaited<ReturnType<typeof validateGovernedAttemptCandidate>>,
+      { status: "blocked" }
+    >;
+  }): Promise<void> {
+    const baseGovernance =
+      input.governance ??
+      createRunGovernanceState({
+        run_id: input.runId
+      });
+    const blockedGovernance = updateRunGovernanceState(baseGovernance, {
+      status: "blocked",
+      active_problem_summary: input.decision.message,
+      active_problem_signature:
+        buildGovernanceSignature(input.decision.message) ?? baseGovernance.active_problem_signature,
+      excluded_plans: input.decision.excludedPlan
+        ? [input.decision.excludedPlan, ...baseGovernance.excluded_plans]
+        : baseGovernance.excluded_plans,
+      next_allowed_actions: ["wait_for_human", "apply_steer"],
+      context_summary: {
+        headline: "治理层拦下了下一轮派发。",
+        progress_summary: null,
+        blocker_summary: input.decision.message,
+        avoid_summary: [`不要再按这个目标继续：${input.objective}`],
+        generated_at: new Date().toISOString()
+      }
+    });
+    const blockedCurrent = updateCurrentDecision(input.current, {
+      run_status: "waiting_steer",
+      latest_attempt_id: input.latestAttempt?.id ?? input.current.latest_attempt_id,
+      recommended_next_action: "wait_for_human",
+      summary: input.decision.message,
+      blocking_reason: input.decision.message,
+      waiting_for_human: true
+    });
+
+    await saveRunGovernanceState(this.workspacePaths, blockedGovernance);
+    await saveCurrentDecision(this.workspacePaths, blockedCurrent);
+    await appendRunJournal(
+      this.workspacePaths,
+      createRunJournalEntry({
+        run_id: input.runId,
+        attempt_id: input.latestAttempt?.id ?? null,
+        type: "run.governance.dispatch_blocked",
+        payload: {
+          reason: input.decision.reason,
+          message: input.decision.message,
+          objective: input.objective,
+          invalid_refs: input.decision.invalidRefs
+        }
+      })
+    );
   }
 
   private async runAttemptEvaluationSynthesis(input: {
@@ -2144,7 +2466,8 @@ export class Orchestrator {
     result: WorkerWriteback,
     evaluation: AttemptEvaluation,
     runtimeVerification: AttemptRuntimeVerificationOutcome,
-    current: CurrentDecision
+    current: CurrentDecision,
+    governance: RunGovernanceState | null
   ): string {
     return [
       `# 运行报告：${run.title}`,
@@ -2172,7 +2495,18 @@ export class Orchestrator {
       "",
       "## 下一动作",
       "",
-      current.recommended_next_action ?? "暂无"
+      current.recommended_next_action ?? "暂无",
+      "",
+      "## 治理结论",
+      "",
+      governance?.context_summary.headline ?? "暂无治理结论",
+      governance?.mainline_summary ? `主线：${governance.mainline_summary}` : "",
+      governance?.context_summary.blocker_summary
+        ? `阻塞：${governance.context_summary.blocker_summary}`
+        : "",
+      governance?.context_summary.avoid_summary[0]
+        ? `避免：${governance.context_summary.avoid_summary[0]}`
+        : ""
     ].join("\n");
   }
 
@@ -2434,88 +2768,110 @@ export class Orchestrator {
 
   private async maybeAutoResumeWaitingRun(
     runId: string,
-    current: CurrentDecision,
-    attempts: Attempt[]
+    _current: CurrentDecision,
+    _attempts: Attempt[]
   ): Promise<void> {
-    if (current.run_status !== "waiting_steer" || this.waitingHumanAutoResumeMs <= 0) {
-      return;
-    }
+    await this.withRunDispatchLease(runId, "auto_resume_waiting_run", async () => {
+      const [current, attempts] = await Promise.all([
+        getCurrentDecision(this.workspacePaths, runId),
+        listAttempts(this.workspacePaths, runId)
+      ]);
+      if (
+        !current ||
+        current.run_status !== "waiting_steer" ||
+        this.waitingHumanAutoResumeMs <= 0
+      ) {
+        return;
+      }
 
-    const journal = await listRunJournal(this.workspacePaths, runId);
-    const autoResumePolicy = this.getAutomaticResumePolicy({
-      current,
-      attempts,
-      journal
+      const journal = await listRunJournal(this.workspacePaths, runId);
+      const autoResumePolicy = await this.getAutomaticResumePolicy({
+        current,
+        attempts,
+        journal
+      });
+      const updatedAtMs = Date.parse(current.updated_at);
+      if (Number.isNaN(updatedAtMs) || Date.now() - updatedAtMs < autoResumePolicy.delayMs) {
+        return;
+      }
+
+      const automaticResumeCount = this.countAutomaticResumeCyclesSinceLastSteer(
+        journal,
+        autoResumePolicy.reasonPrefix
+      );
+
+      if (automaticResumeCount >= autoResumePolicy.maxCycles) {
+        await this.persistAutomaticResumeExhausted(runId, current, journal, automaticResumeCount);
+        return;
+      }
+
+      const blocker = await this.detectAutomaticResumeBlocker({
+        runId,
+        current,
+        attempts,
+        journal
+      });
+
+      if (blocker) {
+        await this.persistAutomaticResumeBlocked(runId, current, journal, blocker);
+        return;
+      }
+
+      const plan = await this.buildAutomaticResumePlan({
+        runId,
+        current,
+        attempts,
+        journal
+      });
+
+      if (!plan) {
+        await this.persistAutomaticResumeBlocked(runId, current, journal);
+        return;
+      }
+
+      await saveCurrentDecision(
+        this.workspacePaths,
+        updateCurrentDecision(current, {
+          run_status: "running",
+          recommended_next_action: plan.next_action,
+          recommended_attempt_type: plan.attempt_type,
+          summary: plan.summary,
+          blocking_reason: plan.blocking_reason,
+          waiting_for_human: false
+        })
+      );
+      await appendRunJournal(
+        this.workspacePaths,
+        createRunJournalEntry({
+          run_id: runId,
+          attempt_id: current.latest_attempt_id,
+          type: "run.auto_resume.scheduled",
+          payload: {
+            cycle: automaticResumeCount + 1,
+            next_action: plan.next_action,
+            attempt_type: plan.attempt_type,
+            reason: plan.reason
+          }
+        })
+      );
     });
-    const updatedAtMs = Date.parse(current.updated_at);
-    if (Number.isNaN(updatedAtMs) || Date.now() - updatedAtMs < autoResumePolicy.delayMs) {
-      return;
-    }
-
-    const automaticResumeCount = this.countAutomaticResumeCyclesSinceLastSteer(
-      journal,
-      autoResumePolicy.reasonPrefix
-    );
-
-    if (automaticResumeCount >= autoResumePolicy.maxCycles) {
-      await this.persistAutomaticResumeExhausted(runId, current, journal, automaticResumeCount);
-      return;
-    }
-
-    const blocker = this.detectAutomaticResumeBlocker({
-      current,
-      attempts,
-      journal
-    });
-
-    if (blocker) {
-      await this.persistAutomaticResumeBlocked(runId, current, journal, blocker);
-      return;
-    }
-
-    const plan = this.buildAutomaticResumePlan({
-      current,
-      attempts,
-      journal
-    });
-
-    if (!plan) {
-      await this.persistAutomaticResumeBlocked(runId, current, journal);
-      return;
-    }
-
-    await saveCurrentDecision(
-      this.workspacePaths,
-      updateCurrentDecision(current, {
-        run_status: "running",
-        recommended_next_action: plan.next_action,
-        recommended_attempt_type: plan.attempt_type,
-        summary: plan.summary,
-        blocking_reason: plan.blocking_reason,
-        waiting_for_human: false
-      })
-    );
-    await appendRunJournal(
-      this.workspacePaths,
-      createRunJournalEntry({
-        run_id: runId,
-        attempt_id: current.latest_attempt_id,
-        type: "run.auto_resume.scheduled",
-        payload: {
-          cycle: automaticResumeCount + 1,
-          next_action: plan.next_action,
-          attempt_type: plan.attempt_type,
-          reason: plan.reason
-        }
-      })
-    );
   }
 
-  private detectAutomaticResumeBlocker(input: {
+  private async detectAutomaticResumeBlocker(input: {
+    runId: string;
     current: CurrentDecision;
     attempts: Attempt[];
     journal: Awaited<ReturnType<typeof listRunJournal>>;
-  }): { reason: string; message: string } | null {
+  }): Promise<{ reason: string; message: string } | null> {
+    const governance = await getRunGovernanceState(this.workspacePaths, input.runId);
+    if (governance?.status === "blocked" && governance.blocker_repeat_count >= 2) {
+      return {
+        reason: "governance_repeated_blocker",
+        message:
+          governance.context_summary.blocker_summary ?? governance.context_summary.headline
+      };
+    }
+
     const latestAttempt = this.getLatestAttempt(input.current, input.attempts);
     const workspaceScopeMessage = this.getRunWorkspaceScopeBlockedMessage(
       input.journal,
@@ -2554,7 +2910,7 @@ export class Orchestrator {
       return null;
     }
 
-    const failureMessage = this.getLatestAttemptFailureMessage({
+    const failureMessage = await this.getLatestAttemptFailureMessage({
       current: input.current,
       journal: input.journal,
       latestAttempt
@@ -2571,11 +2927,12 @@ export class Orchestrator {
     };
   }
 
-  private buildAutomaticResumePlan(input: {
+  private async buildAutomaticResumePlan(input: {
+    runId: string;
     current: CurrentDecision;
     attempts: Attempt[];
     journal: Awaited<ReturnType<typeof listRunJournal>>;
-  }):
+  }): Promise<
     | {
         next_action: string;
         attempt_type: Attempt["attempt_type"];
@@ -2583,8 +2940,10 @@ export class Orchestrator {
         blocking_reason: string | null;
         reason: string;
       }
-    | null {
+    | null
+  > {
     const latestAttempt = this.getLatestAttempt(input.current, input.attempts);
+    const governance = await getRunGovernanceState(this.workspacePaths, input.runId);
     if (!latestAttempt) {
       return {
         next_action: "start_first_attempt",
@@ -2645,7 +3004,7 @@ export class Orchestrator {
     }
 
     if (latestAttempt.status === "failed") {
-      const failureMessage = this.getLatestAttemptFailureMessage({
+      const failureMessage = await this.getLatestAttemptFailureMessage({
         current: input.current,
         journal: input.journal,
         latestAttempt
@@ -2715,6 +3074,23 @@ export class Orchestrator {
     }
 
     if (latestAttempt.status === "completed") {
+      if (
+        governance &&
+        governance.status !== "blocked" &&
+        governance.status !== "resolved" &&
+        governance.mainline_attempt_type === "execution" &&
+        governance.mainline_summary
+      ) {
+        return {
+          next_action: latestAttempt.attempt_type === "research" ? "start_execution" : "continue_execution",
+          attempt_type: "execution",
+          summary: "人工窗口超时，治理层要求沿着已经验证的 execution 主线继续。",
+          blocking_reason:
+            governance.context_summary.blocker_summary ?? governance.active_problem_summary,
+          reason: "governance_preserves_execution_mainline"
+        };
+      }
+
       const nextAttemptType =
         input.current.recommended_attempt_type ?? latestAttempt.attempt_type;
       if (nextAttemptType === "execution") {
@@ -2781,15 +3157,15 @@ export class Orchestrator {
     return count;
   }
 
-  private getAutomaticResumePolicy(input: {
+  private async getAutomaticResumePolicy(input: {
     current: CurrentDecision;
     attempts: Attempt[];
     journal: Awaited<ReturnType<typeof listRunJournal>>;
-  }): {
+  }): Promise<{
     delayMs: number;
     maxCycles: number;
     reasonPrefix?: string;
-  } {
+  }> {
     const latestAttempt = this.getLatestAttempt(input.current, input.attempts);
     const restartRequiredEntry =
       latestAttempt === null
@@ -2815,7 +3191,7 @@ export class Orchestrator {
       };
     }
 
-    const failureMessage = this.getLatestAttemptFailureMessage({
+    const failureMessage = await this.getLatestAttemptFailureMessage({
       current: input.current,
       journal: input.journal,
       latestAttempt
@@ -2825,7 +3201,10 @@ export class Orchestrator {
       return {
         delayMs: this.providerRateLimitAutoResumeMs,
         maxCycles: this.maxProviderRateLimitAutoResumeCycles,
-        reasonPrefix: "provider_rate_limited_retry_"
+        reasonPrefix:
+          latestAttempt.attempt_type === "execution"
+            ? "provider_rate_limited_retry_execution"
+            : "provider_rate_limited_retry_research"
       };
     }
 
@@ -2833,7 +3212,10 @@ export class Orchestrator {
       return {
         delayMs: this.workerStallAutoResumeMs,
         maxCycles: this.maxAutomaticResumeCycles,
-        reasonPrefix: "worker_stalled_retry_"
+        reasonPrefix:
+          latestAttempt.attempt_type === "execution"
+            ? "worker_stalled_retry_execution"
+            : "worker_stalled_retry_research"
       };
     }
 
@@ -2918,15 +3300,119 @@ export class Orchestrator {
     return null;
   }
 
-  private getLatestAttemptFailureMessage(input: {
+  private async getLatestAttemptFailureMessage(input: {
     current: CurrentDecision;
     journal: Awaited<ReturnType<typeof listRunJournal>>;
     latestAttempt: Attempt;
-  }): string | null {
-    return (
-      this.getAttemptJournalMessage(input.journal, input.latestAttempt.id, ["attempt.failed"]) ??
-      input.current.blocking_reason
+  }): Promise<string | null> {
+    const [stderrSignal, stdoutSignal] = await Promise.all([
+      this.getAttemptLogFailureSignal(
+        input.latestAttempt.run_id,
+        input.latestAttempt.id,
+        "stderr"
+      ),
+      this.getAttemptLogFailureSignal(
+        input.latestAttempt.run_id,
+        input.latestAttempt.id,
+        "stdout"
+      )
+    ]);
+
+    return this.pickFailureMessageCandidate([
+      this.getAttemptJournalMessage(input.journal, input.latestAttempt.id, ["attempt.failed"]),
+      input.current.blocking_reason,
+      stderrSignal,
+      stdoutSignal
+    ]);
+  }
+
+  private async getAttemptLogFailureSignal(
+    runId: string,
+    attemptId: string,
+    stream: "stdout" | "stderr"
+  ): Promise<string | null> {
+    const excerpt = await getAttemptLogExcerpt(
+      this.workspacePaths,
+      runId,
+      attemptId,
+      stream
     );
+    if (!excerpt) {
+      return null;
+    }
+
+    const lines = excerpt
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0)
+      .reverse();
+    const candidates: string[] = [];
+
+    for (const line of lines) {
+      candidates.push(...this.extractFailureMessagesFromLogLine(line));
+    }
+
+    return this.pickFailureMessageCandidate(candidates);
+  }
+
+  private extractFailureMessagesFromLogLine(line: string): string[] {
+    const pushCandidate = (value: unknown, target: string[]): void => {
+      if (typeof value !== "string") {
+        return;
+      }
+
+      const normalized = value.trim().replace(/\s+/g, " ");
+      if (normalized.length === 0) {
+        return;
+      }
+
+      target.push(
+        normalized.length > 600 ? normalized.slice(normalized.length - 600) : normalized
+      );
+    };
+
+    if (!line.startsWith("{")) {
+      const candidateLines: string[] = [];
+      pushCandidate(line, candidateLines);
+      return candidateLines;
+    }
+
+    try {
+      const parsed = JSON.parse(line) as Record<string, unknown>;
+      const candidates: string[] = [];
+      pushCandidate(parsed.message, candidates);
+      if (parsed.error && typeof parsed.error === "object") {
+        pushCandidate((parsed.error as Record<string, unknown>).message, candidates);
+      }
+      if (parsed.item && typeof parsed.item === "object") {
+        pushCandidate((parsed.item as Record<string, unknown>).aggregated_output, candidates);
+      }
+      return candidates;
+    } catch {
+      const candidateLines: string[] = [];
+      pushCandidate(line, candidateLines);
+      return candidateLines;
+    }
+  }
+
+  private pickFailureMessageCandidate(
+    candidates: Array<string | null | undefined>
+  ): string | null {
+    const normalizedCandidates = Array.from(
+      new Set(
+        candidates
+          .map((candidate) => candidate?.trim())
+          .filter((candidate): candidate is string => Boolean(candidate && candidate.length > 0))
+      )
+    );
+
+    for (const candidate of normalizedCandidates) {
+      if (this.classifyFailureMode(candidate) !== null) {
+        return candidate;
+      }
+    }
+
+    return normalizedCandidates[0] ?? null;
   }
 
   private classifyFailureMode(
@@ -3201,6 +3687,193 @@ export class Orchestrator {
     );
   }
 
+  private async withRunDispatchLease(
+    runId: string,
+    purpose: string,
+    callback: () => Promise<void>
+  ): Promise<void> {
+    const lease = await this.tryAcquireRunDispatchLease(runId, purpose);
+    if (!lease) {
+      return;
+    }
+
+    try {
+      await callback();
+    } finally {
+      await lease.release();
+    }
+  }
+
+  private async tryAcquireRunDispatchLease(
+    runId: string,
+    purpose: string
+  ): Promise<RunDispatchLease | null> {
+    const leaseFile = this.getRunDispatchLeaseFile(runId);
+    const leaseRecord: RunDispatchLeaseRecord = {
+      version: 1,
+      run_id: runId,
+      owner_id: this.instanceId,
+      owner_pid: process.pid,
+      purpose,
+      acquired_at: new Date().toISOString()
+    };
+
+    while (true) {
+      try {
+        const handle = await open(leaseFile, "wx");
+        try {
+          await handle.writeFile(`${JSON.stringify(leaseRecord, null, 2)}\n`, "utf8");
+        } finally {
+          await handle.close();
+        }
+        return {
+          release: async () => {
+            await this.releaseRunDispatchLease(runId, leaseRecord);
+          }
+        };
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
+          throw error;
+        }
+
+        const existingLease = await this.inspectRunDispatchLease(runId);
+        if (existingLease.status === "held") {
+          return null;
+        }
+
+        await unlink(leaseFile).catch((unlinkError) => {
+          if ((unlinkError as NodeJS.ErrnoException).code !== "ENOENT") {
+            throw unlinkError;
+          }
+        });
+      }
+    }
+  }
+
+  private async inspectRunDispatchLease(runId: string): Promise<
+    | {
+        status: "held";
+      }
+    | {
+        status: "stale_dead_owner";
+      }
+  > {
+    const leaseFile = this.getRunDispatchLeaseFile(runId);
+    const leaseStats = await stat(leaseFile);
+    const ageMs = Date.now() - leaseStats.mtimeMs;
+    if (ageMs <= this.runDispatchLeaseStaleMs) {
+      return {
+        status: "held"
+      };
+    }
+
+    const raw = await readFile(leaseFile, "utf8");
+    let parsed: Partial<RunDispatchLeaseRecord>;
+    try {
+      parsed = JSON.parse(raw) as Partial<RunDispatchLeaseRecord>;
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      throw new RunDispatchLeaseError(
+        "invalid_lease_payload",
+        `Run ${runId} has an unreadable dispatch lease at ${leaseFile}: ${reason}`
+      );
+    }
+
+    if (
+      parsed.version !== 1 ||
+      parsed.run_id !== runId ||
+      typeof parsed.owner_id !== "string" ||
+      parsed.owner_id.length === 0 ||
+      typeof parsed.owner_pid !== "number" ||
+      !Number.isInteger(parsed.owner_pid) ||
+      parsed.owner_pid <= 0 ||
+      typeof parsed.purpose !== "string" ||
+      parsed.purpose.length === 0 ||
+      typeof parsed.acquired_at !== "string" ||
+      parsed.acquired_at.length === 0
+    ) {
+      throw new RunDispatchLeaseError(
+        "invalid_lease_payload",
+        `Run ${runId} has an invalid dispatch lease payload at ${leaseFile}.`
+      );
+    }
+
+    if (this.isProcessAlive(parsed.owner_pid)) {
+      throw new RunDispatchLeaseError(
+        "stale_live_owner",
+        `Run ${runId} dispatch lease is still owned by live pid ${parsed.owner_pid} after ${ageMs}ms.`
+      );
+    }
+
+    return {
+      status: "stale_dead_owner"
+    };
+  }
+
+  private async releaseRunDispatchLease(
+    runId: string,
+    expectedLease: RunDispatchLeaseRecord
+  ): Promise<void> {
+    const leaseFile = this.getRunDispatchLeaseFile(runId);
+    let raw: string;
+    try {
+      raw = await readFile(leaseFile, "utf8");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+        return;
+      }
+      throw error;
+    }
+
+    let parsed: Partial<RunDispatchLeaseRecord>;
+    try {
+      parsed = JSON.parse(raw) as Partial<RunDispatchLeaseRecord>;
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      throw new RunDispatchLeaseError(
+        "invalid_lease_payload",
+        `Run ${runId} dispatch lease became unreadable before release: ${reason}`
+      );
+    }
+
+    if (
+      parsed.run_id !== expectedLease.run_id ||
+      parsed.owner_id !== expectedLease.owner_id ||
+      parsed.owner_pid !== expectedLease.owner_pid ||
+      parsed.acquired_at !== expectedLease.acquired_at
+    ) {
+      throw new RunDispatchLeaseError(
+        "lease_owner_mismatch",
+        `Run ${runId} dispatch lease owner changed before release.`
+      );
+    }
+
+    await unlink(leaseFile);
+  }
+
+  private getRunDispatchLeaseFile(runId: string): string {
+    return join(
+      resolveRunPaths(this.workspacePaths, runId).artifactsDir,
+      RUN_DISPATCH_LEASE_FILE_NAME
+    );
+  }
+
+  private isProcessAlive(pid: number): boolean {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === "ESRCH") {
+        return false;
+      }
+      if (code === "EPERM") {
+        return true;
+      }
+      throw error;
+    }
+  }
+
   private hasActiveAttemptForRun(runId: string): boolean {
     const prefix = `${runId}:`;
     for (const activeKey of this.activeAttempts) {
@@ -3257,6 +3930,13 @@ function readPositiveIntegerEnv(name: string, fallback: number): number {
   const parsed = Number.parseInt(raw, 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
+
+export {
+  assessRunHealth,
+  getRunMostRecentActivityTs,
+  type RunHealthAssessment,
+  type RunHealthStatus
+} from "./run-health.js";
 
 export {
   assertAttemptWorkspaceWithinRunScope,
