@@ -578,13 +578,80 @@ async function main(): Promise<void> {
     assert.equal(resumedAttempts[1]?.attempt_type, "execution");
     assert.equal(resumedAttempts[1]?.status, "created");
 
+    const staleRun = createRun({
+      title: "Stale run health verification",
+      description: "Ensure control-api exposes zombie running attempts clearly.",
+      success_criteria: ["Mark stale running attempts as degraded."],
+      constraints: [],
+      owner_id: "test-owner",
+      workspace_root: projectRoot
+    });
+    const staleAttemptStartedAt = new Date(Date.now() - 10 * 60_000).toISOString();
+    const staleAttempt = updateAttempt(
+      createAttempt({
+        run_id: staleRun.id,
+        attempt_type: "research",
+        worker: "fake-codex",
+        objective: "Stay stale long enough to test health exposure.",
+        success_criteria: staleRun.success_criteria,
+        workspace_root: projectRoot
+      }),
+      {
+        status: "running",
+        started_at: staleAttemptStartedAt
+      }
+    );
+    await saveRun(workspacePaths, staleRun);
+    await saveCurrentDecision(
+      workspacePaths,
+      createCurrentDecision({
+        run_id: staleRun.id,
+        run_status: "running",
+        latest_attempt_id: staleAttempt.id,
+        recommended_next_action: "attempt_running",
+        recommended_attempt_type: "research",
+        summary: "This run is intentionally left stale for health verification."
+      })
+    );
+    await saveAttempt(workspacePaths, staleAttempt);
+    await saveAttemptRuntimeState(
+      workspacePaths,
+      createAttemptRuntimeState({
+        attempt_id: staleAttempt.id,
+        run_id: staleRun.id,
+        running: true,
+        phase: "tool",
+        active_since: staleAttemptStartedAt,
+        last_event_at: staleAttemptStartedAt,
+        progress_text: "stale",
+        event_count: 1
+      })
+    );
+    await saveAttemptHeartbeat(workspacePaths, {
+      attempt_id: staleAttempt.id,
+      run_id: staleRun.id,
+      owner_id: "control-api-test",
+      status: "active",
+      started_at: staleAttemptStartedAt,
+      heartbeat_at: staleAttemptStartedAt,
+      released_at: null
+    });
+
     const response = await app.inject({
       method: "GET",
       url: `/runs/${run.id}`
     });
+    const staleResponse = await app.inject({
+      method: "GET",
+      url: `/runs/${staleRun.id}`
+    });
 
     assert.equal(response.statusCode, 200);
+    assert.equal(staleResponse.statusCode, 200);
     const payload = response.json() as {
+      run_health: {
+        status: string;
+      };
       attempts: Array<{ id: string }>;
       attempt_details: Array<{
         attempt: { id: string; input_context_ref: string | null };
@@ -614,6 +681,12 @@ async function main(): Promise<void> {
         stderr_excerpt: string;
         journal: Array<{ type: string }>;
       }>;
+    };
+    const stalePayload = staleResponse.json() as {
+      run_health: {
+        status: string;
+        likely_zombie: boolean;
+      };
     };
 
     const completedDetail = payload.attempt_details.find(
@@ -692,6 +765,9 @@ async function main(): Promise<void> {
       blockerDetail?.journal.map((entry) => entry.type),
       ["attempt.created", "attempt.started", "attempt.recovery_required"]
     );
+    assert.equal(payload.run_health.status, "waiting_steer");
+    assert.equal(stalePayload.run_health.status, "stale_running_attempt");
+    assert.equal(stalePayload.run_health.likely_zombie, true);
 
     const runsResponse = await app.inject({
       method: "GET",
@@ -701,11 +777,47 @@ async function main(): Promise<void> {
     const runsPayload = runsResponse.json() as {
       runs: Array<{
         run: { id: string };
+        run_health: {
+          status: string;
+          likely_zombie: boolean;
+        };
         latest_attempt_runtime_state: { session_id: string | null } | null;
       }>;
     };
     const runSummary = runsPayload.runs.find((item) => item.run.id === run.id);
     assert.equal(runSummary?.latest_attempt_runtime_state, null);
+    assert.equal(runSummary?.run_health.status, "waiting_steer");
+
+    const healthResponse = await app.inject({
+      method: "GET",
+      url: "/health"
+    });
+    assert.equal(healthResponse.statusCode, 200);
+    const healthPayload = healthResponse.json() as {
+      status: string;
+      degraded_run_count: number;
+      degraded_runs: Array<{
+        run_id: string;
+        latest_attempt_id: string | null;
+        status: string;
+      }>;
+    };
+    assert.equal(healthPayload.status, "degraded");
+    assert.equal(healthPayload.degraded_run_count, 1);
+    assert.deepEqual(
+      healthPayload.degraded_runs.map((runHealth) => ({
+        run_id: runHealth.run_id,
+        latest_attempt_id: runHealth.latest_attempt_id,
+        status: runHealth.status
+      })),
+      [
+      {
+        run_id: staleRun.id,
+        latest_attempt_id: staleAttempt.id,
+        status: "stale_running_attempt"
+      }
+      ]
+    );
 
     console.log(
       JSON.stringify(

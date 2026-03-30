@@ -27,6 +27,7 @@ import { synthesizeAttemptEvaluation } from "../packages/judge/src/index.js";
 import {
   appendRunJournal,
   ensureWorkspace,
+  getAttemptHeartbeat,
   getAttemptContext,
   getAttemptEvaluation,
   getAttemptEvaluationSynthesisRecord,
@@ -53,7 +54,8 @@ import {
 const REVIEWER_CONFIG_ENV = "AISA_REVIEWERS_JSON";
 const SYNTHESIZER_CONFIG_ENV = "AISA_REVIEW_SYNTHESIZER_JSON";
 const CLI_REVIEWER_FAILURE_TIMEOUT_MS = 1_000;
-const CLI_SYNTHESIZER_FAILURE_TIMEOUT_MS = 1_000;
+const CLI_REVIEWER_RESPONSE_TIMEOUT_MS = 5_000;
+const CLI_SYNTHESIZER_FAILURE_TIMEOUT_MS = 5_000;
 
 type CliReviewerFailureMode = "invalid_json" | "nonzero_exit" | "timeout";
 type CliSynthesizerFailureMode = "invalid_json" | "nonzero_exit";
@@ -693,7 +695,13 @@ async function waitForRunningAttemptsToSettle(
 
   while (Date.now() < deadline) {
     const attempts = await listAttempts(workspacePaths, runId);
-    if (!attempts.some((attempt) => attempt.status === "running")) {
+    const hasRunningAttempt = attempts.some((attempt) => attempt.status === "running");
+    const hasActiveHeartbeat = await hasActiveAttemptHeartbeats(
+      workspacePaths,
+      runId,
+      attempts
+    );
+    if (!hasRunningAttempt && !hasActiveHeartbeat) {
       return;
     }
     await sleep(50);
@@ -717,7 +725,23 @@ async function isRunQuiescent(
     return false;
   }
 
+  if (await hasActiveAttemptHeartbeats(workspacePaths, runId, attempts)) {
+    return false;
+  }
+
   return current.run_status !== "running";
+}
+
+async function hasActiveAttemptHeartbeats(
+  workspacePaths: ReturnType<typeof resolveWorkspacePaths>,
+  runId: string,
+  attempts: Awaited<ReturnType<typeof listAttempts>>
+): Promise<boolean> {
+  const heartbeats = await Promise.all(
+    attempts.map((attempt) => getAttemptHeartbeat(workspacePaths, runId, attempt.id))
+  );
+
+  return heartbeats.some((heartbeat) => heartbeat?.status === "active");
 }
 
 function sleep(ms: number): Promise<void> {
@@ -1830,7 +1854,10 @@ async function runCliReviewerFailureCase(
       command: process.execPath,
       args: [join(process.cwd(), "scripts", "fixture-reviewer-cli.mjs"), mode],
       cwd: process.cwd(),
-      timeout_ms: CLI_REVIEWER_FAILURE_TIMEOUT_MS
+      timeout_ms:
+        mode === "timeout"
+          ? CLI_REVIEWER_FAILURE_TIMEOUT_MS
+          : CLI_REVIEWER_RESPONSE_TIMEOUT_MS
     }
   ];
 

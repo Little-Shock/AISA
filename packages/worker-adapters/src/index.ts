@@ -1536,6 +1536,7 @@ function buildCodexWorkerPrompt(
     "Rules:",
     "- Work in read-only analysis mode. Do not modify files in the workspace.",
     "- Use local repository evidence whenever possible.",
+    "- If Current Context already carries structured runtime evidence, trust that object first and do not guess relative file paths to re-read it.",
     "- If evidence is weak or missing, say so explicitly.",
     "- Write all user-facing natural language fields in concise Chinese.",
     "- Keep JSON keys, enum-like machine values, file paths, shell commands, and evidence strings stable when they must stay machine-readable.",

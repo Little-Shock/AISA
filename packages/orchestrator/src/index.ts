@@ -58,6 +58,7 @@ import {
   getAttemptContext,
   getAttemptHeartbeat,
   getAttemptEvaluation,
+  getAttemptLogExcerpt,
   getAttemptEvaluationSynthesisRecord,
   getAttemptReviewInputPacket,
   getAttemptReviewPacket,
@@ -2442,7 +2443,7 @@ export class Orchestrator {
     }
 
     const journal = await listRunJournal(this.workspacePaths, runId);
-    const autoResumePolicy = this.getAutomaticResumePolicy({
+    const autoResumePolicy = await this.getAutomaticResumePolicy({
       current,
       attempts,
       journal
@@ -2462,7 +2463,7 @@ export class Orchestrator {
       return;
     }
 
-    const blocker = this.detectAutomaticResumeBlocker({
+    const blocker = await this.detectAutomaticResumeBlocker({
       current,
       attempts,
       journal
@@ -2473,7 +2474,7 @@ export class Orchestrator {
       return;
     }
 
-    const plan = this.buildAutomaticResumePlan({
+    const plan = await this.buildAutomaticResumePlan({
       current,
       attempts,
       journal
@@ -2511,11 +2512,11 @@ export class Orchestrator {
     );
   }
 
-  private detectAutomaticResumeBlocker(input: {
+  private async detectAutomaticResumeBlocker(input: {
     current: CurrentDecision;
     attempts: Attempt[];
     journal: Awaited<ReturnType<typeof listRunJournal>>;
-  }): { reason: string; message: string } | null {
+  }): Promise<{ reason: string; message: string } | null> {
     const latestAttempt = this.getLatestAttempt(input.current, input.attempts);
     const workspaceScopeMessage = this.getRunWorkspaceScopeBlockedMessage(
       input.journal,
@@ -2554,7 +2555,7 @@ export class Orchestrator {
       return null;
     }
 
-    const failureMessage = this.getLatestAttemptFailureMessage({
+    const failureMessage = await this.getLatestAttemptFailureMessage({
       current: input.current,
       journal: input.journal,
       latestAttempt
@@ -2571,11 +2572,11 @@ export class Orchestrator {
     };
   }
 
-  private buildAutomaticResumePlan(input: {
+  private async buildAutomaticResumePlan(input: {
     current: CurrentDecision;
     attempts: Attempt[];
     journal: Awaited<ReturnType<typeof listRunJournal>>;
-  }):
+  }): Promise<
     | {
         next_action: string;
         attempt_type: Attempt["attempt_type"];
@@ -2583,7 +2584,8 @@ export class Orchestrator {
         blocking_reason: string | null;
         reason: string;
       }
-    | null {
+    | null
+  > {
     const latestAttempt = this.getLatestAttempt(input.current, input.attempts);
     if (!latestAttempt) {
       return {
@@ -2645,7 +2647,7 @@ export class Orchestrator {
     }
 
     if (latestAttempt.status === "failed") {
-      const failureMessage = this.getLatestAttemptFailureMessage({
+      const failureMessage = await this.getLatestAttemptFailureMessage({
         current: input.current,
         journal: input.journal,
         latestAttempt
@@ -2781,15 +2783,15 @@ export class Orchestrator {
     return count;
   }
 
-  private getAutomaticResumePolicy(input: {
+  private async getAutomaticResumePolicy(input: {
     current: CurrentDecision;
     attempts: Attempt[];
     journal: Awaited<ReturnType<typeof listRunJournal>>;
-  }): {
+  }): Promise<{
     delayMs: number;
     maxCycles: number;
     reasonPrefix?: string;
-  } {
+  }> {
     const latestAttempt = this.getLatestAttempt(input.current, input.attempts);
     const restartRequiredEntry =
       latestAttempt === null
@@ -2815,7 +2817,7 @@ export class Orchestrator {
       };
     }
 
-    const failureMessage = this.getLatestAttemptFailureMessage({
+    const failureMessage = await this.getLatestAttemptFailureMessage({
       current: input.current,
       journal: input.journal,
       latestAttempt
@@ -2825,7 +2827,10 @@ export class Orchestrator {
       return {
         delayMs: this.providerRateLimitAutoResumeMs,
         maxCycles: this.maxProviderRateLimitAutoResumeCycles,
-        reasonPrefix: "provider_rate_limited_retry_"
+        reasonPrefix:
+          latestAttempt.attempt_type === "execution"
+            ? "provider_rate_limited_retry_execution"
+            : "provider_rate_limited_retry_research"
       };
     }
 
@@ -2833,7 +2838,10 @@ export class Orchestrator {
       return {
         delayMs: this.workerStallAutoResumeMs,
         maxCycles: this.maxAutomaticResumeCycles,
-        reasonPrefix: "worker_stalled_retry_"
+        reasonPrefix:
+          latestAttempt.attempt_type === "execution"
+            ? "worker_stalled_retry_execution"
+            : "worker_stalled_retry_research"
       };
     }
 
@@ -2918,15 +2926,119 @@ export class Orchestrator {
     return null;
   }
 
-  private getLatestAttemptFailureMessage(input: {
+  private async getLatestAttemptFailureMessage(input: {
     current: CurrentDecision;
     journal: Awaited<ReturnType<typeof listRunJournal>>;
     latestAttempt: Attempt;
-  }): string | null {
-    return (
-      this.getAttemptJournalMessage(input.journal, input.latestAttempt.id, ["attempt.failed"]) ??
-      input.current.blocking_reason
+  }): Promise<string | null> {
+    const [stderrSignal, stdoutSignal] = await Promise.all([
+      this.getAttemptLogFailureSignal(
+        input.latestAttempt.run_id,
+        input.latestAttempt.id,
+        "stderr"
+      ),
+      this.getAttemptLogFailureSignal(
+        input.latestAttempt.run_id,
+        input.latestAttempt.id,
+        "stdout"
+      )
+    ]);
+
+    return this.pickFailureMessageCandidate([
+      this.getAttemptJournalMessage(input.journal, input.latestAttempt.id, ["attempt.failed"]),
+      input.current.blocking_reason,
+      stderrSignal,
+      stdoutSignal
+    ]);
+  }
+
+  private async getAttemptLogFailureSignal(
+    runId: string,
+    attemptId: string,
+    stream: "stdout" | "stderr"
+  ): Promise<string | null> {
+    const excerpt = await getAttemptLogExcerpt(
+      this.workspacePaths,
+      runId,
+      attemptId,
+      stream
     );
+    if (!excerpt) {
+      return null;
+    }
+
+    const lines = excerpt
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0)
+      .reverse();
+    const candidates: string[] = [];
+
+    for (const line of lines) {
+      candidates.push(...this.extractFailureMessagesFromLogLine(line));
+    }
+
+    return this.pickFailureMessageCandidate(candidates);
+  }
+
+  private extractFailureMessagesFromLogLine(line: string): string[] {
+    const pushCandidate = (value: unknown, target: string[]): void => {
+      if (typeof value !== "string") {
+        return;
+      }
+
+      const normalized = value.trim().replace(/\s+/g, " ");
+      if (normalized.length === 0) {
+        return;
+      }
+
+      target.push(
+        normalized.length > 600 ? normalized.slice(normalized.length - 600) : normalized
+      );
+    };
+
+    if (!line.startsWith("{")) {
+      const candidateLines: string[] = [];
+      pushCandidate(line, candidateLines);
+      return candidateLines;
+    }
+
+    try {
+      const parsed = JSON.parse(line) as Record<string, unknown>;
+      const candidates: string[] = [];
+      pushCandidate(parsed.message, candidates);
+      if (parsed.error && typeof parsed.error === "object") {
+        pushCandidate((parsed.error as Record<string, unknown>).message, candidates);
+      }
+      if (parsed.item && typeof parsed.item === "object") {
+        pushCandidate((parsed.item as Record<string, unknown>).aggregated_output, candidates);
+      }
+      return candidates;
+    } catch {
+      const candidateLines: string[] = [];
+      pushCandidate(line, candidateLines);
+      return candidateLines;
+    }
+  }
+
+  private pickFailureMessageCandidate(
+    candidates: Array<string | null | undefined>
+  ): string | null {
+    const normalizedCandidates = Array.from(
+      new Set(
+        candidates
+          .map((candidate) => candidate?.trim())
+          .filter((candidate): candidate is string => Boolean(candidate && candidate.length > 0))
+      )
+    );
+
+    for (const candidate of normalizedCandidates) {
+      if (this.classifyFailureMode(candidate) !== null) {
+        return candidate;
+      }
+    }
+
+    return normalizedCandidates[0] ?? null;
   }
 
   private classifyFailureMode(
@@ -3257,6 +3369,13 @@ function readPositiveIntegerEnv(name: string, fallback: number): number {
   const parsed = Number.parseInt(raw, 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
+
+export {
+  assessRunHealth,
+  getRunMostRecentActivityTs,
+  type RunHealthAssessment,
+  type RunHealthStatus
+} from "./run-health.js";
 
 export {
   assertAttemptWorkspaceWithinRunScope,

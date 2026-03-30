@@ -20,6 +20,7 @@ import {
   ensureWorkspace,
   getAttempt,
   getAttemptContract,
+  getAttemptHeartbeat,
   getAttemptReviewPacket,
   getAttemptResult,
   getAttemptRuntimeState,
@@ -375,6 +376,37 @@ class CompletedRuntimeStateExecutionAdapter {
   }
 }
 
+class DelayedResearchAdapter {
+  readonly type = "fake-codex";
+
+  async runAttemptTask(): Promise<{
+    writeback: WorkerWriteback;
+    reportMarkdown: string;
+    exitCode: number;
+  }> {
+    await sleep(200);
+
+    return {
+      writeback: {
+        summary: "Research finished after a short delay and still needs another round.",
+        findings: [
+          {
+            type: "fact",
+            content: "The repository needs more runtime analysis before execution.",
+            evidence: ["scripts/verify-drive-run.ts"]
+          }
+        ],
+        questions: [],
+        recommended_next_steps: ["Keep researching the runtime gap."],
+        confidence: 0.62,
+        artifacts: []
+      },
+      reportMarkdown: "# delayed research",
+      exitCode: 0
+    };
+  }
+}
+
 async function withTemporaryEnv<T>(
   name: string,
   value: string,
@@ -420,6 +452,7 @@ async function main(hostJudgeConfig: HostJudgeConfigSnapshot): Promise<void> {
   await initializeGitRepo(rootDir);
   await verifyManagedWorkspaceCheckpointCatchesUpDirtyBaseline();
   await verifyExecutionAttemptRuntimeStateTransitionsAcrossVerification();
+  await verifyDriveRunDoesNotLeaveRunningAttemptBehind();
 
   const run = createRun({
     title: "Drive a self-bootstrap run locally",
@@ -1001,6 +1034,61 @@ async function verifyExecutionAttemptRuntimeStateTransitionsAcrossVerification()
   assert.equal(completedState?.phase, "completed");
   assert.equal(completedState?.running, false);
   assert.equal(runtimeVerification?.status, "passed");
+}
+
+async function verifyDriveRunDoesNotLeaveRunningAttemptBehind(): Promise<void> {
+  const rootDir = await mkdtemp(join(tmpdir(), "aisa-drive-run-drain-"));
+  const workspacePaths = resolveWorkspacePaths(rootDir);
+  await ensureWorkspace(workspacePaths);
+  await initializeGitRepo(rootDir);
+
+  const run = createRun({
+    title: "Drain running attempt before returning",
+    description: "Verify drive-run does not exit while it still owns an active attempt.",
+    success_criteria: ["Do not leave a running attempt behind when poll budget is exhausted."],
+    constraints: [],
+    owner_id: "test-owner",
+    workspace_root: rootDir
+  });
+  const current = createCurrentDecision({
+    run_id: run.id,
+    run_status: "running",
+    recommended_next_action: "start_first_attempt",
+    recommended_attempt_type: "research",
+    summary: "Start a delayed research attempt."
+  });
+
+  await saveRun(workspacePaths, run);
+  await saveCurrentDecision(workspacePaths, current);
+
+  const result = await driveRun({
+    workspaceRoot: rootDir,
+    runId: run.id,
+    adapter: new DelayedResearchAdapter() as never,
+    pollIntervalMs: 10,
+    maxPolls: 1
+  });
+
+  const attempts = await listAttempts(workspacePaths, run.id);
+  const latestAttempt = attempts.at(-1) ?? null;
+  assert.ok(latestAttempt, "drive-run drain test should persist a research attempt");
+  assert.ok(
+    ["max_polls_exhausted", "run_settled"].includes(result.stopReason),
+    `drain path should only stop after the active attempt settles, got ${result.stopReason}`
+  );
+  assert.notEqual(
+    latestAttempt?.status,
+    "running",
+    "drive-run must not leave a running attempt behind after it returns"
+  );
+  const heartbeat = latestAttempt
+    ? await getAttemptHeartbeat(workspacePaths, run.id, latestAttempt.id)
+    : null;
+  assert.equal(
+    heartbeat?.status,
+    "released",
+    "drive-run must release the active heartbeat before it returns"
+  );
 }
 
 async function settleFirstResearchAttempt(input: {
