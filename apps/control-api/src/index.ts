@@ -26,6 +26,8 @@ import {
   createRunWorkspaceScopePolicy,
   lockRunWorkspaceRoot,
   Orchestrator,
+  repairRunManagedWorkspace,
+  ensureRunManagedWorkspace,
   resolveRuntimeLayout,
   syncRuntimeLayoutHint,
   RunWorkspaceScopeError
@@ -689,6 +691,132 @@ export async function buildServer(
       );
 
       return { current: nextCurrent };
+    } catch (error) {
+      if (error instanceof RunWorkspaceScopeError) {
+        return reply.code(400).send({ message: error.message });
+      }
+      return reply.code(404).send({ message: `Run ${runId} not found` });
+    }
+  });
+
+  app.post("/runs/:runId/repair-managed-workspace", async (request, reply) => {
+    const { runId } = request.params as { runId: string };
+
+    try {
+      const run = await getRun(workspacePaths, runId);
+      const current =
+        (await getCurrentDecision(workspacePaths, runId)) ??
+        createCurrentDecision({
+          run_id: runId,
+          run_status: "draft"
+        });
+
+      try {
+        const ensuredRun = await ensureRunManagedWorkspace({
+          run,
+          policy: runWorkspaceScopePolicy
+        });
+        if (
+          ensuredRun.workspace_root !== run.workspace_root ||
+          ensuredRun.managed_workspace_root !== run.managed_workspace_root
+        ) {
+          await saveRun(workspacePaths, ensuredRun);
+        }
+
+        const summary = "隔离工作区已经就绪。重新启动 run 后继续最近决策。";
+        const nextCurrent = updateCurrentDecision(current, {
+          run_status: "waiting_steer",
+          waiting_for_human: true,
+          recommended_next_action: "wait_for_human",
+          blocking_reason: summary,
+          summary
+        });
+        await saveCurrentDecision(workspacePaths, nextCurrent);
+        await appendRunJournal(
+          workspacePaths,
+          createRunJournalEntry({
+            run_id: runId,
+            attempt_id: current.latest_attempt_id,
+            type: "run.manual_recovery",
+            payload: {
+              action: "repair_managed_workspace",
+              status: "noop",
+              message: summary,
+              managed_workspace_root:
+                ensuredRun.managed_workspace_root ?? ensuredRun.workspace_root
+            }
+          })
+        );
+
+        return {
+          run: ensuredRun,
+          current: nextCurrent,
+          repair: {
+            status: "noop",
+            message: summary
+          }
+        };
+      } catch (error) {
+        if (
+          !(error instanceof RunWorkspaceScopeError) ||
+          error.code !== "managed_workspace_stale_from_source"
+        ) {
+          throw error;
+        }
+
+        const repair = await repairRunManagedWorkspace({
+          run,
+          policy: runWorkspaceScopePolicy
+        });
+        await saveRun(workspacePaths, repair.run);
+
+        const summary =
+          `隔离工作区已重建，旧现场保留在 ${repair.archived_managed_workspace_root}。` +
+          "重新启动 run 后继续最近决策。";
+        const nextCurrent = updateCurrentDecision(current, {
+          run_status: "waiting_steer",
+          waiting_for_human: true,
+          recommended_next_action: "wait_for_human",
+          blocking_reason: summary,
+          summary
+        });
+        await saveCurrentDecision(workspacePaths, nextCurrent);
+        await appendRunJournal(
+          workspacePaths,
+          createRunJournalEntry({
+            run_id: runId,
+            attempt_id: current.latest_attempt_id,
+            type: "run.manual_recovery",
+            payload: {
+              action: "repair_managed_workspace",
+              status: repair.status,
+              previous_error_code: error.code,
+              previous_error_message: error.message,
+              previous_managed_workspace_root:
+                repair.previous_managed_workspace_root,
+              previous_managed_repo_root: repair.previous_managed_repo_root,
+              previous_managed_head: repair.previous_managed_head,
+              previous_managed_status: repair.previous_managed_status,
+              archived_managed_workspace_root:
+                repair.archived_managed_workspace_root,
+              archived_managed_repo_root: repair.archived_managed_repo_root,
+              repaired_managed_workspace_root:
+                repair.repaired_managed_workspace_root,
+              repaired_managed_repo_root: repair.repaired_managed_repo_root,
+              repaired_managed_head: repair.repaired_managed_head,
+              source_repo_root: repair.source_repo_root,
+              source_head: repair.source_head,
+              message: summary
+            }
+          })
+        );
+
+        return {
+          run: repair.run,
+          current: nextCurrent,
+          repair
+        };
+      }
     } catch (error) {
       if (error instanceof RunWorkspaceScopeError) {
         return reply.code(400).send({ message: error.message });

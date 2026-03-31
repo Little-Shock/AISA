@@ -173,6 +173,7 @@ async function main(): Promise<void> {
     await verifyCorruptRuntimeLayoutHintFailsClosed();
     await verifyManagedWorkspaceFastForwardsToCurrentDevHead();
     await verifyManagedWorkspaceRejectsDirtyStaleBaseline();
+    await verifyRepairManagedWorkspaceRehomesDivergedHistory();
     await verifyControlApiUsesSeparateRuntimeLayout();
     const promotion = await verifyCheckpointPromotionUpdatesRuntimeRepo();
     const dirtyBlock = await verifyDirtyRuntimeRepoBlocksPromotion();
@@ -324,6 +325,161 @@ async function verifyManagedWorkspaceRejectsDirtyStaleBaseline(): Promise<void> 
       error.message.includes("落后于当前源仓库 HEAD"),
     "dirty stale managed workspace should fail closed with an explicit workspace error"
   );
+}
+
+async function verifyRepairManagedWorkspaceRehomesDivergedHistory(): Promise<void> {
+  const layout = await createRuntimeLaneFixture("aisa-runtime-managed-repair-");
+  const workspacePaths = resolveWorkspacePaths(layout.runtimeDataRoot);
+  await ensureWorkspace(workspacePaths);
+  const policy = await createRunWorkspaceScopePolicy({
+    runtimeRoot: layout.runtimeRepoRoot,
+    allowedRoots: buildRuntimeWorkspaceScopeRoots(layout.runtimeLayout),
+    managedWorkspaceRoot: layout.runtimeLayout.managedWorkspaceRoot
+  });
+  const run = createRun({
+    title: "Repair diverged managed workspace",
+    description:
+      "Ensure an explicit repair preserves the stale worktree as evidence and recreates the live worktree from the current dev head.",
+    success_criteria: ["repair the diverged managed workspace without deleting the old evidence"],
+    constraints: [],
+    owner_id: "test-owner",
+    workspace_root: layout.devRepoRoot
+  });
+  const current = createCurrentDecision({
+    run_id: run.id,
+    run_status: "waiting_steer",
+    recommended_next_action: "wait_for_human",
+    recommended_attempt_type: "execution",
+    waiting_for_human: true,
+    summary: "Blocked on stale managed workspace."
+  });
+  await saveRun(workspacePaths, run);
+  await saveCurrentDecision(workspacePaths, current);
+
+  const initialRun = await ensureRunManagedWorkspace({ run, policy });
+  await saveRun(workspacePaths, initialRun);
+  assert.ok(initialRun.managed_workspace_root, "managed workspace should be provisioned");
+
+  await writeFile(
+    join(initialRun.managed_workspace_root, "README.md"),
+    "# runtime lane seed\n\ncheckpoint branch\n",
+    "utf8"
+  );
+  await runCommand(initialRun.managed_workspace_root, ["git", "add", "README.md"]);
+  await runCommand(initialRun.managed_workspace_root, [
+    "git",
+    "commit",
+    "-m",
+    "test: checkpoint stale worktree"
+  ]);
+  const previousManagedHead = await readGitHead(initialRun.managed_workspace_root);
+  assert.ok(previousManagedHead, "checkpoint head should be readable from the stale worktree");
+
+  await writeFile(join(layout.devRepoRoot, "README.md"), "# runtime lane seed\n\ndev rewrite\n", "utf8");
+  await runCommand(layout.devRepoRoot, ["git", "add", "README.md"]);
+  await runCommand(layout.devRepoRoot, ["git", "commit", "-m", "test: rewrite dev head"]);
+  const sourceHead = await readGitHead(layout.devRepoRoot);
+  assert.ok(sourceHead, "dev head should be readable after the rewrite");
+
+  await assert.rejects(
+    () =>
+      ensureRunManagedWorkspace({
+        run: initialRun,
+        policy
+      }),
+    (error: unknown) =>
+      error instanceof RunWorkspaceScopeError &&
+      error.code === "managed_workspace_stale_from_source" &&
+      error.message.includes("已经偏离当前源仓库 HEAD"),
+    "diverged managed workspace should fail closed before the repair route runs"
+  );
+
+  const app = await buildServer({
+    startOrchestrator: false,
+    runtimeRepoRoot: layout.runtimeRepoRoot,
+    devRepoRoot: layout.devRepoRoot,
+    runtimeDataRoot: layout.runtimeDataRoot,
+    managedWorkspaceRoot: layout.runtimeLayout.managedWorkspaceRoot
+  });
+
+  try {
+    const repairResponse = await app.inject({
+      method: "POST",
+      url: `/runs/${run.id}/repair-managed-workspace`
+    });
+    assert.equal(repairResponse.statusCode, 200, repairResponse.body);
+
+    const repairPayload = repairResponse.json() as {
+      run: Run;
+      current: {
+        run_status: string;
+        waiting_for_human: boolean;
+        summary: string | null;
+      };
+      repair: {
+        status: string;
+        source_head: string;
+        previous_managed_head: string;
+        archived_managed_workspace_root: string;
+        repaired_managed_workspace_root: string;
+        repaired_managed_head: string;
+      };
+    };
+
+    assert.equal(repairPayload.repair.status, "repaired");
+    assert.equal(repairPayload.repair.source_head, sourceHead);
+    assert.equal(repairPayload.repair.previous_managed_head, previousManagedHead);
+    assert.equal(
+      repairPayload.repair.repaired_managed_workspace_root,
+      initialRun.managed_workspace_root
+    );
+    assert.equal(repairPayload.run.managed_workspace_root, initialRun.managed_workspace_root);
+    assert.equal(repairPayload.current.run_status, "waiting_steer");
+    assert.equal(repairPayload.current.waiting_for_human, true);
+    assert.ok(
+      repairPayload.current.summary?.includes(
+        repairPayload.repair.archived_managed_workspace_root
+      ),
+      "manual recovery summary should point to the archived stale worktree"
+    );
+
+    assert.equal(
+      await readGitHead(repairPayload.repair.repaired_managed_workspace_root),
+      sourceHead,
+      "repaired live worktree should match the current dev head"
+    );
+    assert.equal(
+      await readGitHead(repairPayload.repair.archived_managed_workspace_root),
+      previousManagedHead,
+      "archived worktree should preserve the stale checkpoint head"
+    );
+    assert.deepEqual(
+      await readGitStatus(repairPayload.repair.repaired_managed_workspace_root),
+      [],
+      "repaired live worktree should be clean"
+    );
+
+    const repairedRun = await getRun(workspacePaths, run.id);
+    assert.equal(repairedRun.managed_workspace_root, initialRun.managed_workspace_root);
+    await ensureRunManagedWorkspace({
+      run: repairedRun,
+      policy
+    });
+
+    const journal = await listRunJournal(workspacePaths, run.id);
+    assert.ok(
+      journal.some(
+        (entry) =>
+          entry.type === "run.manual_recovery" &&
+          entry.payload.action === "repair_managed_workspace" &&
+          entry.payload.archived_managed_workspace_root ===
+            repairPayload.repair.archived_managed_workspace_root
+      ),
+      "manual recovery journal should preserve the archived stale worktree path"
+    );
+  } finally {
+    await app.close();
+  }
 }
 
 async function verifyControlApiUsesSeparateRuntimeLayout(): Promise<void> {

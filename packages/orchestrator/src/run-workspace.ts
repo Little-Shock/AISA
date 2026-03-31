@@ -18,6 +18,22 @@ type GitCommandResult = {
   exitCode: number;
 };
 
+export type ManagedWorkspaceRepairResult = {
+  status: "repaired";
+  run: Run;
+  source_repo_root: string;
+  source_head: string;
+  previous_managed_workspace_root: string;
+  previous_managed_repo_root: string;
+  previous_managed_head: string;
+  previous_managed_status: string[];
+  archived_managed_workspace_root: string;
+  archived_managed_repo_root: string;
+  repaired_managed_workspace_root: string;
+  repaired_managed_repo_root: string;
+  repaired_managed_head: string;
+};
+
 const MANAGED_WORKSPACE_TRANSIENT_PATHS = ["node_modules"] as const;
 
 export function isManagedWorkspaceTransientPath(relativePath: string): boolean {
@@ -168,6 +184,139 @@ export async function ensureRunManagedWorkspace(input: {
     workspace_root: sourceWorkspaceRoot,
     managed_workspace_root: validatedManagedWorkspaceRoot
   });
+}
+
+export async function repairRunManagedWorkspace(input: {
+  run: Run;
+  policy: RunWorkspaceScopePolicy;
+}): Promise<ManagedWorkspaceRepairResult> {
+  const sourceLock = await lockRunWorkspaceRoot(
+    input.run.workspace_root,
+    input.policy
+  );
+  const sourceWorkspaceRoot = sourceLock.resolvedRoot;
+  const sourceRepoRoot = await resolveGitRepoRoot(sourceWorkspaceRoot);
+
+  if (!sourceRepoRoot) {
+    throw new RunWorkspaceScopeError(
+      "managed_workspace_repair_failed",
+      `源工作区不是 git 仓库，不能重建隔离 worktree：${sourceWorkspaceRoot}`,
+      {
+        workspace_root: sourceWorkspaceRoot,
+        managed_workspace_root: input.run.managed_workspace_root
+      }
+    );
+  }
+
+  if (!input.run.managed_workspace_root) {
+    throw new RunWorkspaceScopeError(
+      "managed_workspace_repair_failed",
+      "运行没有记录隔离工作区，不能执行修复。",
+      {
+        workspace_root: sourceWorkspaceRoot,
+        source_repo_root: sourceRepoRoot
+      }
+    );
+  }
+
+  const validatedManagedWorkspaceRoot = await validateManagedWorkspace({
+    sourceRepoRoot,
+    sourceWorkspaceRoot,
+    managedWorkspaceRoot: input.run.managed_workspace_root,
+    policy: input.policy
+  });
+  const managedRepoRoot = await resolveGitRepoRoot(validatedManagedWorkspaceRoot);
+  if (!managedRepoRoot) {
+    throw new RunWorkspaceScopeError(
+      "managed_workspace_repair_failed",
+      `记录的隔离工作区不是 git worktree：${validatedManagedWorkspaceRoot}`,
+      {
+        managed_workspace_root: validatedManagedWorkspaceRoot
+      }
+    );
+  }
+
+  const [sourceHead, previousManagedHead, previousManagedStatus] =
+    await Promise.all([
+      readRequiredGitHead(
+        sourceRepoRoot,
+        "无法读取源仓库 HEAD，不能重建隔离 worktree。",
+        {
+          source_repo_root: sourceRepoRoot
+        }
+      ),
+      readRequiredGitHead(
+        managedRepoRoot,
+        "无法读取旧隔离 worktree HEAD，不能保留修复现场。",
+        {
+          managed_workspace_root: validatedManagedWorkspaceRoot,
+          managed_repo_root: managedRepoRoot
+        }
+      ),
+      readGitStatus(managedRepoRoot)
+    ]);
+
+  const workspaceSubpath = relative(sourceRepoRoot, sourceWorkspaceRoot);
+  const archivedManagedRepoRoot =
+    await allocateArchivedManagedRepoRoot(managedRepoRoot);
+  const archivedManagedWorkspaceRoot =
+    workspaceSubpath.length === 0
+      ? archivedManagedRepoRoot
+      : join(archivedManagedRepoRoot, workspaceSubpath);
+
+  await moveManagedWorktree({
+    sourceRepoRoot,
+    managedRepoRoot,
+    archivedManagedRepoRoot,
+    managedWorkspaceRoot: validatedManagedWorkspaceRoot
+  });
+
+  await createManagedWorkspace({
+    runId: input.run.id,
+    sourceRepoRoot,
+    worktreeRepoRoot: managedRepoRoot
+  });
+  await provisionManagedWorkspaceToolchain({
+    sourceRepoRoot,
+    managedRepoRoot
+  });
+  const repairedManagedWorkspaceRoot = await validateManagedWorkspace({
+    sourceRepoRoot,
+    sourceWorkspaceRoot,
+    managedWorkspaceRoot:
+      workspaceSubpath.length === 0
+        ? managedRepoRoot
+        : join(managedRepoRoot, workspaceSubpath),
+    expectedWorktreeRepoRoot: managedRepoRoot,
+    policy: input.policy
+  });
+  const repairedManagedHead = await readRequiredGitHead(
+    managedRepoRoot,
+    "无法读取新隔离 worktree HEAD，修复未完成。",
+    {
+      managed_workspace_root: repairedManagedWorkspaceRoot,
+      managed_repo_root: managedRepoRoot
+    }
+  );
+
+  return {
+    status: "repaired",
+    run: updateRun(input.run, {
+      workspace_root: sourceWorkspaceRoot,
+      managed_workspace_root: repairedManagedWorkspaceRoot
+    }),
+    source_repo_root: sourceRepoRoot,
+    source_head: sourceHead,
+    previous_managed_workspace_root: validatedManagedWorkspaceRoot,
+    previous_managed_repo_root: managedRepoRoot,
+    previous_managed_head: previousManagedHead,
+    previous_managed_status: previousManagedStatus,
+    archived_managed_workspace_root: archivedManagedWorkspaceRoot,
+    archived_managed_repo_root: archivedManagedRepoRoot,
+    repaired_managed_workspace_root: repairedManagedWorkspaceRoot,
+    repaired_managed_repo_root: managedRepoRoot,
+    repaired_managed_head: repairedManagedHead
+  };
 }
 
 async function synchronizeManagedWorkspaceWithSource(input: {
@@ -515,6 +664,71 @@ async function resolveGitPath(
 ): Promise<string | null> {
   const result = await runGit(workspaceRoot, ["rev-parse", "--git-path", relativeGitPath]);
   return result.exitCode === 0 ? result.stdout.trim() : null;
+}
+
+async function readRequiredGitHead(
+  repoRoot: string,
+  message: string,
+  details: Record<string, unknown>
+): Promise<string> {
+  const head = await readGitHead(repoRoot);
+  if (head) {
+    return head;
+  }
+
+  throw new RunWorkspaceScopeError(
+    "managed_workspace_repair_failed",
+    message,
+    details
+  );
+}
+
+async function allocateArchivedManagedRepoRoot(
+  managedRepoRoot: string
+): Promise<string> {
+  const timestamp = new Date()
+    .toISOString()
+    .replace(/[-:]/gu, "")
+    .replace(/\.\d{3}Z$/u, "Z");
+  const baseArchiveRoot = `${managedRepoRoot}--archived-${timestamp}`;
+  let candidate = baseArchiveRoot;
+  let suffix = 2;
+
+  while (await stat(candidate).catch(() => null)) {
+    candidate = `${baseArchiveRoot}-${suffix}`;
+    suffix += 1;
+  }
+
+  return candidate;
+}
+
+async function moveManagedWorktree(input: {
+  sourceRepoRoot: string;
+  managedRepoRoot: string;
+  archivedManagedRepoRoot: string;
+  managedWorkspaceRoot: string;
+}): Promise<void> {
+  await mkdir(dirname(input.archivedManagedRepoRoot), { recursive: true });
+  const moveResult = await runGit(input.sourceRepoRoot, [
+    "worktree",
+    "move",
+    input.managedRepoRoot,
+    input.archivedManagedRepoRoot
+  ]);
+  if (moveResult.exitCode === 0) {
+    return;
+  }
+
+  throw new RunWorkspaceScopeError(
+    "managed_workspace_repair_failed",
+    `无法归档旧隔离 worktree：${extractGitError(moveResult.stderr)}`,
+    {
+      source_repo_root: input.sourceRepoRoot,
+      managed_workspace_root: input.managedWorkspaceRoot,
+      managed_repo_root: input.managedRepoRoot,
+      archived_managed_repo_root: input.archivedManagedRepoRoot
+    }
+  );
 }
 
 async function readGitStatus(repoRoot: string): Promise<string[]> {

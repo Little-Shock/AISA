@@ -19,6 +19,7 @@ type RunWorkspaceScopeErrorCode =
   | "workspace_outside_allowed_scope"
   | "attempt_workspace_outside_run_scope"
   | "managed_workspace_create_failed"
+  | "managed_workspace_repair_failed"
   | "managed_workspace_not_git_repo"
   | "managed_workspace_layout_invalid"
   | "managed_workspace_stale_from_source";

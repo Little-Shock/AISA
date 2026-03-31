@@ -4855,6 +4855,13 @@ export {
 } from "./runtime-layout.js";
 
 export {
+  ensureRunManagedWorkspace,
+  getEffectiveRunWorkspaceRoot,
+  repairRunManagedWorkspace,
+  type ManagedWorkspaceRepairResult
+} from "./run-workspace.js";
+
+export {
   maybePromoteVerifiedCheckpoint,
   type RuntimePromotionOutcome
 } from "./runtime-promotion.js";
