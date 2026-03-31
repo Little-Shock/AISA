@@ -10,7 +10,10 @@ import {
   type RuntimeHealthSnapshot
 } from "../packages/domain/src/index.ts";
 import { buildSelfBootstrapRunTemplate } from "../packages/planner/src/index.ts";
-import { resolveRuntimeLayout } from "../packages/orchestrator/src/index.ts";
+import {
+  resolveRuntimeLayout,
+  syncRuntimeLayoutHint
+} from "../packages/orchestrator/src/index.ts";
 import {
   appendRunJournal,
   ensureWorkspace,
@@ -237,6 +240,7 @@ async function main(): Promise<void> {
     repositoryRoot: sourceRoot,
     env: process.env
   });
+  syncRuntimeLayoutHint(runtimeLayout);
   const workspacePaths = resolveWorkspacePaths(runtimeLayout.runtimeDataRoot);
   await ensureWorkspace(workspacePaths);
 

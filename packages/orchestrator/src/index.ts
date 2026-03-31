@@ -4325,6 +4325,7 @@ export {
   buildRuntimeWorkspaceScopeRoots,
   resolveRuntimeControlApiPaths,
   resolveRuntimeLayout,
+  syncRuntimeLayoutHint,
   type RuntimeControlApiPaths,
   type RuntimeLayout
 } from "./runtime-layout.js";

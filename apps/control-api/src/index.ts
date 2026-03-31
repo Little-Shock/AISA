@@ -27,6 +27,7 @@ import {
   lockRunWorkspaceRoot,
   Orchestrator,
   resolveRuntimeLayout,
+  syncRuntimeLayoutHint,
   RunWorkspaceScopeError
 } from "@autoresearch/orchestrator";
 import { buildSelfBootstrapRunTemplate, generateInitialPlan } from "@autoresearch/planner";
@@ -140,6 +141,7 @@ export async function buildServer(
     managedWorkspaceRoot: options.managedWorkspaceRoot,
     env: process.env
   });
+  syncRuntimeLayoutHint(runtimeLayout);
   const workspacePaths = resolveWorkspacePaths(runtimeLayout.runtimeDataRoot);
   const defaultRunWorkspaceRoot = runtimeLayout.devRepoRoot;
   const contextManager = new ContextManager();

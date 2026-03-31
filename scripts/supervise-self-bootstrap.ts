@@ -13,7 +13,8 @@ import { fileURLToPath } from "node:url";
 import type { Attempt, CurrentDecision, Run, RunJournalEntry } from "../packages/domain/src/index.js";
 import {
   assessRunHealth,
-  resolveRuntimeLayout
+  resolveRuntimeLayout,
+  syncRuntimeLayoutHint
 } from "../packages/orchestrator/src/index.ts";
 import {
   ensureWorkspace,
@@ -911,6 +912,7 @@ async function main(): Promise<void> {
     repositoryRoot,
     env: process.env
   });
+  syncRuntimeLayoutHint(runtimeLayout);
   const options = parseArgs(process.argv.slice(2));
   const stateFile =
     options.stateFile ??

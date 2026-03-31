@@ -3,7 +3,8 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   resolveRuntimeControlApiPaths,
-  resolveRuntimeLayout
+  resolveRuntimeLayout,
+  syncRuntimeLayoutHint
 } from "@autoresearch/orchestrator";
 
 const currentDir = dirname(fileURLToPath(import.meta.url));
@@ -13,6 +14,7 @@ const runtimeLayout = resolveRuntimeLayout({
   repositoryRoot,
   env: process.env
 });
+syncRuntimeLayoutHint(runtimeLayout);
 const runtimeControlApiPaths = resolveRuntimeControlApiPaths(runtimeLayout);
 const restartExitCode = readPositiveIntegerEnv(
   "AISA_CONTROL_API_RESTART_EXIT_CODE",

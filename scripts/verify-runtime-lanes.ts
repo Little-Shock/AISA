@@ -24,6 +24,7 @@ import {
   createRunWorkspaceScopePolicy,
   maybePromoteVerifiedCheckpoint,
   resolveRuntimeLayout,
+  syncRuntimeLayoutHint,
   type RuntimeRestartRequest
 } from "../packages/orchestrator/src/index.ts";
 import { buildServer } from "../apps/control-api/src/index.ts";
@@ -166,6 +167,8 @@ async function main(): Promise<void> {
   process.env[SYNTHESIZER_CONFIG_ENV] = CLOSED_BASELINE_SYNTHESIZER_JSON;
 
   try {
+    await verifyPersistedRuntimeLayoutHintRestoresSplitLaneWithoutEnv();
+    await verifyCorruptRuntimeLayoutHintFailsClosed();
     await verifyControlApiUsesSeparateRuntimeLayout();
     const promotion = await verifyCheckpointPromotionUpdatesRuntimeRepo();
     const dirtyBlock = await verifyDirtyRuntimeRepoBlocksPromotion();
@@ -185,6 +188,46 @@ async function main(): Promise<void> {
     restoreEnv(REVIEWER_CONFIG_ENV, previousReviewers);
     restoreEnv(SYNTHESIZER_CONFIG_ENV, previousSynthesizer);
   }
+}
+
+async function verifyPersistedRuntimeLayoutHintRestoresSplitLaneWithoutEnv(): Promise<void> {
+  const layout = await createRuntimeLaneFixture("aisa-runtime-layout-hint-");
+  syncRuntimeLayoutHint(layout.runtimeLayout);
+
+  const resolved = resolveRuntimeLayout({
+    repositoryRoot: layout.runtimeRepoRoot,
+    env: {}
+  });
+
+  assert.equal(resolved.runtimeRepoRoot, layout.runtimeRepoRoot);
+  assert.equal(resolved.devRepoRoot, layout.devRepoRoot);
+  assert.equal(resolved.runtimeDataRoot, layout.runtimeDataRoot);
+  assert.equal(resolved.managedWorkspaceRoot, layout.runtimeLayout.managedWorkspaceRoot);
+}
+
+async function verifyCorruptRuntimeLayoutHintFailsClosed(): Promise<void> {
+  const layout = await createRuntimeLaneFixture("aisa-runtime-layout-hint-bad-");
+  await mkdir(join(layout.runtimeRepoRoot, "artifacts"), { recursive: true });
+  await writeFile(
+    join(layout.runtimeRepoRoot, "artifacts", "runtime-layout.json"),
+    JSON.stringify({
+      version: 1,
+      runtime_repo_root: "",
+      dev_repo_root: layout.devRepoRoot,
+      runtime_data_root: layout.runtimeDataRoot,
+      managed_workspace_root: layout.runtimeLayout.managedWorkspaceRoot
+    }),
+    "utf8"
+  );
+
+  assert.throws(
+    () =>
+      resolveRuntimeLayout({
+        repositoryRoot: layout.runtimeRepoRoot,
+        env: {}
+      }),
+    /Runtime layout hint .* missing runtime_repo_root/
+  );
 }
 
 async function verifyControlApiUsesSeparateRuntimeLayout(): Promise<void> {
