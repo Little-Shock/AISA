@@ -835,6 +835,23 @@ async function verifyManagedWorkspaceCheckpointCatchesUpDirtyBaseline(): Promise
   const workspacePaths = resolveWorkspacePaths(rootDir);
   await ensureWorkspace(workspacePaths);
   await initializeGitRepo(rootDir);
+  const gitignorePath = join(rootDir, ".gitignore");
+  await writeFile(
+    gitignorePath,
+    `node_modules/\n${await readFile(gitignorePath, "utf8")}`,
+    "utf8"
+  );
+  await runCommand(rootDir, ["git", "-C", rootDir, "add", ".gitignore"]);
+  await runCommand(rootDir, [
+    "git",
+    "-C",
+    rootDir,
+    "commit",
+    "-m",
+    "test: ignore node_modules directories"
+  ]);
+  await mkdir(join(rootDir, "node_modules"), { recursive: true });
+  await writeFile(join(rootDir, "node_modules", ".placeholder"), "toolchain\n", "utf8");
 
   const seededRun = createRun({
     title: "Managed workspace checkpoint catch-up",
@@ -873,10 +890,15 @@ async function verifyManagedWorkspaceCheckpointCatchesUpDirtyBaseline(): Promise
   );
 
   const preflight = await captureAttemptCheckpointPreflight({
+    run: managedRun,
     attempt,
     attemptPaths
   });
   assert.equal(preflight?.status, "ready");
+  assert.ok(
+    !preflight?.status_before.some((line) => line.includes("node_modules")),
+    "managed workspace toolchain symlink should stay outside checkpoint preflight"
+  );
   assert.ok(
     preflight?.status_before.some((line) => line.includes("preexisting-note.md")),
     "managed workspace preflight should capture the preexisting dirty file"

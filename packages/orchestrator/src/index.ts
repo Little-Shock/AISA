@@ -2989,6 +2989,7 @@ export class Orchestrator {
     }
 
     const checkpointPreflight = await captureAttemptCheckpointPreflight({
+      run: input.run,
       attempt: input.attempt,
       attemptPaths: input.attemptPaths
     });

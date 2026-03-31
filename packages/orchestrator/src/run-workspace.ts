@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { cp, lstat, mkdir, stat, symlink } from "node:fs/promises";
+import { cp, lstat, mkdir, readFile, stat, symlink, writeFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import { updateRun, type Run } from "@autoresearch/domain";
@@ -17,6 +17,22 @@ type GitCommandResult = {
   stderr: string;
   exitCode: number;
 };
+
+const MANAGED_WORKSPACE_TRANSIENT_PATHS = ["node_modules"] as const;
+
+export function isManagedWorkspaceTransientPath(relativePath: string): boolean {
+  return MANAGED_WORKSPACE_TRANSIENT_PATHS.some(
+    (transientPath) =>
+      relativePath === transientPath ||
+      relativePath.startsWith(`${transientPath}${"/"}`)
+  );
+}
+
+export function buildManagedWorkspaceTransientExcludePathspecs(): string[] {
+  return MANAGED_WORKSPACE_TRANSIENT_PATHS.map(
+    (transientPath) => `:(exclude)${transientPath}`
+  );
+}
 
 export function getEffectiveRunWorkspaceRoot(
   run: Pick<Run, "workspace_root" | "managed_workspace_root">
@@ -210,10 +226,7 @@ async function createManagedWorkspace(input: {
 
   const untrackedPaths = await listUntrackedPaths(input.sourceRepoRoot);
   for (const relativePath of untrackedPaths) {
-    if (
-      relativePath === "node_modules" ||
-      relativePath.startsWith(`node_modules${"/"}`)
-    ) {
+    if (isManagedWorkspaceTransientPath(relativePath)) {
       continue;
     }
     const sourcePath = join(input.sourceRepoRoot, relativePath);
@@ -266,6 +279,8 @@ async function provisionManagedWorkspaceToolchain(input: {
   sourceRepoRoot: string;
   managedRepoRoot: string;
 }): Promise<void> {
+  await ensureManagedWorkspaceTransientPathsIgnored(input.managedRepoRoot);
+
   const sourceNodeModulesPath = join(input.sourceRepoRoot, "node_modules");
   const sourceNodeModulesStat = await stat(sourceNodeModulesPath).catch(() => null);
   if (!sourceNodeModulesStat?.isDirectory()) {
@@ -279,6 +294,36 @@ async function provisionManagedWorkspaceToolchain(input: {
   }
 
   await symlink(sourceNodeModulesPath, managedNodeModulesPath, "dir");
+}
+
+async function ensureManagedWorkspaceTransientPathsIgnored(
+  managedRepoRoot: string
+): Promise<void> {
+  const excludeFilePath = await resolveGitPath(managedRepoRoot, "info/exclude");
+  if (!excludeFilePath) {
+    return;
+  }
+
+  const existingContent = await readFile(excludeFilePath, "utf8").catch(() => "");
+  const existingLines = new Set(
+    existingContent
+      .split(/\r?\n/u)
+      .map((line) => line.trim())
+      .filter(Boolean)
+  );
+  const missingEntries = MANAGED_WORKSPACE_TRANSIENT_PATHS.filter(
+    (transientPath) => !existingLines.has(transientPath)
+  );
+  if (missingEntries.length === 0) {
+    return;
+  }
+
+  await mkdir(dirname(excludeFilePath), { recursive: true });
+  const nextContent =
+    existingContent.length === 0
+      ? `${missingEntries.join("\n")}\n`
+      : `${existingContent}${existingContent.endsWith("\n") ? "" : "\n"}${missingEntries.join("\n")}\n`;
+  await writeFile(excludeFilePath, nextContent, "utf8");
 }
 
 async function validateManagedWorkspace(input: {
@@ -384,6 +429,14 @@ async function listUntrackedPaths(repoRoot: string): Promise<string[]> {
 
 async function resolveGitRepoRoot(workspaceRoot: string): Promise<string | null> {
   const result = await runGit(workspaceRoot, ["rev-parse", "--show-toplevel"]);
+  return result.exitCode === 0 ? result.stdout.trim() : null;
+}
+
+async function resolveGitPath(
+  workspaceRoot: string,
+  relativeGitPath: string
+): Promise<string | null> {
+  const result = await runGit(workspaceRoot, ["rev-parse", "--git-path", relativeGitPath]);
   return result.exitCode === 0 ? result.stdout.trim() : null;
 }
 

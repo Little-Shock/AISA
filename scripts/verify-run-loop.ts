@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { lstat, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import {
   createAttemptContract,
   createAttempt,
@@ -3569,9 +3569,9 @@ function parseNdjson<T>(text: string): T[] {
 }
 
 async function assertPersistedPostRestartPromptChain(): Promise<void> {
-  const rootDir = process.cwd();
+  const runtimeDataRoot = resolve(process.cwd(), "..", ".aisa-runtime");
   const reportPath = join(
-    rootDir,
+    runtimeDataRoot,
     "runs",
     "run_3374dc3f",
     "attempts",
@@ -3595,7 +3595,7 @@ async function assertPersistedPostRestartPromptChain(): Promise<void> {
   );
 
   for (const evidence of report.evidence_chain) {
-    const text = await readFile(join(rootDir, evidence.path), "utf8");
+    const text = await readFile(join(runtimeDataRoot, evidence.path), "utf8");
 
     if (evidence.check === "must_include") {
       assert.ok(
@@ -3612,7 +3612,7 @@ async function assertPersistedPostRestartPromptChain(): Promise<void> {
   }
 
   const legacyPromptPath = join(
-    rootDir,
+    runtimeDataRoot,
     "runs",
     report.run_id,
     "attempts",
@@ -3620,7 +3620,7 @@ async function assertPersistedPostRestartPromptChain(): Promise<void> {
     "worker-prompt.md"
   );
   const currentPromptPath = join(
-    rootDir,
+    runtimeDataRoot,
     "runs",
     report.run_id,
     "attempts",
@@ -3653,7 +3653,7 @@ async function assertPersistedPostRestartPromptChain(): Promise<void> {
 
   const currentMeta = JSON.parse(
     await readFile(
-      join(rootDir, "runs", report.run_id, "attempts", report.attempt_id, "meta.json"),
+      join(runtimeDataRoot, "runs", report.run_id, "attempts", report.attempt_id, "meta.json"),
       "utf8"
     )
   ) as {
@@ -3666,7 +3666,7 @@ async function assertPersistedPostRestartPromptChain(): Promise<void> {
   );
 
   const journal = parseNdjson<JournalEntryLite>(
-    await readFile(join(rootDir, "runs", report.run_id, "journal.ndjson"), "utf8")
+    await readFile(join(runtimeDataRoot, "runs", report.run_id, "journal.ndjson"), "utf8")
   );
   const manualRecoveryIndex = journal.findIndex(
     (entry) => entry.id === report.restart_transition.manual_recovery_event_id
