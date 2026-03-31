@@ -40,6 +40,7 @@ import {
   type ReviewPacketArtifact,
   type Run,
   type RunGovernanceState,
+  type VerificationCommand,
   type WorkerWriteback
 } from "@autoresearch/domain";
 import { appendEvent } from "@autoresearch/event-log";
@@ -283,14 +284,16 @@ export async function assessExecutionVerificationToolchain(input: {
   const inferredCommands =
     scripts === null ? [] : buildDefaultExecutionVerificationCommandsFromScripts(scripts);
   const blockedPnpmCommands = (input.verificationPlan?.commands ?? [])
-    .map((command) => command.command.trim())
-    .filter((command) => command.startsWith("pnpm "));
+    .map((command: ExecutionVerificationPlan["commands"][number]) => command.command.trim())
+    .filter((command: string) => command.startsWith("pnpm "));
   const hasLocalNodeModules = await workspaceHasLocalNodeModules(input.workspaceRoot);
 
   return {
     has_package_json: scripts !== null,
     has_local_node_modules: hasLocalNodeModules,
-    inferred_pnpm_commands: inferredCommands.map((command) => command.command),
+    inferred_pnpm_commands: inferredCommands.map(
+      (command: ExecutionVerificationPlan["commands"][number]) => command.command
+    ),
     blocked_pnpm_commands: blockedPnpmCommands
   };
 }
@@ -1192,6 +1195,7 @@ export class Orchestrator {
       });
       await saveAttempt(this.workspacePaths, attempt);
       const preflightOutcome = await this.runAttemptDispatchPreflight({
+        run,
         runId,
         attempt,
         attemptContract,
@@ -2963,14 +2967,21 @@ export class Orchestrator {
       has_done_rubric: attemptContract.done_rubric.length > 0,
       has_failure_modes: attemptContract.failure_modes.length > 0,
       has_verification_plan: (attemptContract.verification_plan?.commands.length ?? 0) > 0,
-      done_rubric_codes: attemptContract.done_rubric.map((item) => item.code),
-      failure_mode_codes: attemptContract.failure_modes.map((item) => item.code),
+      done_rubric_codes: attemptContract.done_rubric.map(
+        (item: AttemptContract["done_rubric"][number]) => item.code
+      ),
+      failure_mode_codes: attemptContract.failure_modes.map(
+        (item: AttemptContract["failure_modes"][number]) => item.code
+      ),
       verification_commands:
-        attemptContract.verification_plan?.commands.map((item) => item.command) ?? []
+        attemptContract.verification_plan?.commands.map(
+          (item: VerificationCommand) => item.command
+        ) ?? []
     };
   }
 
   private async runAttemptDispatchPreflight(input: {
+    run: Run;
     runId: string;
     attempt: Attempt;
     attemptContract: AttemptContract | null;

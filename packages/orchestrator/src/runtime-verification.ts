@@ -1,5 +1,6 @@
+import { constants as fsConstants } from "node:fs";
 import { createWriteStream } from "node:fs";
-import { cp, mkdir, readFile } from "node:fs/promises";
+import { access, cp, mkdir, readFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import {
@@ -58,6 +59,33 @@ const LIVE_RUNTIME_SOURCE_PREFIXES = [
   "packages/state-store/src/",
   "packages/worker-adapters/src/"
 ] as const;
+
+let cachedVerificationShell: string | null = null;
+
+async function resolveVerificationShell(): Promise<string> {
+  if (cachedVerificationShell) {
+    return cachedVerificationShell;
+  }
+
+  const candidates = [
+    process.env.SHELL?.trim(),
+    "/bin/bash",
+    "/bin/sh"
+  ].filter((value): value is string => Boolean(value));
+
+  for (const candidate of candidates) {
+    try {
+      await access(candidate, fsConstants.X_OK);
+      cachedVerificationShell = candidate;
+      return candidate;
+    } catch {
+      continue;
+    }
+  }
+
+  cachedVerificationShell = "sh";
+  return cachedVerificationShell;
+}
 const SELF_BOOTSTRAP_RUNTIME_SYNC_TARGETS = [
   {
     artifactKey: "publication_artifact",
@@ -598,8 +626,9 @@ async function runVerificationCommand(input: {
   const stderrStream = createWriteStream(input.stderrFile, { flags: "w" });
 
   try {
+    const shellExecutable = await resolveVerificationShell();
     const exitCode = await new Promise<number>((resolve, reject) => {
-      const child = spawn("/bin/zsh", ["-lc", input.command], {
+      const child = spawn(shellExecutable, ["-lc", input.command], {
         cwd: input.cwd,
         stdio: ["ignore", "pipe", "pipe"]
       });

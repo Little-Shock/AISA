@@ -1102,7 +1102,7 @@ export async function saveContextBoard(
     writeTextFile(goalPaths.sharedFactsFile, board.shared_facts.join("\n")),
     writeTextFile(goalPaths.openQuestionsFile, board.open_questions.join("\n")),
     writeTextFile(goalPaths.constraintsFile, board.constraints.join("\n")),
-    ...Object.entries(board.branch_notes).map(([branchId, note]) =>
+    ...Object.entries<string>(board.branch_notes).map(([branchId, note]) =>
       writeTextFile(join(goalPaths.contextDir, "branch_notes", `${branchId}.md`), note)
     )
   ]);

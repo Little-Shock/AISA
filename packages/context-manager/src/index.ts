@@ -82,7 +82,10 @@ export class ContextManager {
 
     const sharedFacts = [
       ...board.shared_facts,
-      ...input.writeback.findings.map((finding) => `[${input.branch.id}] ${finding.content}`)
+      ...input.writeback.findings.map(
+        (finding: WorkerWriteback["findings"][number]) =>
+          `[${input.branch.id}] ${finding.content}`
+      )
     ];
     const openQuestions = [...board.open_questions, ...input.writeback.questions];
     const branchNotes = {
@@ -95,7 +98,7 @@ export class ContextManager {
         "## 发现",
         ...(input.writeback.findings.length > 0
           ? input.writeback.findings.map(
-              (finding) =>
+              (finding: WorkerWriteback["findings"][number]) =>
                 `- [${finding.type}] ${finding.content}${
                   finding.evidence.length > 0
                     ? `（证据：${finding.evidence.join(", ")}）`
@@ -106,7 +109,9 @@ export class ContextManager {
         "",
         "## 下一步",
         ...(input.writeback.recommended_next_steps.length > 0
-          ? input.writeback.recommended_next_steps.map((step) => `- ${step}`)
+          ? input.writeback.recommended_next_steps.map(
+              (step: WorkerWriteback["recommended_next_steps"][number]) => `- ${step}`
+            )
           : ["- 暂无"])
       ].join("\n")
     };

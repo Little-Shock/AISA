@@ -1,4 +1,10 @@
-import type { Branch, ContextBoard, EvalResult, Goal, WorkerWriteback } from "@autoresearch/domain";
+import type {
+  Branch,
+  ContextBoard,
+  EvalResult,
+  Goal,
+  WorkerWriteback
+} from "@autoresearch/domain";
 
 export function buildGoalReport(input: {
   goal: Goal;
@@ -40,7 +46,7 @@ export function buildGoalReport(input: {
 
       return writeback.findings.length > 0
         ? writeback.findings.map(
-            (finding) =>
+            (finding: WorkerWriteback["findings"][number]) =>
               `- ${branch.id}：${finding.content}${
                 finding.evidence.length > 0 ? ` [${finding.evidence.join(", ")}]` : ""
               }`
@@ -60,13 +66,17 @@ export function buildGoalReport(input: {
     "## 待确认问题",
     "",
     ...(input.contextBoard.open_questions.length > 0
-      ? input.contextBoard.open_questions.map((question) => `- ${question}`)
+      ? input.contextBoard.open_questions.map(
+          (question: ContextBoard["open_questions"][number]) => `- ${question}`
+        )
       : ["- 暂无。"]),
     "",
     "## 建议的下一步",
     "",
     ...(bestWriteback?.recommended_next_steps.length
-      ? bestWriteback.recommended_next_steps.map((step) => `- ${step}`)
+      ? bestWriteback.recommended_next_steps.map(
+          (step: WorkerWriteback["recommended_next_steps"][number]) => `- ${step}`
+        )
       : ["- 等待更多分支结果，或补充人工指令。"])
   ].join("\n");
 }

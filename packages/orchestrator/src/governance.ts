@@ -432,7 +432,9 @@ export async function validateGovernedAttemptCandidate(input: {
   const objectiveSignature = buildGovernanceSignature(candidate.objective);
   const excludedPlan =
     objectiveSignature && governance
-      ? governance.excluded_plans.find((plan) => plan.plan_signature === objectiveSignature) ?? null
+      ? governance.excluded_plans.find(
+          (plan: RunGovernanceExcludedPlan) => plan.plan_signature === objectiveSignature
+        ) ?? null
       : null;
   if (excludedPlan) {
     return {

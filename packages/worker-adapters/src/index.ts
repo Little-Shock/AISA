@@ -20,6 +20,7 @@ import type {
   ContextSnapshot,
   Goal,
   Run,
+  VerificationCommand,
   WorkerWriteback
 } from "@autoresearch/domain";
 import {
@@ -1553,7 +1554,9 @@ function buildCodexWorkerPrompt(
     `- Objective: ${branch.objective}`,
     "",
     "Success Criteria:",
-    ...branch.success_criteria.map((criterion) => `- ${criterion}`),
+    ...branch.success_criteria.map(
+      (criterion: Branch["success_criteria"][number]) => `- ${criterion}`
+    ),
     "",
     "Current Context Snapshot:",
     JSON.stringify(snapshot, null, 2),
@@ -1624,7 +1627,9 @@ function buildCodexAttemptPrompt(
     JSON.stringify(attemptContract, null, 2),
     "",
     "Success Criteria:",
-    ...attempt.success_criteria.map((criterion) => `- ${criterion}`),
+    ...attempt.success_criteria.map(
+      (criterion: Attempt["success_criteria"][number]) => `- ${criterion}`
+    ),
     "",
     "Current Context:",
     JSON.stringify(context, null, 2),
@@ -2057,29 +2062,34 @@ function buildBranchReportMarkdown(
     "## 发现",
     "",
     ...(writeback.findings.length > 0
-      ? writeback.findings.flatMap((finding) => [
+      ? writeback.findings.flatMap((finding: WorkerWriteback["findings"][number]) => [
           `- [${finding.type}] ${finding.content}`,
-          ...finding.evidence.map((evidence) => `  - 证据：${evidence}`)
+          ...finding.evidence.map(
+            (evidence: WorkerWriteback["findings"][number]["evidence"][number]) =>
+              `  - 证据：${evidence}`
+          )
         ])
       : ["- 还没有记录发现。"]),
     "",
     "## 待确认问题",
     "",
     ...(writeback.questions.length > 0
-      ? writeback.questions.map((question) => `- ${question}`)
+      ? writeback.questions.map((question: WorkerWriteback["questions"][number]) => `- ${question}`)
       : ["- 暂无。"]),
     "",
     "## 建议的下一步",
     "",
     ...(writeback.recommended_next_steps.length > 0
-      ? writeback.recommended_next_steps.map((step) => `- ${step}`)
+      ? writeback.recommended_next_steps.map(
+          (step: WorkerWriteback["recommended_next_steps"][number]) => `- ${step}`
+        )
       : ["- 暂无。"]),
     "",
     "## 回放验证计划",
     "",
     ...(writeback.verification_plan?.commands.length
       ? writeback.verification_plan.commands.map(
-          (command) => `- ${command.purpose}：${command.command}`
+          (command: VerificationCommand) => `- ${command.purpose}：${command.command}`
         )
       : ["- 暂无。"])
   ].join("\n");
@@ -2105,22 +2115,27 @@ function buildAttemptReportMarkdown(
     "## 发现",
     "",
     ...(writeback.findings.length > 0
-      ? writeback.findings.flatMap((finding) => [
+      ? writeback.findings.flatMap((finding: WorkerWriteback["findings"][number]) => [
           `- [${finding.type}] ${finding.content}`,
-          ...finding.evidence.map((evidence) => `  - 证据：${evidence}`)
+          ...finding.evidence.map(
+            (evidence: WorkerWriteback["findings"][number]["evidence"][number]) =>
+              `  - 证据：${evidence}`
+          )
         ])
       : ["- 还没有记录发现。"]),
     "",
     "## 待确认问题",
     "",
     ...(writeback.questions.length > 0
-      ? writeback.questions.map((question) => `- ${question}`)
+      ? writeback.questions.map((question: WorkerWriteback["questions"][number]) => `- ${question}`)
       : ["- 暂无。"]),
     "",
     "## 建议的下一步",
     "",
     ...(writeback.recommended_next_steps.length > 0
-      ? writeback.recommended_next_steps.map((step) => `- ${step}`)
+      ? writeback.recommended_next_steps.map(
+          (step: WorkerWriteback["recommended_next_steps"][number]) => `- ${step}`
+        )
       : ["- 暂无。"])
   ].join("\n");
 }

@@ -122,8 +122,9 @@ export function evaluateBranch(input: {
   const evidenceScore =
     input.writeback.findings.length === 0
       ? 0
-      : input.writeback.findings.filter((finding) => finding.evidence.length > 0).length /
-        input.writeback.findings.length;
+      : input.writeback.findings.filter(
+          (finding: WorkerWriteback["findings"][number]) => finding.evidence.length > 0
+        ).length / input.writeback.findings.length;
   const nextStepScore = input.writeback.recommended_next_steps.length > 0 ? 1 : 0.2;
   const confidenceScore = input.writeback.confidence;
   const questionPenalty = input.writeback.questions.length > 3 ? 0.1 : 0;
@@ -679,8 +680,9 @@ function buildAttemptEvaluationBase(input: {
   const evidenceQuality =
     result.findings.length === 0
       ? 0
-      : result.findings.filter((finding) => finding.evidence.length > 0).length /
-        result.findings.length;
+      : result.findings.filter(
+          (finding: WorkerWriteback["findings"][number]) => finding.evidence.length > 0
+        ).length / result.findings.length;
   const confidenceScore = result.confidence;
   const artifactScore = Math.min(result.artifacts.length, 1);
   const openQuestionPenalty =

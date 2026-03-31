@@ -71,12 +71,14 @@ export function generateInitialPlan(goal: Goal): PlannerOutput {
     "",
     "## Success Criteria",
     "",
-    ...goal.success_criteria.map((criterion) => `- ${criterion}`),
+    ...goal.success_criteria.map(
+      (criterion: Goal["success_criteria"][number]) => `- ${criterion}`
+    ),
     "",
     "## Constraints",
     "",
     ...(goal.constraints.length > 0
-      ? goal.constraints.map((constraint) => `- ${constraint}`)
+      ? goal.constraints.map((constraint: Goal["constraints"][number]) => `- ${constraint}`)
       : ["- None recorded"]),
     "",
     "## Initial Branches",
@@ -87,7 +89,9 @@ export function generateInitialPlan(goal: Goal): PlannerOutput {
       `- Objective: ${branch.objective}`,
       `- Worker: ${branch.assigned_worker}`,
       "- Success Criteria:",
-      ...branch.success_criteria.map((criterion) => `  - ${criterion}`),
+      ...branch.success_criteria.map(
+        (criterion: BranchSpec["success_criteria"][number]) => `  - ${criterion}`
+      ),
       ""
     ]),
     "## Evaluation",

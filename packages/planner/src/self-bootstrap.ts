@@ -1,4 +1,8 @@
-import type { CreateRunInput, RuntimeHealthSnapshot } from "@autoresearch/domain";
+import type {
+  CreateRunInput,
+  RuntimeHealthHistoryContractDrift,
+  RuntimeHealthSnapshot
+} from "@autoresearch/domain";
 
 export interface SelfBootstrapTemplateOptions {
   workspaceRoot?: string;
@@ -86,7 +90,9 @@ function buildRuntimeHealthSnapshotHint(
 
   const driftRefs = runtimeHealthSnapshot.snapshot.history_contract_drift.drifts
     .slice(0, 4)
-    .map((drift) => `${drift.run_id}/${drift.attempt_id}`);
+    .map(
+      (drift: RuntimeHealthHistoryContractDrift) => `${drift.run_id}/${drift.attempt_id}`
+    );
 
   return [
     "先看 context 里的 runtime_health_snapshot 结构化摘要。",
