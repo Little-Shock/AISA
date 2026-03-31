@@ -481,9 +481,23 @@ async function main(): Promise<void> {
     const selfBootstrap = selfBootstrapResponse.json() as {
       run: {
         workspace_root: string;
+        harness_profile: {
+          execution: {
+            effort: string;
+          };
+          reviewer: {
+            effort: string;
+          };
+          synthesizer: {
+            effort: string;
+          };
+        };
       };
     };
     assert.equal(selfBootstrap.run.workspace_root, resolvedRootDir);
+    assert.equal(selfBootstrap.run.harness_profile.execution.effort, "high");
+    assert.equal(selfBootstrap.run.harness_profile.reviewer.effort, "medium");
+    assert.equal(selfBootstrap.run.harness_profile.synthesizer.effort, "medium");
 
     const blockedRun = createRun({
       title: "Blocked launch workspace",

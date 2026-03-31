@@ -87,7 +87,19 @@ export function buildSelfBootstrapRunTemplate(
       success_criteria: successCriteria,
       constraints,
       owner_id: ownerId,
-      workspace_root: workspaceRoot
+      workspace_root: workspaceRoot,
+      harness_profile: {
+        version: 1,
+        execution: {
+          effort: "high"
+        },
+        reviewer: {
+          effort: "medium"
+        },
+        synthesizer: {
+          effort: "medium"
+        }
+      }
     },
     initialSteer
   };
