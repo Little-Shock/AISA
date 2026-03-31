@@ -13,14 +13,16 @@
     "required_journal_types": [
       "attempt.completed",
       "attempt.verification.passed",
+      "attempt.runtime.promoted",
       "attempt.restart_required"
     ],
     "required_journal_counts": {
       "attempt.started": 2,
       "attempt.completed": 2,
       "attempt.verification.passed": 1,
+      "attempt.runtime.promoted": 1,
       "attempt.restart_required": 1
     },
-    "blocking_reason_includes": "packages/orchestrator/src/index.ts"
+    "blocking_reason_includes": "Promoted checkpoint"
   }
 }

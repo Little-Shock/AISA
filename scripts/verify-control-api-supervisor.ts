@@ -64,6 +64,7 @@ async function main(): Promise<void> {
       env: {
         ...process.env,
         AISA_CONTROL_API_CHILD_ENTRY: childFile,
+        AISA_CONTROL_API_SUPERVISOR_SELF_REEXEC: "0",
         AISA_CONTROL_API_EXPECTED_RESTART_DELAY_MS: "50",
         AISA_CONTROL_API_UNEXPECTED_RESTART_BASE_DELAY_MS: "50",
         AISA_CONTROL_API_UNEXPECTED_RESTART_MAX_DELAY_MS: "200",

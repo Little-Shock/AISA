@@ -1,16 +1,16 @@
 import { spawn } from "node:child_process";
 import { join, relative, resolve } from "node:path";
-import type { Attempt, AttemptEvaluation, Run } from "@autoresearch/domain";
+import type {
+  Attempt,
+  AttemptCheckpointPreflight,
+  AttemptEvaluation,
+  Run
+} from "@autoresearch/domain";
 import type { AttemptPaths } from "@autoresearch/state-store";
 import { writeJsonFile } from "@autoresearch/state-store";
+import { buildManagedWorkspaceTransientExcludePathspecs } from "./run-workspace.js";
 
-export interface GitCheckpointPreflight {
-  status: "ready" | "not_git_repo";
-  repo_root: string | null;
-  head_before: string | null;
-  status_before: string[];
-  created_at: string;
-}
+export type GitCheckpointPreflight = AttemptCheckpointPreflight;
 
 export type AttemptCheckpointOutcome =
   | {
@@ -51,6 +51,7 @@ const CHECKPOINT_AUTHOR_NAME = "AISA";
 const CHECKPOINT_AUTHOR_EMAIL = "aisa@local";
 
 export async function captureAttemptCheckpointPreflight(input: {
+  run?: Pick<Run, "managed_workspace_root"> | null;
   attempt: Attempt;
   attemptPaths: AttemptPaths;
 }): Promise<GitCheckpointPreflight | null> {
@@ -73,7 +74,10 @@ export async function captureAttemptCheckpointPreflight(input: {
 
   const [headBefore, statusBefore] = await Promise.all([
     readGitHead(repoRoot),
-    readGitStatus(repoRoot)
+    readGitStatus(
+      repoRoot,
+      getManagedWorkspaceTransientExcludePathspecs(input.run, input.attempt)
+    )
   ]);
 
   const preflight: GitCheckpointPreflight = {
@@ -139,7 +143,14 @@ export async function maybeCreateVerifiedExecutionCheckpoint(input: {
     });
   }
 
-  const statusAfter = await readGitStatus(input.preflight.repo_root);
+  const transientExcludePathspecs = getManagedWorkspaceTransientExcludePathspecs(
+    input.run,
+    input.attempt
+  );
+  const statusAfter = await readGitStatus(
+    input.preflight.repo_root,
+    transientExcludePathspecs
+  );
   if (statusAfter.length === 0) {
     return await writeCheckpointArtifact(input.attemptPaths, {
       status: "skipped",
@@ -279,13 +290,8 @@ async function readGitHead(repoRoot: string): Promise<string | null> {
   return result.exit_code === 0 ? result.stdout.trim() : null;
 }
 
-async function readGitStatus(repoRoot: string): Promise<string[]> {
-  const result = await runGit(
-    repoRoot,
-    ["status", "--porcelain=v1", "--untracked=all"],
-    {},
-    true
-  );
+async function readGitStatus(repoRoot: string, excludePathspecs: string[] = []): Promise<string[]> {
+  const result = await runGit(repoRoot, buildGitStatusArgs(excludePathspecs), {}, true);
 
   if (result.exit_code !== 0) {
     return [];
@@ -294,6 +300,41 @@ async function readGitStatus(repoRoot: string): Promise<string[]> {
   return result.stdout
     .split(/\r?\n/u)
     .filter((line) => line.length > 0);
+}
+
+function buildGitStatusArgs(excludePathspecs: string[]): string[] {
+  if (excludePathspecs.length === 0) {
+    return ["status", "--porcelain=v1", "--untracked=all"];
+  }
+
+  return [
+    "status",
+    "--porcelain=v1",
+    "--untracked=all",
+    "--",
+    ".",
+    ...excludePathspecs
+  ];
+}
+
+function getManagedWorkspaceTransientExcludePathspecs(
+  run: Pick<Run, "managed_workspace_root"> | null | undefined,
+  attempt: Pick<Attempt, "workspace_root">
+): string[] {
+  if (!run?.managed_workspace_root) {
+    return [];
+  }
+
+  const managedWorkspaceRoot = resolve(run.managed_workspace_root);
+  const attemptWorkspaceRoot = resolve(attempt.workspace_root);
+  const relativePath = relative(managedWorkspaceRoot, attemptWorkspaceRoot);
+  const insideManagedWorkspace =
+    relativePath === "" ||
+    (!relativePath.startsWith("..") && !relativePath.startsWith(`..${"/"}`));
+
+  return insideManagedWorkspace
+    ? buildManagedWorkspaceTransientExcludePathspecs()
+    : [];
 }
 
 async function readGitCommitFiles(repoRoot: string, revision: string): Promise<string[]> {

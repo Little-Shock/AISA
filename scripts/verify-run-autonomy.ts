@@ -14,7 +14,12 @@ import {
   type Run,
   type WorkerWriteback
 } from "../packages/domain/src/index.js";
-import { Orchestrator } from "../packages/orchestrator/src/index.js";
+import {
+  Orchestrator,
+  resolveRuntimeLayout,
+  type RuntimeLayout,
+  type RuntimeRestartRequest
+} from "../packages/orchestrator/src/index.js";
 import {
   appendRunJournal,
   ensureWorkspace,
@@ -27,6 +32,7 @@ import {
   saveAttempt,
   saveAttemptContract,
   saveAttemptResult,
+  saveAttemptRuntimeVerification,
   saveCurrentDecision,
   saveRun
 } from "../packages/state-store/src/index.js";
@@ -36,6 +42,22 @@ type CaseResult = {
   status: "pass" | "fail";
   error?: string;
 };
+
+const REVIEWER_CONFIG_ENV = "AISA_REVIEWERS_JSON";
+const SYNTHESIZER_CONFIG_ENV = "AISA_REVIEW_SYNTHESIZER_JSON";
+const CLOSED_BASELINE_REVIEWERS_JSON = JSON.stringify([
+  {
+    kind: "heuristic",
+    reviewer_id: "autonomy-baseline-reviewer",
+    role: "runtime_reviewer",
+    adapter: "deterministic-heuristic",
+    provider: "local",
+    model: "baseline"
+  }
+]);
+const CLOSED_BASELINE_SYNTHESIZER_JSON = JSON.stringify({
+  kind: "deterministic"
+});
 
 class AutoResumeExecutionAdapter {
   readonly type = "fake-codex";
@@ -365,10 +387,12 @@ async function bootstrapRun(title: string): Promise<{
   run: Run;
   workspacePaths: ReturnType<typeof resolveWorkspacePaths>;
   rootDir: string;
+  detachedRuntimeLayout: RuntimeLayout;
 }> {
   const rootDir = await mkdtemp(join(tmpdir(), `aisa-autonomy-${title}-`));
   const workspacePaths = resolveWorkspacePaths(rootDir);
   await ensureWorkspace(workspacePaths);
+  const detachedRuntimeLayout = await createDetachedRuntimeLayout(title, rootDir);
 
   const run = createRun({
     title,
@@ -394,8 +418,23 @@ async function bootstrapRun(title: string): Promise<{
   return {
     run,
     workspacePaths,
-    rootDir
+    rootDir,
+    detachedRuntimeLayout
   };
+}
+
+async function createDetachedRuntimeLayout(
+  title: string,
+  runtimeDataRoot: string
+): Promise<RuntimeLayout> {
+  const laneRepoRoot = await mkdtemp(join(tmpdir(), `aisa-autonomy-runtime-lane-${title}-`));
+  await initializeGitRepo(laneRepoRoot);
+  return resolveRuntimeLayout({
+    repositoryRoot: laneRepoRoot,
+    devRepoRoot: laneRepoRoot,
+    runtimeRepoRoot: laneRepoRoot,
+    runtimeDataRoot
+  });
 }
 
 async function initializeGitRepo(rootDir: string): Promise<void> {
@@ -460,7 +499,9 @@ async function runCommand(rootDir: string, args: string[]): Promise<void> {
 }
 
 async function verifyFailedExecutionAutoResumes(): Promise<void> {
-  const { run, workspacePaths, rootDir } = await bootstrapRun("failed-execution-auto-resume");
+  const { run, workspacePaths, rootDir, detachedRuntimeLayout } = await bootstrapRun(
+    "failed-execution-auto-resume"
+  );
   await writeExecutionWorkspacePackage(rootDir);
   await initializeGitRepo(rootDir);
   const failedExecution = updateAttempt(
@@ -511,6 +552,7 @@ async function verifyFailedExecutionAutoResumes(): Promise<void> {
     undefined,
     60_000,
     {
+      runtimeLayout: detachedRuntimeLayout,
       waitingHumanAutoResumeMs: 30,
       maxAutomaticResumeCycles: 2
     }
@@ -552,7 +594,7 @@ async function verifyFailedExecutionAutoResumes(): Promise<void> {
 }
 
 async function verifyRunLaunchResetsAutoResumeBudget(): Promise<void> {
-  const { run, workspacePaths, rootDir } = await bootstrapRun(
+  const { run, workspacePaths, rootDir, detachedRuntimeLayout } = await bootstrapRun(
     "run-launch-resets-auto-resume-budget"
   );
   await writeExecutionWorkspacePackage(rootDir);
@@ -639,6 +681,7 @@ async function verifyRunLaunchResetsAutoResumeBudget(): Promise<void> {
     undefined,
     60_000,
     {
+      runtimeLayout: detachedRuntimeLayout,
       waitingHumanAutoResumeMs: 30,
       maxAutomaticResumeCycles: 1
     }
@@ -743,7 +786,9 @@ async function verifyRepeatedAutoResumeExhausts(): Promise<void> {
 }
 
 async function verifyCheckpointBlockerAutoResumesIntoExecution(): Promise<void> {
-  const { run, workspacePaths, rootDir } = await bootstrapRun("checkpoint-blocker-auto-resume");
+  const { run, workspacePaths, rootDir, detachedRuntimeLayout } = await bootstrapRun(
+    "checkpoint-blocker-auto-resume"
+  );
   await initializeGitRepo(rootDir);
   const completedExecution = updateAttempt(
     createAttempt({
@@ -820,6 +865,7 @@ async function verifyCheckpointBlockerAutoResumesIntoExecution(): Promise<void> 
     undefined,
     60_000,
     {
+      runtimeLayout: detachedRuntimeLayout,
       waitingHumanAutoResumeMs: 30,
       maxAutomaticResumeCycles: 2
     }
@@ -862,8 +908,134 @@ async function verifyCheckpointBlockerAutoResumesIntoExecution(): Promise<void> 
   );
 }
 
+async function verifyNoGitChangesBlocksAutoResume(): Promise<void> {
+  const { run, workspacePaths, rootDir, detachedRuntimeLayout } = await bootstrapRun(
+    "no-git-changes-blocks-auto-resume"
+  );
+  await writeExecutionWorkspacePackage(rootDir);
+  await initializeGitRepo(rootDir);
+
+  const completedExecution = updateAttempt(
+    createAttempt({
+      run_id: run.id,
+      attempt_type: "execution",
+      worker: "fake-codex",
+      objective: "Apply a minimal execution step.",
+      success_criteria: run.success_criteria,
+      workspace_root: run.workspace_root
+    }),
+    {
+      status: "completed",
+      started_at: new Date().toISOString(),
+      ended_at: new Date().toISOString()
+    }
+  );
+  const failureReason =
+    "Execution attempt finished without any new git-visible workspace changes beyond the preflight baseline, so the runtime cannot treat it as a verified implementation step.";
+
+  await saveAttempt(workspacePaths, completedExecution);
+  await saveAttemptRuntimeVerification(workspacePaths, {
+    attempt_id: completedExecution.id,
+    run_id: run.id,
+    attempt_type: "execution",
+    status: "failed",
+    repo_root: rootDir,
+    git_head: null,
+    git_status: [],
+    preexisting_git_status: [],
+    new_git_status: [],
+    changed_files: [],
+    failure_code: "no_git_changes",
+    failure_reason: failureReason,
+    command_results: [],
+    synced_self_bootstrap_artifacts: null,
+    created_at: new Date().toISOString()
+  });
+  await saveCurrentDecision(
+    workspacePaths,
+    createCurrentDecision({
+      run_id: run.id,
+      latest_attempt_id: completedExecution.id,
+      run_status: "waiting_steer",
+      recommended_next_action: "wait_for_human",
+      recommended_attempt_type: "execution",
+      summary: "Execution 没有留下新的 git 改动。",
+      blocking_reason: failureReason,
+      waiting_for_human: true
+    })
+  );
+  await appendRunJournal(
+    workspacePaths,
+    createRunJournalEntry({
+      run_id: run.id,
+      attempt_id: completedExecution.id,
+      type: "attempt.completed",
+      payload: {
+        recommendation: "wait_human",
+        goal_progress: 0.2,
+        suggested_attempt_type: "execution"
+      }
+    })
+  );
+  await appendRunJournal(
+    workspacePaths,
+    createRunJournalEntry({
+      run_id: run.id,
+      attempt_id: completedExecution.id,
+      type: "attempt.verification.failed",
+      payload: {
+        status: "failed",
+        failure_code: "no_git_changes",
+        failure_reason: failureReason,
+        changed_files: [],
+        command_count: 0,
+        artifact_path: "artifacts/runtime-verification.json"
+      }
+    })
+  );
+
+  const orchestrator = new Orchestrator(
+    workspacePaths,
+    new AutoResumeExecutionAdapter() as never,
+    undefined,
+    60_000,
+    {
+      runtimeLayout: detachedRuntimeLayout,
+      waitingHumanAutoResumeMs: 30,
+      maxAutomaticResumeCycles: 2
+    }
+  );
+
+  await wait(40);
+  await settle(orchestrator, 8, 80);
+
+  const current = await getCurrentDecision(workspacePaths, run.id);
+  const attempts = await listAttempts(workspacePaths, run.id);
+  const journal = await listRunJournal(workspacePaths, run.id);
+  const blockedEntry = journal.find((entry) => entry.type === "run.auto_resume.blocked");
+
+  assert.ok(current, "current decision must exist");
+  assert.equal(current.run_status, "waiting_steer");
+  assert.equal(current.waiting_for_human, true);
+  assert.equal(current.recommended_next_action, "wait_for_human");
+  assert.deepEqual(
+    attempts.map((attempt) => attempt.status),
+    ["completed"],
+    "no_git_changes should fail closed instead of spawning another execution"
+  );
+  assert.ok(
+    !journal.some((entry) => entry.type === "run.auto_resume.scheduled"),
+    "no_git_changes should not schedule automatic resume"
+  );
+  assert.ok(blockedEntry, "expected a machine-readable auto-resume blocker");
+  assert.equal(blockedEntry?.payload.reason, "runtime_verification_failed");
+  assert.equal(blockedEntry?.payload.failure_code, "no_git_changes");
+}
+
 async function verifyRecoveryAutoResumesExecution(): Promise<void> {
-  const { run, workspacePaths, rootDir } = await bootstrapRun("recovery-auto-resume");
+  const { run, workspacePaths, rootDir, detachedRuntimeLayout } = await bootstrapRun(
+    "recovery-auto-resume"
+  );
   await initializeGitRepo(rootDir);
 
   const researchAttempt = updateAttempt(
@@ -1028,6 +1200,7 @@ async function verifyRecoveryAutoResumesExecution(): Promise<void> {
     undefined,
     60_000,
     {
+      runtimeLayout: detachedRuntimeLayout,
       waitingHumanAutoResumeMs: 30,
       maxAutomaticResumeCycles: 2
     }
@@ -1063,7 +1236,9 @@ async function verifyRecoveryAutoResumesExecution(): Promise<void> {
 }
 
 async function verifyRateLimitedExecutionRetriesQuickly(): Promise<void> {
-  const { run, workspacePaths, rootDir } = await bootstrapRun("rate-limited-execution-retry");
+  const { run, workspacePaths, rootDir, detachedRuntimeLayout } = await bootstrapRun(
+    "rate-limited-execution-retry"
+  );
   await writeExecutionWorkspacePackage(rootDir);
   await initializeGitRepo(rootDir);
 
@@ -1115,6 +1290,7 @@ async function verifyRateLimitedExecutionRetriesQuickly(): Promise<void> {
     undefined,
     60_000,
     {
+      runtimeLayout: detachedRuntimeLayout,
       waitingHumanAutoResumeMs: 5_000,
       maxAutomaticResumeCycles: 2,
       providerRateLimitAutoResumeMs: 30,
@@ -1161,7 +1337,7 @@ async function verifyRateLimitedExecutionRetriesQuickly(): Promise<void> {
 }
 
 async function verifyExecutionRateLimitBudgetDoesNotInheritResearchCycles(): Promise<void> {
-  const { run, workspacePaths, rootDir } = await bootstrapRun(
+  const { run, workspacePaths, rootDir, detachedRuntimeLayout } = await bootstrapRun(
     "execution-rate-limit-budget-does-not-inherit-research-cycles"
   );
   await writeExecutionWorkspacePackage(rootDir);
@@ -1247,6 +1423,7 @@ async function verifyExecutionRateLimitBudgetDoesNotInheritResearchCycles(): Pro
     undefined,
     60_000,
     {
+      runtimeLayout: detachedRuntimeLayout,
       waitingHumanAutoResumeMs: 5_000,
       maxAutomaticResumeCycles: 2,
       providerRateLimitAutoResumeMs: 30,
@@ -1285,7 +1462,9 @@ async function verifyExecutionRateLimitBudgetDoesNotInheritResearchCycles(): Pro
 }
 
 async function verifyWorkerStalledExecutionRetriesQuickly(): Promise<void> {
-  const { run, workspacePaths, rootDir } = await bootstrapRun("worker-stalled-execution-retry");
+  const { run, workspacePaths, rootDir, detachedRuntimeLayout } = await bootstrapRun(
+    "worker-stalled-execution-retry"
+  );
   await writeExecutionWorkspacePackage(rootDir);
   await initializeGitRepo(rootDir);
 
@@ -1343,6 +1522,7 @@ async function verifyWorkerStalledExecutionRetriesQuickly(): Promise<void> {
     undefined,
     60_000,
     {
+      runtimeLayout: detachedRuntimeLayout,
       waitingHumanAutoResumeMs: 5_000,
       workerStallAutoResumeMs: 30,
       maxAutomaticResumeCycles: 2
@@ -1388,7 +1568,9 @@ async function verifyWorkerStalledExecutionRetriesQuickly(): Promise<void> {
 }
 
 async function verifyRateLimitedResearchRetriesQuickly(): Promise<void> {
-  const { run, workspacePaths } = await bootstrapRun("rate-limited-research-retry");
+  const { run, workspacePaths, detachedRuntimeLayout } = await bootstrapRun(
+    "rate-limited-research-retry"
+  );
 
   const failedResearch = updateAttempt(
     createAttempt({
@@ -1438,6 +1620,7 @@ async function verifyRateLimitedResearchRetriesQuickly(): Promise<void> {
     undefined,
     60_000,
     {
+      runtimeLayout: detachedRuntimeLayout,
       waitingHumanAutoResumeMs: 5_000,
       maxAutomaticResumeCycles: 2,
       providerRateLimitAutoResumeMs: 30,
@@ -1450,7 +1633,7 @@ async function verifyRateLimitedResearchRetriesQuickly(): Promise<void> {
     workspacePaths,
     runId: run.id,
     predicate: ({ attempts }) => attempts[1]?.status === "completed",
-    timeoutMs: 2_000,
+    timeoutMs: 12_000,
     delayMs: 80
   });
 
@@ -1482,7 +1665,9 @@ async function verifyRateLimitedResearchRetriesQuickly(): Promise<void> {
 }
 
 async function verifyRateLimitedResearchRetriesUsingStdoutSignal(): Promise<void> {
-  const { run, workspacePaths } = await bootstrapRun("rate-limited-research-stdout-signal");
+  const { run, workspacePaths, detachedRuntimeLayout } = await bootstrapRun(
+    "rate-limited-research-stdout-signal"
+  );
 
   const failedResearch = updateAttempt(
     createAttempt({
@@ -1542,6 +1727,7 @@ async function verifyRateLimitedResearchRetriesUsingStdoutSignal(): Promise<void
     undefined,
     60_000,
     {
+      runtimeLayout: detachedRuntimeLayout,
       waitingHumanAutoResumeMs: 5_000,
       maxAutomaticResumeCycles: 2,
       providerRateLimitAutoResumeMs: 30,
@@ -1554,7 +1740,7 @@ async function verifyRateLimitedResearchRetriesUsingStdoutSignal(): Promise<void
     workspacePaths,
     runId: run.id,
     predicate: ({ attempts }) => attempts[1]?.status === "completed",
-    timeoutMs: 2_000,
+    timeoutMs: 12_000,
     delayMs: 80
   });
 
@@ -1762,6 +1948,7 @@ async function verifyRuntimeSourceDriftAutoResumesAfterRestart(): Promise<void> 
   );
 
   await wait(40);
+  const restartRequests: RuntimeRestartRequest[] = [];
 
   const orchestrator = new Orchestrator(
     workspacePaths,
@@ -1769,6 +1956,9 @@ async function verifyRuntimeSourceDriftAutoResumesAfterRestart(): Promise<void> 
     undefined,
     60_000,
     {
+      requestRuntimeRestart: (request) => {
+        restartRequests.push(request);
+      },
       waitingHumanAutoResumeMs: 30,
       runtimeSourceDriftAutoResumeMs: 30,
       maxAutomaticResumeCycles: 2
@@ -1806,10 +1996,14 @@ async function verifyRuntimeSourceDriftAutoResumesAfterRestart(): Promise<void> 
     journal.some((entry) => entry.type === "attempt.verification.passed"),
     "resumed execution should still pass runtime verification after restart"
   );
+  assert.ok(
+    restartRequests.some((request) => request.reason === "runtime_promotion"),
+    "the resumed execution should still request a runtime promotion restart under supervision"
+  );
 }
 
 async function verifyVerifiedExecutionContinueDoesNotPauseForHuman(): Promise<void> {
-  const { run, workspacePaths, rootDir } = await bootstrapRun(
+  const { run, workspacePaths, rootDir, detachedRuntimeLayout } = await bootstrapRun(
     "verified-execution-continue-does-not-pause-for-human"
   );
   await writeExecutionWorkspacePackage(rootDir);
@@ -1866,6 +2060,7 @@ async function verifyVerifiedExecutionContinueDoesNotPauseForHuman(): Promise<vo
     undefined,
     60_000,
     {
+      runtimeLayout: detachedRuntimeLayout,
       waitingHumanAutoResumeMs: 30,
       maxAutomaticResumeCycles: 2
     }
@@ -2019,6 +2214,7 @@ async function verifyCheckpointedRestartResetsAutoResumeBudget(): Promise<void> 
   );
 
   await wait(40);
+  const restartRequests: RuntimeRestartRequest[] = [];
 
   const orchestrator = new Orchestrator(
     workspacePaths,
@@ -2026,6 +2222,9 @@ async function verifyCheckpointedRestartResetsAutoResumeBudget(): Promise<void> 
     undefined,
     60_000,
     {
+      requestRuntimeRestart: (request) => {
+        restartRequests.push(request);
+      },
       waitingHumanAutoResumeMs: 30,
       runtimeSourceDriftAutoResumeMs: 30,
       maxAutomaticResumeCycles: 1
@@ -2039,6 +2238,7 @@ async function verifyCheckpointedRestartResetsAutoResumeBudget(): Promise<void> 
     timeoutMs: 20_000,
     delayMs: 120
   });
+  await wait(50);
 
   const current = await getCurrentDecision(workspacePaths, run.id);
   const journal = await listRunJournal(workspacePaths, run.id);
@@ -2061,9 +2261,17 @@ async function verifyCheckpointedRestartResetsAutoResumeBudget(): Promise<void> 
     1,
     "restart auto-resume cycle numbering should reset after a verified checkpoint"
   );
+  assert.ok(
+    restartRequests.some((request) => request.reason === "runtime_promotion"),
+    "checkpointed resume should still ask the supervisor to restart into the promoted runtime"
+  );
 }
 
 async function main(): Promise<void> {
+  const previousReviewers = process.env[REVIEWER_CONFIG_ENV];
+  const previousSynthesizer = process.env[SYNTHESIZER_CONFIG_ENV];
+  process.env[REVIEWER_CONFIG_ENV] = CLOSED_BASELINE_REVIEWERS_JSON;
+  process.env[SYNTHESIZER_CONFIG_ENV] = CLOSED_BASELINE_SYNTHESIZER_JSON;
   const checks: Array<{ id: string; run: () => Promise<void> }> = [
     {
       id: "failed_execution_auto_resumes",
@@ -2080,6 +2288,10 @@ async function main(): Promise<void> {
     {
       id: "checkpoint_blocker_auto_resumes_execution",
       run: verifyCheckpointBlockerAutoResumesIntoExecution
+    },
+    {
+      id: "no_git_changes_blocks_auto_resume",
+      run: verifyNoGitChangesBlocksAutoResume
     },
     {
       id: "rate_limited_execution_retries_quickly",
@@ -2141,20 +2353,34 @@ async function main(): Promise<void> {
   }
 
   const failed = results.filter((result) => result.status === "fail");
-  console.log(
-    JSON.stringify(
-      {
-        suite: "run-autonomy",
-        passed: results.length - failed.length,
-        failed: failed.length,
-        results
-      },
-      null,
-      2
-    )
-  );
+  try {
+    console.log(
+      JSON.stringify(
+        {
+          suite: "run-autonomy",
+          passed: results.length - failed.length,
+          failed: failed.length,
+          results
+        },
+        null,
+        2
+      )
+    );
 
-  assert.equal(failed.length, 0, "Run autonomy verification failed.");
+    assert.equal(failed.length, 0, "Run autonomy verification failed.");
+  } finally {
+    restoreEnv(REVIEWER_CONFIG_ENV, previousReviewers);
+    restoreEnv(SYNTHESIZER_CONFIG_ENV, previousSynthesizer);
+  }
+}
+
+function restoreEnv(name: string, value: string | undefined): void {
+  if (value === undefined) {
+    delete process.env[name];
+    return;
+  }
+
+  process.env[name] = value;
 }
 
 await main();

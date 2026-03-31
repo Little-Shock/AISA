@@ -182,6 +182,26 @@ class ProgressingAdapter {
                 "Leave git-visible workspace changes tied to the objective.",
                 "Pass a replayable verification command that proves execution-note.md was written."
               ],
+              done_rubric: [
+                {
+                  code: "git_change_recorded",
+                  description: "Leave a git-visible workspace change."
+                },
+                {
+                  code: "verification_replay_passed",
+                  description: "Pass the locked replay command."
+                }
+              ],
+              failure_modes: [
+                {
+                  code: "missing_replayable_verification_plan",
+                  description: "Do not dispatch without replayable verification."
+                },
+                {
+                  code: "missing_local_verifier_toolchain",
+                  description: "Do not dispatch pnpm replay without local node_modules."
+                }
+              ],
               forbidden_shortcuts: [
                 "Do not claim execution success without replaying the locked verification command."
               ],
@@ -617,7 +637,13 @@ async function main(hostJudgeConfig: HostJudgeConfigSnapshot): Promise<void> {
   ).stdout.trim();
   assert.equal(secondStop.stopReason, "run_settled");
   assert.doesNotThrow(() => assertDriveRunReachedStableStop(secondStop));
-  assert.equal(persistedCurrent?.run_status, "completed");
+  assert.equal(persistedCurrent?.run_status, "waiting_steer");
+  assert.equal(persistedCurrent?.waiting_for_human, true);
+  assert.equal(persistedCurrent?.recommended_next_action, "wait_for_human");
+  assert.match(
+    persistedCurrent?.blocking_reason ?? "",
+    /Promoted checkpoint/u
+  );
   assert.equal(executionAttempts.length, 1);
   assert.equal(researchAttempts.length, 2);
   assert.ok(
@@ -809,6 +835,23 @@ async function verifyManagedWorkspaceCheckpointCatchesUpDirtyBaseline(): Promise
   const workspacePaths = resolveWorkspacePaths(rootDir);
   await ensureWorkspace(workspacePaths);
   await initializeGitRepo(rootDir);
+  const gitignorePath = join(rootDir, ".gitignore");
+  await writeFile(
+    gitignorePath,
+    `node_modules/\n${await readFile(gitignorePath, "utf8")}`,
+    "utf8"
+  );
+  await runCommand(rootDir, ["git", "-C", rootDir, "add", ".gitignore"]);
+  await runCommand(rootDir, [
+    "git",
+    "-C",
+    rootDir,
+    "commit",
+    "-m",
+    "test: ignore node_modules directories"
+  ]);
+  await mkdir(join(rootDir, "node_modules"), { recursive: true });
+  await writeFile(join(rootDir, "node_modules", ".placeholder"), "toolchain\n", "utf8");
 
   const seededRun = createRun({
     title: "Managed workspace checkpoint catch-up",
@@ -847,10 +890,15 @@ async function verifyManagedWorkspaceCheckpointCatchesUpDirtyBaseline(): Promise
   );
 
   const preflight = await captureAttemptCheckpointPreflight({
+    run: managedRun,
     attempt,
     attemptPaths
   });
   assert.equal(preflight?.status, "ready");
+  assert.ok(
+    !preflight?.status_before.some((line) => line.includes("node_modules")),
+    "managed workspace toolchain symlink should stay outside checkpoint preflight"
+  );
   assert.ok(
     preflight?.status_before.some((line) => line.includes("preexisting-note.md")),
     "managed workspace preflight should capture the preexisting dirty file"

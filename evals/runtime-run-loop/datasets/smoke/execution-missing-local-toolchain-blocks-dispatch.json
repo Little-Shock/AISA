@@ -1,6 +1,6 @@
 {
   "id": "execution-missing-local-toolchain-blocks-dispatch",
-  "description": "A package.json-only execution workspace with no local node_modules must block before dispatch instead of inventing pnpm replay commands.",
+  "description": "A package.json-only execution workspace with no local node_modules must fail preflight before dispatch and leave no fake attempt.started.",
   "driver": "execution_missing_local_toolchain_blocks_dispatch",
   "max_ticks": 6,
   "expected": {
@@ -10,9 +10,10 @@
     "attempt_types": ["research", "execution"],
     "attempt_statuses": ["completed", "failed"],
     "verification_statuses": ["not_applicable"],
-    "required_journal_types": ["attempt.completed", "attempt.failed"],
+    "required_journal_types": ["attempt.completed", "attempt.preflight.failed", "attempt.failed"],
     "required_journal_counts": {
-      "attempt.started": 2,
+      "attempt.started": 1,
+      "attempt.preflight.failed": 1,
       "attempt.completed": 1,
       "attempt.failed": 1
     },

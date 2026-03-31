@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { lstat, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import {
   createAttemptContract,
   createAttempt,
@@ -31,6 +31,7 @@ import {
   getAttemptContext,
   getAttemptEvaluation,
   getAttemptEvaluationSynthesisRecord,
+  getAttemptPreflightEvaluation,
   getAttemptReviewInputPacket,
   getAttemptReviewPacket,
   getCurrentDecision,
@@ -112,7 +113,9 @@ type ScenarioObservation = {
   blocking_reason: string | null;
   review_packets: Array<{
     attempt_id: string;
+    attempt_type: string;
     attempt_status: string;
+    attempt_started_at: string | null;
     path: string;
     has_packet: boolean;
     matches_schema: boolean;
@@ -153,8 +156,16 @@ type ScenarioObservation = {
     runtime_verification_preexisting_git_status: string[];
     runtime_verification_new_git_status: string[];
     runtime_verification_changed_files: string[];
+    attempt_contract_done_rubric_codes: string[];
+    attempt_contract_failure_mode_codes: string[];
     attempt_contract_has_verification_plan: boolean;
     attempt_contract_verification_commands: string[];
+    has_preflight_artifact: boolean;
+    preflight_artifact_exists: boolean;
+    has_preflight_evaluation: boolean;
+    preflight_evaluation_status: string | null;
+    preflight_evaluation_failure_code: string | null;
+    preflight_evaluation_failure_reason: string | null;
     restart_required_message: string | null;
     restart_required_affected_files: string[];
   }>;
@@ -536,6 +547,26 @@ class ScenarioAdapter {
             "git-visible workspace changes",
             "a replayable verification command that checks the execution change"
           ],
+          done_rubric: [
+            {
+              code: "git_change_recorded",
+              description: "Leave a git-visible workspace change."
+            },
+            {
+              code: "verification_replay_passed",
+              description: "Pass the locked replay command."
+            }
+          ],
+          failure_modes: [
+            {
+              code: "missing_replayable_verification_plan",
+              description: "Do not dispatch without replayable verification."
+            },
+            {
+              code: "missing_local_verifier_toolchain",
+              description: "Do not dispatch pnpm replay without local node_modules."
+            }
+          ],
           forbidden_shortcuts: [
             "do not claim success without replayable verification"
           ],
@@ -706,6 +737,39 @@ async function waitForRunningAttemptsToSettle(
     }
     await sleep(50);
   }
+}
+
+async function waitForRunCondition(input: {
+  workspacePaths: ReturnType<typeof resolveWorkspacePaths>;
+  runId: string;
+  predicate: (snapshot: {
+    current: Awaited<ReturnType<typeof getCurrentDecision>>;
+    attempts: Awaited<ReturnType<typeof listAttempts>>;
+  }) => boolean;
+  timeoutMs?: number;
+  failureMessage: string;
+}): Promise<void> {
+  const deadline = Date.now() + (input.timeoutMs ?? 3_000);
+
+  while (Date.now() < deadline) {
+    const [current, attempts] = await Promise.all([
+      getCurrentDecision(input.workspacePaths, input.runId),
+      listAttempts(input.workspacePaths, input.runId)
+    ]);
+
+    if (
+      input.predicate({
+        current,
+        attempts
+      })
+    ) {
+      return;
+    }
+
+    await sleep(50);
+  }
+
+  throw new Error(input.failureMessage);
 }
 
 async function isRunQuiescent(
@@ -1097,6 +1161,19 @@ async function assertMultiReviewerPipelinePersistsOpinionsAndSynthesizesEvaluati
     });
   });
 
+  await waitForRunCondition({
+    workspacePaths,
+    runId: run.id,
+    failureMessage:
+      "multi_reviewer_pipeline: research attempt did not settle to the execution-ready state",
+    predicate: ({ current, attempts }) =>
+      current?.recommended_next_action === "start_execution" &&
+      current.latest_attempt_id !== null &&
+      attempts.some(
+        (attempt) => attempt.attempt_type === "research" && attempt.status === "completed"
+      )
+  });
+
   const attempts = await listAttempts(workspacePaths, run.id);
   const researchAttempt = attempts.find(
     (attempt) => attempt.attempt_type === "research" && attempt.status === "completed"
@@ -1331,6 +1408,19 @@ async function assertCliSynthesizerPersistsArtifactAndFinalizesEvaluation(): Pro
     });
   });
 
+  await waitForRunCondition({
+    workspacePaths,
+    runId: run.id,
+    failureMessage:
+      "cli_synthesizer_pipeline: research attempt did not settle to the execution-ready state",
+    predicate: ({ current, attempts }) =>
+      current?.recommended_next_action === "start_execution" &&
+      current.latest_attempt_id !== null &&
+      attempts.some(
+        (attempt) => attempt.attempt_type === "research" && attempt.status === "completed"
+      )
+  });
+
   const attempts = await listAttempts(workspacePaths, run.id);
   const researchAttempt = attempts.find(
     (attempt) => attempt.attempt_type === "research" && attempt.status === "completed"
@@ -1536,6 +1626,18 @@ async function runCliSynthesizerFailureCase(
         iterations: 2
       });
     });
+  });
+
+  await waitForRunCondition({
+    workspacePaths,
+    runId: run.id,
+    failureMessage: `cli_synthesizer_${mode}: expected a failed research attempt to settle`,
+    predicate: ({ current, attempts }) =>
+      current?.recommended_next_action === "wait_for_human" &&
+      current.waiting_for_human === true &&
+      attempts.some(
+        (attempt) => attempt.attempt_type === "research" && attempt.status === "failed"
+      )
   });
 
   const attempts = await listAttempts(workspacePaths, run.id);
@@ -1874,6 +1976,18 @@ async function runCliReviewerFailureCase(
       runId: run.id,
       iterations: 2
     });
+  });
+
+  await waitForRunCondition({
+    workspacePaths,
+    runId: run.id,
+    failureMessage: `cli_reviewer_${mode}: expected a failed research attempt to settle`,
+    predicate: ({ current, attempts }) =>
+      current?.recommended_next_action === "wait_for_human" &&
+      current.waiting_for_human === true &&
+      attempts.some(
+        (attempt) => attempt.attempt_type === "research" && attempt.status === "failed"
+      )
   });
 
   const attempts = await listAttempts(workspacePaths, run.id);
@@ -2676,7 +2790,20 @@ async function runConcurrentOwnerCase(input: {
   await primary.tick();
   await new Promise((resolve) => setTimeout(resolve, 50));
   await secondary.tick();
-  await new Promise((resolve) => setTimeout(resolve, 350));
+  await waitForRunningAttemptsToSettle(input.workspacePaths, input.run.id, 3_000);
+  await waitForRunCondition({
+    workspacePaths: input.workspacePaths,
+    runId: input.run.id,
+    failureMessage:
+      "concurrent owner case did not settle to the post-research execution state",
+    predicate: ({ current, attempts }) =>
+      current?.run_status === "running" &&
+      current.waiting_for_human === false &&
+      current.recommended_next_action === "start_execution" &&
+      attempts.some(
+        (attempt) => attempt.attempt_type === "research" && attempt.status === "completed"
+      )
+  });
 
   const persistedRun = await getRun(input.workspacePaths, input.run.id);
   assert.equal(persistedRun.id, input.run.id, "concurrent owner case: persisted run missing");
@@ -3026,8 +3153,9 @@ async function collectObservation(
       .filter((attempt) => ["completed", "failed", "stopped"].includes(attempt.status))
       .map(async (attempt) => {
         const reviewPacketPath = resolveAttemptPaths(workspacePaths, runId, attempt.id).reviewPacketFile;
-        const [reviewPacket, reviewPacketSchemaValidation] = await Promise.all([
+        const [reviewPacket, preflightEvaluation, reviewPacketSchemaValidation] = await Promise.all([
           getAttemptReviewPacket(workspacePaths, runId, attempt.id),
+          getAttemptPreflightEvaluation(workspacePaths, runId, attempt.id),
           validatePersistedReviewPacket({
             reviewPacketFile: reviewPacketPath
           })
@@ -3039,6 +3167,7 @@ async function collectObservation(
         const metaArtifact = artifactByKind.get("attempt_meta") ?? null;
         const contractArtifact = artifactByKind.get("attempt_contract") ?? null;
         const contextArtifact = artifactByKind.get("attempt_context") ?? null;
+        const preflightArtifact = artifactByKind.get("preflight_evaluation") ?? null;
         const resultArtifact = artifactByKind.get("attempt_result") ?? null;
         const evaluationArtifact = artifactByKind.get("attempt_evaluation") ?? null;
         const runtimeVerificationArtifact = artifactByKind.get("runtime_verification") ?? null;
@@ -3064,7 +3193,9 @@ async function collectObservation(
 
         return {
           attempt_id: attempt.id,
+          attempt_type: attempt.attempt_type,
           attempt_status: attempt.status,
+          attempt_started_at: attempt.started_at,
           path: reviewPacketPath,
           has_packet: reviewPacket !== null,
           matches_schema: reviewPacketSchemaValidation.matchesSchema,
@@ -3117,9 +3248,19 @@ async function collectObservation(
             reviewPacket?.runtime_verification?.new_git_status ?? [],
           runtime_verification_changed_files:
             reviewPacket?.runtime_verification?.changed_files ?? [],
+          attempt_contract_done_rubric_codes:
+            reviewPacket?.attempt_contract?.done_rubric.map((item) => item.code) ?? [],
+          attempt_contract_failure_mode_codes:
+            reviewPacket?.attempt_contract?.failure_modes.map((item) => item.code) ?? [],
           attempt_contract_has_verification_plan:
             reviewPacket?.attempt_contract?.verification_plan !== undefined,
           attempt_contract_verification_commands: attemptContractVerificationCommands,
+          has_preflight_artifact: preflightArtifact !== null,
+          preflight_artifact_exists: preflightArtifact?.exists ?? false,
+          has_preflight_evaluation: preflightEvaluation !== null,
+          preflight_evaluation_status: preflightEvaluation?.status ?? null,
+          preflight_evaluation_failure_code: preflightEvaluation?.failure_code ?? null,
+          preflight_evaluation_failure_reason: preflightEvaluation?.failure_reason ?? null,
           restart_required_message:
             typeof restartRequiredPayload?.message === "string"
               ? restartRequiredPayload.message
@@ -3427,13 +3568,13 @@ function assertCase(scenario: ScenarioCase, observation: ScenarioObservation): v
       `${scenario.id}: runtime verification should record the changed runtime source file`
     );
     assert.ok(
-      executionPacket.restart_required_message?.includes("Restart before the next dispatch"),
+      executionPacket.restart_required_message?.includes("Promoted checkpoint"),
       `${scenario.id}: review packet should record the restart-required message`
     );
     assert.deepEqual(
       executionPacket.restart_required_affected_files,
-      ["packages/orchestrator/src/index.ts"],
-      `${scenario.id}: review packet should record the affected runtime files`
+      [],
+      `${scenario.id}: promotion-driven restart should not pretend the managed worktree edited the live repo in place`
     );
   }
 
@@ -3461,6 +3602,48 @@ function assertCase(scenario: ScenarioCase, observation: ScenarioObservation): v
       `${scenario.id}: execution should be blocked before runtime verification`
     );
     assert.equal(
+      executionPacket.has_preflight_artifact,
+      true,
+      `${scenario.id}: failed preflight should persist a preflight artifact`
+    );
+    assert.equal(
+      executionPacket.preflight_artifact_exists,
+      true,
+      `${scenario.id}: persisted preflight artifact should exist`
+    );
+    assert.equal(
+      executionPacket.has_preflight_evaluation,
+      true,
+      `${scenario.id}: failed preflight should persist a machine-readable evaluation`
+    );
+    assert.equal(
+      executionPacket.attempt_started_at,
+      null,
+      `${scenario.id}: failed preflight should not stamp started_at`
+    );
+    assert.equal(
+      executionPacket.preflight_evaluation_status,
+      "failed",
+      `${scenario.id}: execution preflight should fail closed`
+    );
+    assert.equal(
+      executionPacket.preflight_evaluation_failure_code,
+      "missing_contract_verification_plan",
+      `${scenario.id}: missing local toolchain case should fail on missing replayable verification`
+    );
+    assert.ok(
+      executionPacket.preflight_evaluation_failure_reason?.includes("no local node_modules"),
+      `${scenario.id}: preflight failure reason should surface the missing local toolchain`
+    );
+    assert.ok(
+      executionPacket.attempt_contract_done_rubric_codes.length > 0,
+      `${scenario.id}: execution contract should carry done_rubric`
+    );
+    assert.ok(
+      executionPacket.attempt_contract_failure_mode_codes.length > 0,
+      `${scenario.id}: execution contract should carry failure_modes`
+    );
+    assert.equal(
       executionPacket.attempt_contract_has_verification_plan,
       false,
       `${scenario.id}: runtime should refuse to auto-generate a pnpm verification plan`
@@ -3482,9 +3665,9 @@ function parseNdjson<T>(text: string): T[] {
 }
 
 async function assertPersistedPostRestartPromptChain(): Promise<void> {
-  const rootDir = process.cwd();
+  const runtimeDataRoot = resolve(process.cwd(), "..", ".aisa-runtime");
   const reportPath = join(
-    rootDir,
+    runtimeDataRoot,
     "runs",
     "run_3374dc3f",
     "attempts",
@@ -3508,7 +3691,7 @@ async function assertPersistedPostRestartPromptChain(): Promise<void> {
   );
 
   for (const evidence of report.evidence_chain) {
-    const text = await readFile(join(rootDir, evidence.path), "utf8");
+    const text = await readFile(join(runtimeDataRoot, evidence.path), "utf8");
 
     if (evidence.check === "must_include") {
       assert.ok(
@@ -3525,7 +3708,7 @@ async function assertPersistedPostRestartPromptChain(): Promise<void> {
   }
 
   const legacyPromptPath = join(
-    rootDir,
+    runtimeDataRoot,
     "runs",
     report.run_id,
     "attempts",
@@ -3533,7 +3716,7 @@ async function assertPersistedPostRestartPromptChain(): Promise<void> {
     "worker-prompt.md"
   );
   const currentPromptPath = join(
-    rootDir,
+    runtimeDataRoot,
     "runs",
     report.run_id,
     "attempts",
@@ -3566,7 +3749,7 @@ async function assertPersistedPostRestartPromptChain(): Promise<void> {
 
   const currentMeta = JSON.parse(
     await readFile(
-      join(rootDir, "runs", report.run_id, "attempts", report.attempt_id, "meta.json"),
+      join(runtimeDataRoot, "runs", report.run_id, "attempts", report.attempt_id, "meta.json"),
       "utf8"
     )
   ) as {
@@ -3579,7 +3762,7 @@ async function assertPersistedPostRestartPromptChain(): Promise<void> {
   );
 
   const journal = parseNdjson<JournalEntryLite>(
-    await readFile(join(rootDir, "runs", report.run_id, "journal.ndjson"), "utf8")
+    await readFile(join(runtimeDataRoot, "runs", report.run_id, "journal.ndjson"), "utf8")
   );
   const manualRecoveryIndex = journal.findIndex(
     (entry) => entry.id === report.restart_transition.manual_recovery_event_id

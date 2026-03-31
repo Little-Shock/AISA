@@ -5,7 +5,10 @@ import {
   resolveWorkspacePaths,
   type WorkspacePaths
 } from "../packages/state-store/src/index.ts";
-import { Orchestrator } from "../packages/orchestrator/src/index.ts";
+import {
+  Orchestrator,
+  type OrchestratorOptions
+} from "../packages/orchestrator/src/index.ts";
 import {
   CodexCliWorkerAdapter,
   loadCodexCliConfig,
@@ -57,13 +60,15 @@ export async function driveRun(input: {
   pollIntervalMs?: number;
   maxPolls?: number;
   stopAfterCompletedAttempts?: number | null;
+  orchestratorOptions?: OrchestratorOptions;
 }): Promise<DriveRunResult> {
   const workspacePaths = resolveWorkspacePaths(input.workspaceRoot);
   const orchestrator = new Orchestrator(
     workspacePaths,
     input.adapter as never,
     undefined,
-    input.pollIntervalMs ?? 1500
+    input.pollIntervalMs ?? 1500,
+    input.orchestratorOptions
   );
 
   let latestSnapshot = await readRunSnapshot(workspacePaths, input.runId);

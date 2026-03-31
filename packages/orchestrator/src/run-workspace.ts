@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { cp, lstat, mkdir, stat, symlink } from "node:fs/promises";
+import { cp, lstat, mkdir, readFile, stat, symlink, writeFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import { updateRun, type Run } from "@autoresearch/domain";
@@ -17,6 +17,22 @@ type GitCommandResult = {
   stderr: string;
   exitCode: number;
 };
+
+const MANAGED_WORKSPACE_TRANSIENT_PATHS = ["node_modules"] as const;
+
+export function isManagedWorkspaceTransientPath(relativePath: string): boolean {
+  return MANAGED_WORKSPACE_TRANSIENT_PATHS.some(
+    (transientPath) =>
+      relativePath === transientPath ||
+      relativePath.startsWith(`${transientPath}${"/"}`)
+  );
+}
+
+export function buildManagedWorkspaceTransientExcludePathspecs(): string[] {
+  return MANAGED_WORKSPACE_TRANSIENT_PATHS.map(
+    (transientPath) => `:(exclude)${transientPath}`
+  );
+}
 
 export function getEffectiveRunWorkspaceRoot(
   run: Pick<Run, "workspace_root" | "managed_workspace_root">
@@ -85,6 +101,11 @@ export async function ensureRunManagedWorkspace(input: {
         }
       );
     }
+    await synchronizeManagedWorkspaceWithSource({
+      sourceRepoRoot,
+      managedRepoRoot,
+      managedWorkspaceRoot: validatedManagedWorkspaceRoot
+    });
     await provisionManagedWorkspaceToolchain({
       sourceRepoRoot,
       managedRepoRoot
@@ -149,6 +170,78 @@ export async function ensureRunManagedWorkspace(input: {
   });
 }
 
+async function synchronizeManagedWorkspaceWithSource(input: {
+  sourceRepoRoot: string;
+  managedRepoRoot: string;
+  managedWorkspaceRoot: string;
+}): Promise<void> {
+  const [sourceHead, managedHead] = await Promise.all([
+    readGitHead(input.sourceRepoRoot),
+    readGitHead(input.managedRepoRoot)
+  ]);
+
+  if (!sourceHead || !managedHead || sourceHead === managedHead) {
+    return;
+  }
+
+  const [managedIsBehindSource, sourceIsBehindManaged] = await Promise.all([
+    isAncestorCommit(input.managedRepoRoot, managedHead, sourceHead),
+    isAncestorCommit(input.managedRepoRoot, sourceHead, managedHead)
+  ]);
+
+  if (managedIsBehindSource) {
+    const managedStatus = await readGitStatus(input.managedRepoRoot);
+    if (managedStatus.length > 0) {
+      throw new RunWorkspaceScopeError(
+        "managed_workspace_stale_from_source",
+        `运行的隔离工作区落后于当前源仓库 HEAD，且含有未提交变更，不能自动同步：${input.managedWorkspaceRoot}`,
+        {
+          managed_workspace_root: input.managedWorkspaceRoot,
+          source_repo_root: input.sourceRepoRoot,
+          source_head: sourceHead,
+          managed_head: managedHead,
+          managed_status: managedStatus
+        }
+      );
+    }
+
+    const fastForwardResult = await runGit(input.managedRepoRoot, [
+      "merge",
+      "--ff-only",
+      sourceHead
+    ]);
+    if (fastForwardResult.exitCode !== 0) {
+      throw new RunWorkspaceScopeError(
+        "managed_workspace_stale_from_source",
+        `运行的隔离工作区落后于当前源仓库 HEAD，但无法自动快进：${extractGitError(fastForwardResult.stderr)}`,
+        {
+          managed_workspace_root: input.managedWorkspaceRoot,
+          source_repo_root: input.sourceRepoRoot,
+          source_head: sourceHead,
+          managed_head: managedHead
+        }
+      );
+    }
+
+    return;
+  }
+
+  if (sourceIsBehindManaged) {
+    return;
+  }
+
+  throw new RunWorkspaceScopeError(
+    "managed_workspace_stale_from_source",
+    `运行的隔离工作区已经偏离当前源仓库 HEAD，不能自动同步：${input.managedWorkspaceRoot}`,
+    {
+      managed_workspace_root: input.managedWorkspaceRoot,
+      source_repo_root: input.sourceRepoRoot,
+      source_head: sourceHead,
+      managed_head: managedHead
+    }
+  );
+}
+
 async function createManagedWorkspace(input: {
   runId: string;
   sourceRepoRoot: string;
@@ -210,10 +303,7 @@ async function createManagedWorkspace(input: {
 
   const untrackedPaths = await listUntrackedPaths(input.sourceRepoRoot);
   for (const relativePath of untrackedPaths) {
-    if (
-      relativePath === "node_modules" ||
-      relativePath.startsWith(`node_modules${"/"}`)
-    ) {
+    if (isManagedWorkspaceTransientPath(relativePath)) {
       continue;
     }
     const sourcePath = join(input.sourceRepoRoot, relativePath);
@@ -266,6 +356,8 @@ async function provisionManagedWorkspaceToolchain(input: {
   sourceRepoRoot: string;
   managedRepoRoot: string;
 }): Promise<void> {
+  await ensureManagedWorkspaceTransientPathsIgnored(input.managedRepoRoot);
+
   const sourceNodeModulesPath = join(input.sourceRepoRoot, "node_modules");
   const sourceNodeModulesStat = await stat(sourceNodeModulesPath).catch(() => null);
   if (!sourceNodeModulesStat?.isDirectory()) {
@@ -279,6 +371,36 @@ async function provisionManagedWorkspaceToolchain(input: {
   }
 
   await symlink(sourceNodeModulesPath, managedNodeModulesPath, "dir");
+}
+
+async function ensureManagedWorkspaceTransientPathsIgnored(
+  managedRepoRoot: string
+): Promise<void> {
+  const excludeFilePath = await resolveGitPath(managedRepoRoot, "info/exclude");
+  if (!excludeFilePath) {
+    return;
+  }
+
+  const existingContent = await readFile(excludeFilePath, "utf8").catch(() => "");
+  const existingLines = new Set(
+    existingContent
+      .split(/\r?\n/u)
+      .map((line) => line.trim())
+      .filter(Boolean)
+  );
+  const missingEntries = MANAGED_WORKSPACE_TRANSIENT_PATHS.filter(
+    (transientPath) => !existingLines.has(transientPath)
+  );
+  if (missingEntries.length === 0) {
+    return;
+  }
+
+  await mkdir(dirname(excludeFilePath), { recursive: true });
+  const nextContent =
+    existingContent.length === 0
+      ? `${missingEntries.join("\n")}\n`
+      : `${existingContent}${existingContent.endsWith("\n") ? "" : "\n"}${missingEntries.join("\n")}\n`;
+  await writeFile(excludeFilePath, nextContent, "utf8");
 }
 
 async function validateManagedWorkspace(input: {
@@ -387,6 +509,14 @@ async function resolveGitRepoRoot(workspaceRoot: string): Promise<string | null>
   return result.exitCode === 0 ? result.stdout.trim() : null;
 }
 
+async function resolveGitPath(
+  workspaceRoot: string,
+  relativeGitPath: string
+): Promise<string | null> {
+  const result = await runGit(workspaceRoot, ["rev-parse", "--git-path", relativeGitPath]);
+  return result.exitCode === 0 ? result.stdout.trim() : null;
+}
+
 async function readGitStatus(repoRoot: string): Promise<string[]> {
   const result = await runGit(repoRoot, ["status", "--short"]);
   if (result.exitCode !== 0) {
@@ -403,6 +533,25 @@ async function readGitStatus(repoRoot: string): Promise<string[]> {
     .split("\n")
     .map((line) => line.trimEnd())
     .filter((line) => line.length > 0);
+}
+
+async function readGitHead(repoRoot: string): Promise<string | null> {
+  const result = await runGit(repoRoot, ["rev-parse", "HEAD"]);
+  return result.exitCode === 0 ? result.stdout.trim() : null;
+}
+
+async function isAncestorCommit(
+  repoRoot: string,
+  ancestorSha: string,
+  descendantSha: string
+): Promise<boolean> {
+  const result = await runGit(repoRoot, [
+    "merge-base",
+    "--is-ancestor",
+    ancestorSha,
+    descendantSha
+  ]);
+  return result.exitCode === 0;
 }
 
 async function runGit(

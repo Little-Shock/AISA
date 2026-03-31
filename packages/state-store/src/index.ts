@@ -1,10 +1,19 @@
-import { appendFile, mkdir, readFile, readdir, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import {
+  appendFile,
+  mkdir,
+  readFile,
+  readdir,
+  rename,
+  unlink,
+  writeFile
+} from "node:fs/promises";
+import { basename, dirname, join } from "node:path";
 import type {
   Attempt,
   AttemptContract,
   AttemptHeartbeat,
   AttemptEvaluationSynthesisRecord,
+  AttemptPreflightEvaluation,
   AttemptRuntimeEvent,
   AttemptRuntimeState,
   AttemptEvaluation,
@@ -34,6 +43,7 @@ import {
   AttemptContractSchema,
   AttemptHeartbeatSchema,
   AttemptEvaluationSynthesisRecordSchema,
+  AttemptPreflightEvaluationSchema,
   AttemptRuntimeEventSchema,
   AttemptRuntimeStateSchema,
   AttemptEvaluationSchema,
@@ -110,6 +120,7 @@ export interface AttemptPaths {
   reviewInputPacketFile: string;
   reviewPacketFile: string;
   reviewOpinionsDir: string;
+  preflightEvaluationFile: string;
   runtimeVerificationFile: string;
   heartbeatFile: string;
   runtimeStateFile: string;
@@ -170,6 +181,7 @@ export function resolveAttemptPaths(
     reviewInputPacketFile: join(attemptDir, "review_input_packet.json"),
     reviewPacketFile: join(attemptDir, "review_packet.json"),
     reviewOpinionsDir: join(attemptDir, "review_opinions"),
+    preflightEvaluationFile: join(attemptDir, "artifacts", "preflight-evaluation.json"),
     runtimeVerificationFile: join(attemptDir, "artifacts", "runtime-verification.json"),
     heartbeatFile: join(attemptDir, "artifacts", "heartbeat.json"),
     runtimeStateFile: join(attemptDir, "artifacts", "runtime-state.json"),
@@ -306,7 +318,7 @@ export async function writeJsonFile(
   value: unknown
 ): Promise<void> {
   await mkdir(dirname(filePath), { recursive: true });
-  await writeFile(filePath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+  await writeFileAtomically(filePath, `${JSON.stringify(value, null, 2)}\n`);
 }
 
 export async function writeTextFile(
@@ -314,12 +326,29 @@ export async function writeTextFile(
   value: string
 ): Promise<void> {
   await mkdir(dirname(filePath), { recursive: true });
-  await writeFile(filePath, value.endsWith("\n") ? value : `${value}\n`, "utf8");
+  await writeFileAtomically(filePath, value.endsWith("\n") ? value : `${value}\n`);
 }
 
 export async function readJsonFile<T>(filePath: string): Promise<T> {
   const raw = await readFile(filePath, "utf8");
   return JSON.parse(raw) as T;
+}
+
+async function writeFileAtomically(filePath: string, value: string): Promise<void> {
+  const tempFilePath = join(
+    dirname(filePath),
+    `.${basename(filePath)}.tmp-${process.pid}-${Date.now()}-${Math.random()
+      .toString(16)
+      .slice(2)}`
+  );
+
+  try {
+    await writeFile(tempFilePath, value, "utf8");
+    await rename(tempFilePath, filePath);
+  } catch (error) {
+    await unlink(tempFilePath).catch(() => undefined);
+    throw error;
+  }
 }
 
 export async function saveGoal(
@@ -726,6 +755,18 @@ export async function saveAttemptReviewOpinion(
   await writeJsonFile(join(attemptPaths.reviewOpinionsDir, `${opinion.opinion_id}.json`), opinion);
 }
 
+export async function saveAttemptPreflightEvaluation(
+  paths: WorkspacePaths,
+  evaluation: AttemptPreflightEvaluation
+): Promise<void> {
+  const attemptPaths = await ensureAttemptDirectories(
+    paths,
+    evaluation.run_id,
+    evaluation.attempt_id
+  );
+  await writeJsonFile(attemptPaths.preflightEvaluationFile, evaluation);
+}
+
 export async function saveAttemptRuntimeVerification(
   paths: WorkspacePaths,
   verification: AttemptRuntimeVerification
@@ -809,6 +850,21 @@ export async function listAttemptReviewOpinions(
   );
 
   return opinions.sort((left, right) => left.created_at.localeCompare(right.created_at));
+}
+
+export async function getAttemptPreflightEvaluation(
+  paths: WorkspacePaths,
+  runId: string,
+  attemptId: string
+): Promise<AttemptPreflightEvaluation | null> {
+  try {
+    const evaluation = await readJsonFile<AttemptPreflightEvaluation>(
+      resolveAttemptPaths(paths, runId, attemptId).preflightEvaluationFile
+    );
+    return AttemptPreflightEvaluationSchema.parse(evaluation);
+  } catch {
+    return null;
+  }
 }
 
 export async function getAttemptRuntimeVerification(

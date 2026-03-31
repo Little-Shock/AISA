@@ -1,8 +1,8 @@
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import cors from "@fastify/cors";
-import { config as loadEnv } from "dotenv";
-import Fastify from "fastify";
+import cors from "../../../scripts/local-fastify-cors.mjs";
+import { config as loadEnv } from "../../../scripts/local-dotenv.mjs";
+import Fastify from "../../../scripts/local-fastify.mjs";
 import {
   CreateRunInputSchema,
   CreateGoalInputSchema,
@@ -22,9 +22,12 @@ import { ContextManager } from "@autoresearch/context-manager";
 import { appendEvent, listEvents } from "@autoresearch/event-log";
 import {
   assessRunHealth,
+  buildRuntimeWorkspaceScopeRoots,
   createRunWorkspaceScopePolicy,
   lockRunWorkspaceRoot,
   Orchestrator,
+  resolveRuntimeLayout,
+  syncRuntimeLayoutHint,
   RunWorkspaceScopeError
 } from "@autoresearch/orchestrator";
 import { buildSelfBootstrapRunTemplate, generateInitialPlan } from "@autoresearch/planner";
@@ -120,13 +123,27 @@ function inferLaunchNextAction(input: {
 export async function buildServer(
   options: {
     workspaceRoot?: string;
+    runtimeRepoRoot?: string;
+    devRepoRoot?: string;
+    runtimeDataRoot?: string;
+    managedWorkspaceRoot?: string;
     startOrchestrator?: boolean;
     allowedRunWorkspaceRoots?: string[];
     enableSelfRestart?: boolean;
   } = {}
 ) {
-  const runtimeRoot = options.workspaceRoot ?? repositoryRoot;
-  const workspacePaths = resolveWorkspacePaths(runtimeRoot);
+  const runtimeLayout = resolveRuntimeLayout({
+    repositoryRoot,
+    workspaceRoot: options.workspaceRoot,
+    runtimeRepoRoot: options.runtimeRepoRoot,
+    devRepoRoot: options.devRepoRoot,
+    runtimeDataRoot: options.runtimeDataRoot,
+    managedWorkspaceRoot: options.managedWorkspaceRoot,
+    env: process.env
+  });
+  syncRuntimeLayoutHint(runtimeLayout);
+  const workspacePaths = resolveWorkspacePaths(runtimeLayout.runtimeDataRoot);
+  const defaultRunWorkspaceRoot = runtimeLayout.devRepoRoot;
   const contextManager = new ContextManager();
   const adapter = new CodexCliWorkerAdapter(loadCodexCliConfig(process.env));
   const app = Fastify({
@@ -134,9 +151,13 @@ export async function buildServer(
   });
   const runHealthStaleMs = readPositiveIntegerEnv("AISA_RUN_HEALTH_STALE_MS", 180_000);
   const runWorkspaceScopePolicy = await createRunWorkspaceScopePolicy({
-    runtimeRoot,
-    allowedRoots: options.allowedRunWorkspaceRoots,
-    envValue: process.env.AISA_ALLOWED_WORKSPACE_ROOTS
+    runtimeRoot: runtimeLayout.runtimeRepoRoot,
+    allowedRoots: buildRuntimeWorkspaceScopeRoots(
+      runtimeLayout,
+      options.allowedRunWorkspaceRoots
+    ),
+    envValue: process.env.AISA_ALLOWED_WORKSPACE_ROOTS,
+    managedWorkspaceRoot: runtimeLayout.managedWorkspaceRoot
   });
   let orchestratorStarted = false;
   let restartPending = false;
@@ -144,8 +165,10 @@ export async function buildServer(
   const requestRuntimeRestart = (request: {
     runId: string;
     attemptId: string;
+    reason: "runtime_source_drift" | "runtime_promotion";
     affectedFiles: string[];
     message: string;
+    promotedSha?: string | null;
   }): void => {
     if (!options.enableSelfRestart || restartPending) {
       return;
@@ -156,9 +179,11 @@ export async function buildServer(
       {
         run_id: request.runId,
         attempt_id: request.attemptId,
-        affected_files: request.affectedFiles
+        reason: request.reason,
+        affected_files: request.affectedFiles,
+        promoted_sha: request.promotedSha ?? null
       },
-      "Runtime source drift completed. Scheduling control-api restart."
+      "Runtime restart requested. Scheduling control-api restart."
     );
 
     if (orchestratorStarted) {
@@ -174,7 +199,8 @@ export async function buildServer(
   };
   orchestrator = new Orchestrator(workspacePaths, adapter, undefined, undefined, {
     runWorkspaceScopePolicy,
-    requestRuntimeRestart
+    requestRuntimeRestart,
+    runtimeLayout
   });
 
   await ensureWorkspace(workspacePaths);
@@ -366,6 +392,13 @@ export async function buildServer(
       status: degradedRuns.length > 0 ? "degraded" : "ok",
       codex_command: process.env.CODEX_CLI_COMMAND ?? "codex",
       codex_model: process.env.CODEX_MODEL ?? null,
+      runtime_layout: {
+        repository_root: runtimeLayout.repositoryRoot,
+        dev_repo_root: runtimeLayout.devRepoRoot,
+        runtime_repo_root: runtimeLayout.runtimeRepoRoot,
+        runtime_data_root: runtimeLayout.runtimeDataRoot,
+        managed_workspace_root: runtimeLayout.managedWorkspaceRoot
+      },
       allowed_run_workspace_roots: runWorkspaceScopePolicy.allowedRoots,
       run_health_stale_ms: runHealthStaleMs,
       run_count: runSummaries.length,
@@ -471,7 +504,7 @@ export async function buildServer(
     try {
       const input = CreateRunInputSchema.parse(request.body);
       const lockedWorkspaceRoot = await lockWorkspaceRootOrThrow(
-        input.workspace_root ?? runtimeRoot
+        input.workspace_root ?? defaultRunWorkspaceRoot
       );
       const run = createRun({
         ...input,
@@ -519,14 +552,14 @@ export async function buildServer(
       seed_steer: true
     };
     const template = buildSelfBootstrapRunTemplate({
-      workspaceRoot: runtimeRoot,
+      workspaceRoot: runtimeLayout.devRepoRoot,
       ownerId: body.owner_id,
       focus: body.focus
     });
     let run;
     try {
       const lockedWorkspaceRoot = await lockWorkspaceRootOrThrow(
-        template.runInput.workspace_root ?? runtimeRoot
+        template.runInput.workspace_root ?? defaultRunWorkspaceRoot
       );
       run = createRun({
         ...template.runInput,
