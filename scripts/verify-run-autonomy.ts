@@ -32,6 +32,7 @@ import {
   saveAttempt,
   saveAttemptContract,
   saveAttemptResult,
+  saveAttemptRuntimeVerification,
   saveCurrentDecision,
   saveRun
 } from "../packages/state-store/src/index.js";
@@ -905,6 +906,130 @@ async function verifyCheckpointBlockerAutoResumesIntoExecution(): Promise<void> 
     !journal.some((entry) => entry.type === "run.auto_resume.blocked"),
     "checkpoint blocker should no longer hard-stop automatic resume"
   );
+}
+
+async function verifyNoGitChangesBlocksAutoResume(): Promise<void> {
+  const { run, workspacePaths, rootDir, detachedRuntimeLayout } = await bootstrapRun(
+    "no-git-changes-blocks-auto-resume"
+  );
+  await writeExecutionWorkspacePackage(rootDir);
+  await initializeGitRepo(rootDir);
+
+  const completedExecution = updateAttempt(
+    createAttempt({
+      run_id: run.id,
+      attempt_type: "execution",
+      worker: "fake-codex",
+      objective: "Apply a minimal execution step.",
+      success_criteria: run.success_criteria,
+      workspace_root: run.workspace_root
+    }),
+    {
+      status: "completed",
+      started_at: new Date().toISOString(),
+      ended_at: new Date().toISOString()
+    }
+  );
+  const failureReason =
+    "Execution attempt finished without any new git-visible workspace changes beyond the preflight baseline, so the runtime cannot treat it as a verified implementation step.";
+
+  await saveAttempt(workspacePaths, completedExecution);
+  await saveAttemptRuntimeVerification(workspacePaths, {
+    attempt_id: completedExecution.id,
+    run_id: run.id,
+    attempt_type: "execution",
+    status: "failed",
+    repo_root: rootDir,
+    git_head: null,
+    git_status: [],
+    preexisting_git_status: [],
+    new_git_status: [],
+    changed_files: [],
+    failure_code: "no_git_changes",
+    failure_reason: failureReason,
+    command_results: [],
+    synced_self_bootstrap_artifacts: null,
+    created_at: new Date().toISOString()
+  });
+  await saveCurrentDecision(
+    workspacePaths,
+    createCurrentDecision({
+      run_id: run.id,
+      latest_attempt_id: completedExecution.id,
+      run_status: "waiting_steer",
+      recommended_next_action: "wait_for_human",
+      recommended_attempt_type: "execution",
+      summary: "Execution 没有留下新的 git 改动。",
+      blocking_reason: failureReason,
+      waiting_for_human: true
+    })
+  );
+  await appendRunJournal(
+    workspacePaths,
+    createRunJournalEntry({
+      run_id: run.id,
+      attempt_id: completedExecution.id,
+      type: "attempt.completed",
+      payload: {
+        recommendation: "wait_human",
+        goal_progress: 0.2,
+        suggested_attempt_type: "execution"
+      }
+    })
+  );
+  await appendRunJournal(
+    workspacePaths,
+    createRunJournalEntry({
+      run_id: run.id,
+      attempt_id: completedExecution.id,
+      type: "attempt.verification.failed",
+      payload: {
+        status: "failed",
+        failure_code: "no_git_changes",
+        failure_reason: failureReason,
+        changed_files: [],
+        command_count: 0,
+        artifact_path: "artifacts/runtime-verification.json"
+      }
+    })
+  );
+
+  const orchestrator = new Orchestrator(
+    workspacePaths,
+    new AutoResumeExecutionAdapter() as never,
+    undefined,
+    60_000,
+    {
+      runtimeLayout: detachedRuntimeLayout,
+      waitingHumanAutoResumeMs: 30,
+      maxAutomaticResumeCycles: 2
+    }
+  );
+
+  await wait(40);
+  await settle(orchestrator, 8, 80);
+
+  const current = await getCurrentDecision(workspacePaths, run.id);
+  const attempts = await listAttempts(workspacePaths, run.id);
+  const journal = await listRunJournal(workspacePaths, run.id);
+  const blockedEntry = journal.find((entry) => entry.type === "run.auto_resume.blocked");
+
+  assert.ok(current, "current decision must exist");
+  assert.equal(current.run_status, "waiting_steer");
+  assert.equal(current.waiting_for_human, true);
+  assert.equal(current.recommended_next_action, "wait_for_human");
+  assert.deepEqual(
+    attempts.map((attempt) => attempt.status),
+    ["completed"],
+    "no_git_changes should fail closed instead of spawning another execution"
+  );
+  assert.ok(
+    !journal.some((entry) => entry.type === "run.auto_resume.scheduled"),
+    "no_git_changes should not schedule automatic resume"
+  );
+  assert.ok(blockedEntry, "expected a machine-readable auto-resume blocker");
+  assert.equal(blockedEntry?.payload.reason, "runtime_verification_failed");
+  assert.equal(blockedEntry?.payload.failure_code, "no_git_changes");
 }
 
 async function verifyRecoveryAutoResumesExecution(): Promise<void> {
@@ -2163,6 +2288,10 @@ async function main(): Promise<void> {
     {
       id: "checkpoint_blocker_auto_resumes_execution",
       run: verifyCheckpointBlockerAutoResumesIntoExecution
+    },
+    {
+      id: "no_git_changes_blocks_auto_resume",
+      run: verifyNoGitChangesBlocksAutoResume
     },
     {
       id: "rate_limited_execution_retries_quickly",

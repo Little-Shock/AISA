@@ -3236,7 +3236,11 @@ export class Orchestrator {
     current: CurrentDecision;
     attempts: Attempt[];
     journal: Awaited<ReturnType<typeof listRunJournal>>;
-  }): Promise<{ reason: string; message: string } | null> {
+  }): Promise<{
+    reason: string;
+    message: string;
+    failureCode?: AttemptRuntimeVerification["failure_code"];
+  } | null> {
     const governance = await getRunGovernanceState(this.workspacePaths, input.runId);
     if (governance?.status === "blocked" && governance.blocker_repeat_count >= 2) {
       return {
@@ -3260,6 +3264,17 @@ export class Orchestrator {
 
     if (!latestAttempt) {
       return null;
+    }
+
+    const runtimeVerificationBlocker =
+      latestAttempt.attempt_type === "execution"
+        ? await this.getAutomaticResumeRuntimeVerificationBlocker(
+            input.runId,
+            latestAttempt.id
+          )
+        : null;
+    if (runtimeVerificationBlocker) {
+      return runtimeVerificationBlocker;
     }
 
     const restartRequiredEntry = this.getLatestAttemptJournalEntry(
@@ -3599,6 +3614,37 @@ export class Orchestrator {
     };
   }
 
+  private async getAutomaticResumeRuntimeVerificationBlocker(
+    runId: string,
+    attemptId: string
+  ): Promise<{
+    reason: string;
+    message: string;
+    failureCode?: AttemptRuntimeVerification["failure_code"];
+  } | null> {
+    const runtimeVerification = await getAttemptRuntimeVerification(
+      this.workspacePaths,
+      runId,
+      attemptId
+    );
+
+    if (runtimeVerification?.status !== "failed") {
+      return null;
+    }
+
+    switch (runtimeVerification.failure_code) {
+      case "no_git_changes":
+        return {
+          reason: "runtime_verification_failed",
+          failureCode: "no_git_changes",
+          message:
+            "上一轮 execution 的运行时回放失败码是 no_git_changes，说明没有留下新的 git 可见改动，自动续跑已暂停。"
+        };
+      default:
+        return null;
+    }
+  }
+
   private hasCheckpointBlocker(
     journal: Awaited<ReturnType<typeof listRunJournal>>,
     attemptId: string
@@ -3852,6 +3898,7 @@ export class Orchestrator {
     blocker?: {
       reason: string;
       message: string;
+      failureCode?: AttemptRuntimeVerification["failure_code"];
     }
   ): Promise<void> {
     if (this.hasAutoResumeTerminalEvent(journal, "run.auto_resume.blocked")) {
@@ -3866,6 +3913,7 @@ export class Orchestrator {
         type: "run.auto_resume.blocked",
         payload: {
           reason: blocker?.reason ?? "manual_only_blocker",
+          failure_code: blocker?.failureCode ?? null,
           message:
             blocker?.message ??
             current.blocking_reason ??
