@@ -1069,7 +1069,13 @@ export class Orchestrator {
         return;
       }
 
-      const nextAttempt = await this.planNextAttempt(runId, current, attempts);
+      let nextAttempt: { attempt: Attempt; contract: AttemptContract } | null;
+      try {
+        nextAttempt = await this.planNextAttempt(runId, current, attempts);
+      } catch (error) {
+        await this.persistRunPlanningBlocked(run.id, current, error);
+        return;
+      }
       if (!nextAttempt) {
         return;
       }
@@ -1089,6 +1095,54 @@ export class Orchestrator {
         })
       );
     });
+  }
+
+  private async persistRunPlanningBlocked(
+    runId: string,
+    current: CurrentDecision,
+    error: unknown
+  ): Promise<void> {
+    const message = error instanceof Error ? error.message : String(error);
+    const nextCurrent = updateCurrentDecision(current, {
+      run_status: "waiting_steer",
+      recommended_next_action: "wait_for_human",
+      summary: message,
+      blocking_reason: message,
+      waiting_for_human: true
+    });
+
+    const currentAlreadyBlocked =
+      current.run_status === nextCurrent.run_status &&
+      current.recommended_next_action === nextCurrent.recommended_next_action &&
+      current.summary === nextCurrent.summary &&
+      current.blocking_reason === nextCurrent.blocking_reason &&
+      current.waiting_for_human === nextCurrent.waiting_for_human;
+
+    if (!currentAlreadyBlocked) {
+      await saveCurrentDecision(this.workspacePaths, nextCurrent);
+    }
+
+    const journal = await listRunJournal(this.workspacePaths, runId);
+    const latestEntry = journal.at(-1);
+    if (
+      latestEntry?.type === "run.planning.blocked" &&
+      latestEntry.attempt_id === current.latest_attempt_id &&
+      latestEntry.payload.message === message
+    ) {
+      return;
+    }
+
+    await appendRunJournal(
+      this.workspacePaths,
+      createRunJournalEntry({
+        run_id: runId,
+        attempt_id: current.latest_attempt_id,
+        type: "run.planning.blocked",
+        payload: {
+          message
+        }
+      })
+    );
   }
 
   private async planNextAttempt(

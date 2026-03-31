@@ -5,11 +5,16 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  createCurrentDecision,
+  createAttempt,
+  createRun,
+  updateAttempt,
   type Attempt,
   type Run,
   type WorkerWriteback
 } from "../packages/domain/src/index.ts";
 import {
+  createDefaultRunWorkspaceScopePolicy,
   Orchestrator,
   SELF_BOOTSTRAP_NEXT_TASK_ACTIVE_ENTRY_RELATIVE_PATH,
   SELF_BOOTSTRAP_NEXT_TASK_ACTIVE_ENTRY_SNAPSHOT_FILE_NAME
@@ -25,6 +30,9 @@ import {
   listRunJournal,
   listRunSteers,
   resolveWorkspacePaths,
+  saveAttempt,
+  saveCurrentDecision,
+  saveRun,
 } from "../packages/state-store/src/index.ts";
 
 class NoopAdapter {
@@ -162,6 +170,51 @@ function runTsxScript(input: {
   });
 }
 
+async function runCommand(
+  cwd: string,
+  command: string,
+  args: string[]
+): Promise<void> {
+  const result = await new Promise<{
+    exitCode: number | null;
+    stderr: string;
+  }>((resolve, reject) => {
+    const child = spawn(command, args, {
+      cwd,
+      stdio: ["ignore", "ignore", "pipe"]
+    });
+    let stderr = "";
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk;
+    });
+    child.on("error", reject);
+    child.on("close", (exitCode) => {
+      resolve({
+        exitCode,
+        stderr
+      });
+    });
+  });
+
+  assert.equal(
+    result.exitCode,
+    0,
+    `${command} ${args.join(" ")} failed.\n\nstderr:\n${result.stderr.trim() || "<empty>"}`
+  );
+}
+
+async function createGitWorkspace(rootDir: string): Promise<void> {
+  await mkdir(rootDir, { recursive: true });
+  await writeFile(join(rootDir, ".gitignore"), "node_modules/\n", "utf8");
+  await writeFile(join(rootDir, "README.md"), "# self-bootstrap fixture\n", "utf8");
+  await runCommand(rootDir, "git", ["init"]);
+  await runCommand(rootDir, "git", ["config", "user.name", "AISA Test"]);
+  await runCommand(rootDir, "git", ["config", "user.email", "aisa-test@example.com"]);
+  await runCommand(rootDir, "git", ["add", "."]);
+  await runCommand(rootDir, "git", ["commit", "-m", "test: seed self-bootstrap fixture"]);
+}
+
 function formatScriptFailure(label: string, result: ScriptResult): string {
   const stdout = result.stdout.trim();
   const stderr = result.stderr.trim();
@@ -273,6 +326,115 @@ async function waitForFirstAttemptContext(input: {
   }
 
   throw new Error("first self-bootstrap attempt context did not persist in time");
+}
+
+async function assertMissingActiveSnapshotBlocksRunInsteadOfCrashing(): Promise<{
+  blocked_message: string | null;
+}> {
+  const baseDir = await mkdtemp(
+    join(tmpdir(), "aisa-self-bootstrap-execution-snapshot-")
+  );
+  const repoRoot = join(baseDir, "repo");
+  const runtimeDataRoot = join(baseDir, "runtime-data");
+  const managedWorkspaceRoot = join(baseDir, ".aisa-run-worktrees");
+  await createGitWorkspace(repoRoot);
+  await mkdir(managedWorkspaceRoot, { recursive: true });
+
+  const workspacePaths = resolveWorkspacePaths(runtimeDataRoot);
+  await ensureWorkspace(workspacePaths);
+  const run = createRun({
+    title: "AISA 自举下一步规划",
+    description: "Block missing execution planning evidence at the run level.",
+    success_criteria: ["Stop the run without crashing the orchestrator."],
+    constraints: [],
+    owner_id: "test-owner",
+    workspace_root: repoRoot
+  });
+  const previousAttempt = updateAttempt(
+    createAttempt({
+      run_id: run.id,
+      attempt_type: "execution",
+      worker: "fake-codex",
+      objective: "Previous self-bootstrap execution step.",
+      success_criteria: ["Leave replayable evidence."],
+      workspace_root: repoRoot
+    }),
+    {
+      status: "completed",
+      ended_at: new Date().toISOString()
+    }
+  );
+  const current = createCurrentDecision({
+    run_id: run.id,
+    run_status: "running",
+    best_attempt_id: previousAttempt.id,
+    latest_attempt_id: previousAttempt.id,
+    recommended_next_action: "continue_execution",
+    recommended_attempt_type: "execution",
+    summary: "Continue the published self-bootstrap execution task."
+  });
+  await saveRun(workspacePaths, run);
+  await saveAttempt(workspacePaths, previousAttempt);
+  await saveCurrentDecision(workspacePaths, current);
+
+  const orchestrator = new Orchestrator(
+    workspacePaths,
+    new NoopAdapter() as never,
+    undefined,
+    60_000,
+    {
+      runWorkspaceScopePolicy: createDefaultRunWorkspaceScopePolicy(
+        repoRoot,
+        managedWorkspaceRoot
+      )
+    }
+  );
+  await orchestrator.tick();
+  await sleep(50);
+  await orchestrator.tick();
+
+  const [blockedCurrent, attempts, journal] = await Promise.all([
+    getCurrentDecision(workspacePaths, run.id),
+    listAttempts(workspacePaths, run.id),
+    listRunJournal(workspacePaths, run.id)
+  ]);
+
+  assert.equal(
+    attempts.length,
+    1,
+    "missing active next task snapshot should block planning before any new attempt is created"
+  );
+  assert.equal(
+    attempts[0]?.id,
+    previousAttempt.id,
+    "planning failure should leave the previous completed execution attempt untouched"
+  );
+  assert.equal(attempts[0]?.status, "completed");
+  assert.equal(blockedCurrent?.run_status, "waiting_steer");
+  assert.equal(blockedCurrent?.waiting_for_human, true);
+  assert.match(
+    blockedCurrent?.blocking_reason ?? "",
+    /self-bootstrap blocked because active next task snapshot is missing or invalid while building execution contract/,
+    "missing snapshot should stop the run with an explicit planning error"
+  );
+  assert.ok(
+    blockedCurrent?.blocking_reason?.includes(
+      SELF_BOOTSTRAP_NEXT_TASK_ACTIVE_ENTRY_SNAPSHOT_FILE_NAME
+    ),
+    "missing snapshot failure should name the missing run artifact"
+  );
+  assert.ok(
+    journal.some(
+      (entry) =>
+        entry.type === "run.planning.blocked" &&
+        entry.payload.message === blockedCurrent?.blocking_reason
+    ),
+    "planning failure should be recorded on the run instead of crashing the orchestrator"
+  );
+
+  return {
+    blocked_message: blockedCurrent?.blocking_reason ?? null
+  };
 }
 
 async function main(): Promise<void> {
@@ -576,6 +738,9 @@ async function main(): Promise<void> {
     "invalid active next task failure should mention the broken required field"
   );
 
+  const missingExecutionSnapshotBlock =
+    await assertMissingActiveSnapshotBlocksRunInsteadOfCrashing();
+
   console.log(
     JSON.stringify(
       {
@@ -587,7 +752,9 @@ async function main(): Promise<void> {
         runtime_health_snapshot: bootstrapOutput.runtime_health_snapshot,
         drift_count: runtimeHealthSnapshot?.history_contract_drift.drift_count ?? null,
         missing_active_next_task_exit_code: missingActiveTaskResult.exitCode,
-        invalid_active_next_task_exit_code: invalidActiveTaskResult.exitCode
+        invalid_active_next_task_exit_code: invalidActiveTaskResult.exitCode,
+        missing_execution_snapshot_blocked_message:
+          missingExecutionSnapshotBlock.blocked_message
       },
       null,
       2
