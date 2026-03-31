@@ -1047,6 +1047,7 @@ function createAttemptRuntimeTracker(input: {
     progress_text: "已启动 Codex"
   });
   let stdoutBuffer = "";
+  const activeCommandExecutionKeys = new Set<string>();
   let persistQueue = saveAttemptRuntimeState(input.workspacePaths, state);
 
   const enqueue = (task: () => Promise<void>): void => {
@@ -1062,6 +1063,28 @@ function createAttemptRuntimeTracker(input: {
               type: fallbackType,
               payload: rawEvent
             };
+      const unwrappedEvent = unwrapRuntimeEvent(normalizedEvent) ?? normalizedEvent;
+      const runtimeItem = extractRuntimeItem(unwrappedEvent);
+      if (runtimeItem && normalizeRuntimeEventType(runtimeItem.type) === "command_execution") {
+        const eventType = normalizeRuntimeEventType(unwrappedEvent.type);
+        const status = normalizeRuntimeEventType(runtimeItem.status);
+        const itemKey =
+          normalizeWhitespace(runtimeItem.id) ||
+          normalizeWhitespace(runtimeItem.command);
+
+        if (itemKey) {
+          if (eventType === "item_started" || status === "in_progress") {
+            activeCommandExecutionKeys.add(itemKey);
+          } else if (
+            eventType === "item_completed" ||
+            status === "completed" ||
+            status === "failed" ||
+            status === "cancelled"
+          ) {
+            activeCommandExecutionKeys.delete(itemKey);
+          }
+        }
+      }
       const ts =
         normalizeWhitespace((normalizedEvent as Record<string, unknown>).timestamp) ||
         normalizeWhitespace((normalizedEvent as Record<string, unknown>).ts) ||
@@ -1195,6 +1218,7 @@ function createAttemptRuntimeTracker(input: {
     saveStatePatch,
     finalizeSuccess,
     finalizeFailure,
+    hasActiveCommandExecution: (): boolean => activeCommandExecutionKeys.size > 0,
     waitForIdle
   };
 }
@@ -1443,6 +1467,7 @@ export class CodexCliWorkerAdapter {
           stallPollMs: this.config.stallPollMs,
           stallKillGraceMs: this.config.stallKillGraceMs,
           getLastActivityAt: () => lastActivityAt,
+          hasLiveRuntimeChild: () => runtimeTracker.hasActiveCommandExecution(),
           onStallDetected: (message) => {
             runtimeTracker.saveStatePatch({
               phase: "stalled",
@@ -1868,6 +1893,7 @@ async function waitForChildExitWithStallGuard(input: {
   stallPollMs: number;
   stallKillGraceMs: number;
   getLastActivityAt: () => number;
+  hasLiveRuntimeChild?: () => boolean;
   onStallDetected?: (message: string) => void;
 }): Promise<number> {
   return await new Promise<number>((resolve, reject) => {
@@ -1928,8 +1954,7 @@ async function waitForChildExitWithStallGuard(input: {
 
         checking = true;
         try {
-          const descendants = await listLiveDescendantPids(input.child.pid);
-          if (descendants.length > 0) {
+          if (input.hasLiveRuntimeChild?.()) {
             return;
           }
 

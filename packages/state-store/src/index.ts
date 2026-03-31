@@ -13,6 +13,7 @@ import type {
   AttemptContract,
   AttemptHeartbeat,
   AttemptEvaluationSynthesisRecord,
+  AttemptHandoffBundle,
   AttemptPreflightEvaluation,
   AttemptRuntimeEvent,
   AttemptRuntimeState,
@@ -43,6 +44,7 @@ import {
   AttemptContractSchema,
   AttemptHeartbeatSchema,
   AttemptEvaluationSynthesisRecordSchema,
+  AttemptHandoffBundleSchema,
   AttemptPreflightEvaluationSchema,
   AttemptRuntimeEventSchema,
   AttemptRuntimeStateSchema,
@@ -119,6 +121,7 @@ export interface AttemptPaths {
   evaluationSynthesisFile: string;
   reviewInputPacketFile: string;
   reviewPacketFile: string;
+  handoffBundleFile: string;
   reviewOpinionsDir: string;
   preflightEvaluationFile: string;
   runtimeVerificationFile: string;
@@ -180,6 +183,7 @@ export function resolveAttemptPaths(
     evaluationSynthesisFile: join(attemptDir, "evaluation_synthesis.json"),
     reviewInputPacketFile: join(attemptDir, "review_input_packet.json"),
     reviewPacketFile: join(attemptDir, "review_packet.json"),
+    handoffBundleFile: join(attemptDir, "artifacts", "handoff_bundle.json"),
     reviewOpinionsDir: join(attemptDir, "review_opinions"),
     preflightEvaluationFile: join(attemptDir, "artifacts", "preflight-evaluation.json"),
     runtimeVerificationFile: join(attemptDir, "artifacts", "runtime-verification.json"),
@@ -743,6 +747,18 @@ export async function saveAttemptReviewPacket(
   await writeJsonFile(attemptPaths.reviewPacketFile, reviewPacket);
 }
 
+export async function saveAttemptHandoffBundle(
+  paths: WorkspacePaths,
+  handoffBundle: AttemptHandoffBundle
+): Promise<void> {
+  const attemptPaths = await ensureAttemptDirectories(
+    paths,
+    handoffBundle.run_id,
+    handoffBundle.attempt_id
+  );
+  await writeJsonFile(attemptPaths.handoffBundleFile, handoffBundle);
+}
+
 export async function saveAttemptReviewOpinion(
   paths: WorkspacePaths,
   opinion: AttemptReviewerOpinion
@@ -834,6 +850,21 @@ export async function getAttemptReviewPacket(
       resolveAttemptPaths(paths, runId, attemptId).reviewPacketFile
     );
     return AttemptReviewPacketSchema.parse(reviewPacket);
+  } catch {
+    return null;
+  }
+}
+
+export async function getAttemptHandoffBundle(
+  paths: WorkspacePaths,
+  runId: string,
+  attemptId: string
+): Promise<AttemptHandoffBundle | null> {
+  try {
+    const handoffBundle = await readJsonFile<AttemptHandoffBundle>(
+      resolveAttemptPaths(paths, runId, attemptId).handoffBundleFile
+    );
+    return AttemptHandoffBundleSchema.parse(handoffBundle);
   } catch {
     return null;
   }

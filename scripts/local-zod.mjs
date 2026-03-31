@@ -23,6 +23,27 @@ function describeReceived(input) {
 }
 
 class BaseSchema {
+  safeParse(input) {
+    try {
+      return {
+        success: true,
+        data: this.parse(input)
+      };
+    } catch (error) {
+      return {
+        success: false,
+        error: {
+          issues: [
+            {
+              path: [],
+              message: error instanceof Error ? error.message : String(error)
+            }
+          ]
+        }
+      };
+    }
+  }
+
   optional() {
     const inner = this;
     return new WrappedSchema((input) => (
@@ -190,6 +211,21 @@ class EnumSchema extends BaseSchema {
   }
 }
 
+class LiteralSchema extends BaseSchema {
+  constructor(value) {
+    super();
+    this.value = value;
+  }
+
+  parse(input) {
+    if (input !== this.value) {
+      throw new Error(`Expected literal ${String(this.value)}`);
+    }
+
+    return input;
+  }
+}
+
 class ArraySchema extends BaseSchema {
   constructor(itemSchema, minLength = null) {
     super();
@@ -287,6 +323,9 @@ export const z = {
   },
   enum(values) {
     return new EnumSchema(values);
+  },
+  literal(value) {
+    return new LiteralSchema(value);
   },
   array(itemSchema) {
     return new ArraySchema(itemSchema);

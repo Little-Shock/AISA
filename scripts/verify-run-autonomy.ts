@@ -23,6 +23,7 @@ import {
 import {
   appendRunJournal,
   ensureWorkspace,
+  getAttemptHandoffBundle,
   getAttemptReviewPacket,
   getCurrentDecision,
   listAttempts,
@@ -1012,6 +1013,11 @@ async function verifyNoGitChangesBlocksAutoResume(): Promise<void> {
   const current = await getCurrentDecision(workspacePaths, run.id);
   const attempts = await listAttempts(workspacePaths, run.id);
   const journal = await listRunJournal(workspacePaths, run.id);
+  const handoffBundle = await getAttemptHandoffBundle(
+    workspacePaths,
+    run.id,
+    completedExecution.id
+  );
   const blockedEntry = journal.find((entry) => entry.type === "run.auto_resume.blocked");
 
   assert.ok(current, "current decision must exist");
@@ -1027,9 +1033,35 @@ async function verifyNoGitChangesBlocksAutoResume(): Promise<void> {
     !journal.some((entry) => entry.type === "run.auto_resume.scheduled"),
     "no_git_changes should not schedule automatic resume"
   );
+  assert.ok(handoffBundle, "expected a machine-readable handoff bundle");
+  assert.equal(
+    handoffBundle?.failure_code,
+    "no_git_changes",
+    "handoff bundle should carry the runtime failure code"
+  );
+  assert.equal(
+    handoffBundle?.recommended_next_action,
+    "wait_for_human",
+    "handoff bundle should preserve the blocked next action"
+  );
+  assert.equal(
+    handoffBundle?.source_refs.review_packet,
+    `runs/${run.id}/attempts/${completedExecution.id}/review_packet.json`,
+    "handoff bundle should point at the review packet"
+  );
+  assert.equal(
+    handoffBundle?.source_refs.runtime_verification,
+    `runs/${run.id}/attempts/${completedExecution.id}/artifacts/runtime-verification.json`,
+    "handoff bundle should point at runtime verification"
+  );
   assert.ok(blockedEntry, "expected a machine-readable auto-resume blocker");
   assert.equal(blockedEntry?.payload.reason, "runtime_verification_failed");
   assert.equal(blockedEntry?.payload.failure_code, "no_git_changes");
+  assert.equal(
+    blockedEntry?.payload.handoff_bundle_ref,
+    `runs/${run.id}/attempts/${completedExecution.id}/artifacts/handoff_bundle.json`,
+    "blocked auto-resume should point at the consumed handoff bundle"
+  );
 }
 
 async function verifyRecoveryAutoResumesExecution(): Promise<void> {
@@ -1213,6 +1245,12 @@ async function verifyRecoveryAutoResumesExecution(): Promise<void> {
   const current = await getCurrentDecision(workspacePaths, run.id);
   const attempts = await listAttempts(workspacePaths, run.id);
   const journal = await listRunJournal(workspacePaths, run.id);
+  const stoppedExecutionHandoff = await getAttemptHandoffBundle(
+    workspacePaths,
+    run.id,
+    orphanedExecution.id
+  );
+  const scheduledEntry = journal.find((entry) => entry.type === "run.auto_resume.scheduled");
 
   assert.ok(current, "current decision must exist");
   assert.equal(current.run_status, "completed", "recovered execution should finish the run");
@@ -1230,8 +1268,19 @@ async function verifyRecoveryAutoResumesExecution(): Promise<void> {
     "expected recovery journal entry"
   );
   assert.ok(
-    journal.some((entry) => entry.type === "run.auto_resume.scheduled"),
+    scheduledEntry,
     "expected automatic resume after recovery wait"
+  );
+  assert.ok(stoppedExecutionHandoff, "expected a handoff bundle for the stopped execution");
+  assert.equal(
+    stoppedExecutionHandoff?.recommended_next_action,
+    "wait_for_human",
+    "stopped execution handoff should preserve the blocked recovery boundary"
+  );
+  assert.equal(
+    scheduledEntry?.payload.handoff_bundle_ref,
+    `runs/${run.id}/attempts/${orphanedExecution.id}/artifacts/handoff_bundle.json`,
+    "scheduled auto-resume should point at the consumed handoff bundle"
   );
 }
 
@@ -1564,6 +1613,110 @@ async function verifyWorkerStalledExecutionRetriesQuickly(): Promise<void> {
   assert.ok(
     !journal.some((entry) => entry.type === "run.auto_resume.blocked"),
     "stalled worker should not be treated as a manual blocker"
+  );
+}
+
+async function verifyWorkerStalledResearchRetriesQuickly(): Promise<void> {
+  const { run, workspacePaths, detachedRuntimeLayout } = await bootstrapRun(
+    "worker-stalled-research-retry"
+  );
+
+  const failedResearch = updateAttempt(
+    createAttempt({
+      run_id: run.id,
+      attempt_type: "research",
+      worker: "fake-codex",
+      objective: "Retry the same research after a stalled worker is terminated.",
+      success_criteria: run.success_criteria,
+      workspace_root: run.workspace_root
+    }),
+    {
+      status: "failed",
+      started_at: new Date().toISOString(),
+      ended_at: new Date().toISOString()
+    }
+  );
+
+  const stallMessage = [
+    "Codex CLI stalled for worker pid 4343.",
+    "No runtime stdout activity arrived for 190000ms (stall window 180000ms).",
+    "No live child command remained and no final output was written."
+  ].join(" ");
+
+  await saveAttempt(workspacePaths, failedResearch);
+  await saveCurrentDecision(
+    workspacePaths,
+    createCurrentDecision({
+      run_id: run.id,
+      run_status: "waiting_steer",
+      latest_attempt_id: failedResearch.id,
+      recommended_next_action: "wait_for_human",
+      recommended_attempt_type: "research",
+      summary: "Research worker stalled before it could finish collecting evidence.",
+      blocking_reason: stallMessage,
+      waiting_for_human: true
+    })
+  );
+  await appendRunJournal(
+    workspacePaths,
+    createRunJournalEntry({
+      run_id: run.id,
+      attempt_id: failedResearch.id,
+      type: "attempt.failed",
+      payload: {
+        message: stallMessage
+      }
+    })
+  );
+
+  const orchestrator = new Orchestrator(
+    workspacePaths,
+    new LowSignalResearchAdapter() as never,
+    undefined,
+    60_000,
+    {
+      runtimeLayout: detachedRuntimeLayout,
+      waitingHumanAutoResumeMs: 5_000,
+      workerStallAutoResumeMs: 30,
+      maxAutomaticResumeCycles: 2
+    }
+  );
+
+  await wait(60);
+  await settleUntilSnapshot(orchestrator, {
+    workspacePaths,
+    runId: run.id,
+    predicate: ({ attempts, waitingForHuman }) =>
+      attempts[1]?.status === "completed" && waitingForHuman === false,
+    timeoutMs: 12_000,
+    delayMs: 80
+  });
+
+  const current = await getCurrentDecision(workspacePaths, run.id);
+  const attempts = await listAttempts(workspacePaths, run.id);
+  const journal = await listRunJournal(workspacePaths, run.id);
+
+  assert.ok(current, "current decision must exist");
+  assert.equal(current.waiting_for_human, false);
+  assert.deepEqual(
+    attempts.slice(0, 2).map((attempt) => attempt.attempt_type),
+    ["research", "research"]
+  );
+  assert.deepEqual(
+    attempts.slice(0, 2).map((attempt) => attempt.status),
+    ["failed", "completed"]
+  );
+  assert.ok(
+    journal.some(
+      (entry) =>
+        entry.type === "run.auto_resume.scheduled" &&
+        entry.payload.reason === "worker_stalled_retry_research"
+    ),
+    "stalled research worker should schedule a fast retry instead of waiting for human steer"
+  );
+  assert.ok(
+    !journal.some((entry) => entry.type === "run.auto_resume.blocked"),
+    "stalled research worker should not be treated as a manual blocker"
   );
 }
 
@@ -2304,6 +2457,10 @@ async function main(): Promise<void> {
     {
       id: "worker_stalled_execution_retries_quickly",
       run: verifyWorkerStalledExecutionRetriesQuickly
+    },
+    {
+      id: "worker_stalled_research_retries_quickly",
+      run: verifyWorkerStalledResearchRetriesQuickly
     },
     {
       id: "rate_limited_research_retries_quickly",

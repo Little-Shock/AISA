@@ -576,6 +576,12 @@ export const ReviewPacketArtifactSchema = z.object({
   size_bytes: z.number().int().nonnegative().nullable()
 });
 
+export const AttemptFailureContextSchema = z.object({
+  message: z.string().min(1),
+  journal_event_id: z.string().nullable(),
+  journal_event_ts: z.string().datetime().nullable()
+});
+
 export const AttemptReviewInputRefSchema = z.object({
   kind: z.string().min(1),
   path: z.string().min(1)
@@ -607,13 +613,7 @@ export const AttemptReviewInputPacketSchema = z.object({
   current_decision_snapshot: CurrentDecisionSchema.nullable(),
   context: z.unknown().nullable(),
   journal: z.array(RunJournalEntrySchema).default([]),
-  failure_context: z
-    .object({
-      message: z.string().min(1),
-      journal_event_id: z.string().nullable(),
-      journal_event_ts: z.string().datetime().nullable()
-    })
-    .nullable(),
+  failure_context: AttemptFailureContextSchema.nullable(),
   result: WorkerWritebackSchema.nullable(),
   runtime_verification: AttemptRuntimeVerificationSchema.nullable(),
   artifact_manifest: z.array(ReviewPacketArtifactSchema).default([]),
@@ -641,13 +641,7 @@ export const AttemptReviewPacketSchema = z.object({
   current_decision_snapshot: CurrentDecisionSchema.nullable(),
   context: z.unknown().nullable(),
   journal: z.array(RunJournalEntrySchema).default([]),
-  failure_context: z
-    .object({
-      message: z.string().min(1),
-      journal_event_id: z.string().nullable(),
-      journal_event_ts: z.string().datetime().nullable()
-    })
-    .nullable(),
+  failure_context: AttemptFailureContextSchema.nullable(),
   result: WorkerWritebackSchema.nullable(),
   evaluation: AttemptEvaluationSchema.nullable(),
   runtime_verification: AttemptRuntimeVerificationSchema.nullable(),
@@ -656,6 +650,32 @@ export const AttemptReviewPacketSchema = z.object({
   review_opinion_refs: z.array(z.string().min(1)).default([]),
   synthesized_evaluation_ref: z.string().min(1).nullable().default(null),
   evaluation_synthesis_ref: z.string().min(1).nullable().default(null),
+  generated_at: z.string().datetime()
+});
+
+export const AttemptHandoffBundleSourceRefsSchema = z.object({
+  run_contract: z.string().min(1),
+  attempt_meta: z.string().min(1),
+  attempt_contract: z.string().min(1).nullable().default(null),
+  current_decision: z.string().min(1).nullable().default(null),
+  review_packet: z.string().min(1).nullable().default(null),
+  runtime_verification: z.string().min(1).nullable().default(null)
+});
+
+export const AttemptHandoffBundleSchema = z.object({
+  version: z.literal(1),
+  run_id: z.string(),
+  attempt_id: z.string(),
+  attempt: AttemptSchema,
+  approved_attempt_contract: AttemptContractSchema.nullable(),
+  current_decision_snapshot: CurrentDecisionSchema.nullable(),
+  failure_context: AttemptFailureContextSchema.nullable(),
+  runtime_verification: AttemptRuntimeVerificationSchema.nullable(),
+  failure_code: RuntimeVerificationFailureCodeSchema.nullable().default(null),
+  recommended_next_action: z.string().min(1).nullable().default(null),
+  recommended_attempt_type: AttemptTypeSchema.nullable().default(null),
+  summary: z.string().min(1).nullable().default(null),
+  source_refs: AttemptHandoffBundleSourceRefsSchema,
   generated_at: z.string().datetime()
 });
 
@@ -780,6 +800,7 @@ export type AttemptRuntimeEvent = z.infer<typeof AttemptRuntimeEventSchema>;
 export type WorkerWriteback = z.infer<typeof WorkerWritebackSchema>;
 export type WorkerArtifact = z.infer<typeof WorkerArtifactSchema>;
 export type ReviewPacketArtifact = z.infer<typeof ReviewPacketArtifactSchema>;
+export type AttemptFailureContext = z.infer<typeof AttemptFailureContextSchema>;
 export type AttemptReviewInputRef = z.infer<typeof AttemptReviewInputRefSchema>;
 export type AttemptReviewerIdentity = z.infer<typeof AttemptReviewerIdentitySchema>;
 export type AttemptSynthesizerIdentity = z.infer<typeof AttemptSynthesizerIdentitySchema>;
@@ -787,6 +808,10 @@ export type AttemptReviewerJudgment = z.infer<typeof AttemptReviewerJudgmentSche
 export type AttemptReviewInputPacket = z.infer<typeof AttemptReviewInputPacketSchema>;
 export type AttemptReviewerOpinion = z.infer<typeof AttemptReviewerOpinionSchema>;
 export type AttemptReviewPacket = z.infer<typeof AttemptReviewPacketSchema>;
+export type AttemptHandoffBundleSourceRefs = z.infer<
+  typeof AttemptHandoffBundleSourceRefsSchema
+>;
+export type AttemptHandoffBundle = z.infer<typeof AttemptHandoffBundleSchema>;
 export type AttemptEvaluationSynthesisRecord = z.infer<
   typeof AttemptEvaluationSynthesisRecordSchema
 >;
@@ -1100,6 +1125,38 @@ export function createAttemptRuntimeEvent(input: {
     type: input.type,
     summary: input.summary ?? "",
     payload: input.payload ?? null
+  });
+}
+
+export function createAttemptHandoffBundle(input: {
+  attempt: Attempt;
+  approved_attempt_contract?: AttemptContract | null;
+  current_decision_snapshot?: CurrentDecision | null;
+  failure_context?: AttemptFailureContext | null;
+  runtime_verification?: AttemptRuntimeVerification | null;
+  source_refs: AttemptHandoffBundleSourceRefs;
+}): AttemptHandoffBundle {
+  return AttemptHandoffBundleSchema.parse({
+    version: 1,
+    run_id: input.attempt.run_id,
+    attempt_id: input.attempt.id,
+    attempt: input.attempt,
+    approved_attempt_contract: input.approved_attempt_contract ?? null,
+    current_decision_snapshot: input.current_decision_snapshot ?? null,
+    failure_context: input.failure_context ?? null,
+    runtime_verification: input.runtime_verification ?? null,
+    failure_code: input.runtime_verification?.failure_code ?? null,
+    recommended_next_action:
+      input.current_decision_snapshot?.recommended_next_action ?? null,
+    recommended_attempt_type:
+      input.current_decision_snapshot?.recommended_attempt_type ?? null,
+    summary:
+      input.current_decision_snapshot?.summary ??
+      input.failure_context?.message ??
+      input.runtime_verification?.failure_reason ??
+      null,
+    source_refs: input.source_refs,
+    generated_at: new Date().toISOString()
   });
 }
 

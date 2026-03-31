@@ -706,7 +706,7 @@ async function main(): Promise<void> {
       const message = error instanceof Error ? error.message : String(error);
       assert.match(
         message,
-        /Invalid enum value\. Expected 'fact' \| 'hypothesis' \| 'risk', received 'gap'/
+        /Invalid enum value\. Expected 'fact' \| 'hypothesis' \| 'risk', received 'gap'|Expected one of fact, hypothesis, risk/
       );
       return true;
     }

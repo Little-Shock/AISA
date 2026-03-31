@@ -1,0 +1,71 @@
+
+> autoresearch-swarm-dashboard@0.1.0 verify:run-autonomy /Users/atou/.aisa-run-worktrees/AISA-3b3efc0d/run_e9ef30e4
+> node --experimental-transform-types --loader ./scripts/ts-runtime-loader.mjs scripts/verify-run-autonomy.ts
+
+{
+  "suite": "run-autonomy",
+  "passed": 15,
+  "failed": 0,
+  "results": [
+    {
+      "id": "failed_execution_auto_resumes",
+      "status": "pass"
+    },
+    {
+      "id": "run_launch_resets_auto_resume_budget",
+      "status": "pass"
+    },
+    {
+      "id": "repeated_auto_resume_exhausts",
+      "status": "pass"
+    },
+    {
+      "id": "checkpoint_blocker_auto_resumes_execution",
+      "status": "pass"
+    },
+    {
+      "id": "no_git_changes_blocks_auto_resume",
+      "status": "pass"
+    },
+    {
+      "id": "rate_limited_execution_retries_quickly",
+      "status": "pass"
+    },
+    {
+      "id": "execution_rate_limit_budget_does_not_inherit_research_cycles",
+      "status": "pass"
+    },
+    {
+      "id": "worker_stalled_execution_retries_quickly",
+      "status": "pass"
+    },
+    {
+      "id": "rate_limited_research_retries_quickly",
+      "status": "pass"
+    },
+    {
+      "id": "rate_limited_research_retries_using_stdout_signal",
+      "status": "pass"
+    },
+    {
+      "id": "runtime_source_drift_blocks_auto_resume",
+      "status": "pass"
+    },
+    {
+      "id": "runtime_source_drift_auto_resumes_after_restart",
+      "status": "pass"
+    },
+    {
+      "id": "verified_execution_continue_does_not_pause_for_human",
+      "status": "pass"
+    },
+    {
+      "id": "checkpointed_restart_resets_auto_resume_budget",
+      "status": "pass"
+    },
+    {
+      "id": "recovery_auto_resumes_execution",
+      "status": "pass"
+    }
+  ]
+}

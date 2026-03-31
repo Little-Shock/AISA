@@ -10,6 +10,18 @@ export interface SelfBootstrapTemplateOptions {
   focus?: string;
   extraConstraints?: string[];
   extraSuccessCriteria?: string[];
+  activeNextTask?: {
+    path: string;
+    updated_at: string;
+    title: string;
+    summary: string;
+    source_anchor: {
+      asset_path: string;
+      source_attempt_id: string | null;
+      payload_sha256: string | null;
+      promoted_at: string | null;
+    };
+  };
   runtimeHealthSnapshot?: {
     path: string;
     snapshot: RuntimeHealthSnapshot;
@@ -53,7 +65,7 @@ export function buildSelfBootstrapRunTemplate(
   }
 
   const initialSteer = [
-    "先读 Codex/2026-03-25-development-handoff.md。",
+    buildActiveNextTaskHint(options.activeNextTask),
     "先读 evals/runtime-run-loop/，从后端和运行时缺口开始，不先做 GUI。",
     "用当前回归用例选出下一项最小的自举改进。",
     "只有运行时能亲自回放验证命令时，执行才算通过。",
@@ -79,6 +91,28 @@ export function buildSelfBootstrapRunTemplate(
     },
     initialSteer
   };
+}
+
+function buildActiveNextTaskHint(
+  activeNextTask: SelfBootstrapTemplateOptions["activeNextTask"]
+): string | null {
+  if (!activeNextTask) {
+    return null;
+  }
+
+  return [
+    "先读已发布的 active next task。",
+    `发布资产：${activeNextTask.path}。`,
+    `当前 active next task 标题：${activeNextTask.title}`,
+    `当前 active next task 摘要：${activeNextTask.summary}`,
+    `当前 active next task source_anchor.asset_path：${activeNextTask.source_anchor.asset_path}`,
+    activeNextTask.source_anchor.source_attempt_id
+      ? `当前 active next task source_anchor.source_attempt_id：${activeNextTask.source_anchor.source_attempt_id}`
+      : null,
+    "首轮研究必须把这份发布资产当成当前机器事实源，不要退回只靠旧交接文档和 runtime_health_snapshot 猜下一步。"
+  ]
+    .filter(Boolean)
+    .join("\n");
 }
 
 function buildRuntimeHealthSnapshotHint(

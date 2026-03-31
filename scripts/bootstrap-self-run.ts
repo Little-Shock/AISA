@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
-import { dirname, relative } from "node:path";
+import { mkdir, writeFile } from "node:fs/promises";
+import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   createCurrentDecision,
@@ -11,6 +12,8 @@ import {
 } from "../packages/domain/src/index.ts";
 import { buildSelfBootstrapRunTemplate } from "../packages/planner/src/index.ts";
 import {
+  SELF_BOOTSTRAP_NEXT_TASK_ACTIVE_ENTRY_SNAPSHOT_FILE_NAME,
+  loadSelfBootstrapNextTaskActiveEntry,
   resolveRuntimeLayout,
   syncRuntimeLayoutHint
 } from "../packages/orchestrator/src/index.ts";
@@ -133,6 +136,57 @@ function runTsxScript(
   });
 }
 
+function runTypeScriptScript(
+  rootDir: string,
+  scriptPath: string,
+  extraEnv?: NodeJS.ProcessEnv
+): Promise<ScriptResult> {
+  return new Promise((resolve, reject) => {
+    const childEnv: NodeJS.ProcessEnv = {
+      ...process.env,
+      ...extraEnv
+    };
+    for (const [key, value] of Object.entries(childEnv)) {
+      if (value === undefined) {
+        delete childEnv[key];
+      }
+    }
+    const child = spawn(
+      process.execPath,
+      [
+        "--experimental-transform-types",
+        "--loader",
+        "./scripts/ts-runtime-loader.mjs",
+        scriptPath
+      ],
+      {
+        cwd: rootDir,
+        env: childEnv,
+        stdio: ["ignore", "pipe", "pipe"]
+      }
+    );
+    let stdout = "";
+    let stderr = "";
+
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk;
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk;
+    });
+    child.on("error", reject);
+    child.on("close", (exitCode) => {
+      resolve({
+        exitCode,
+        stdout,
+        stderr
+      });
+    });
+  });
+}
+
 function formatScriptFailure(label: string, result: ScriptResult): string {
   const stdout = result.stdout.trim();
   const stderr = result.stderr.trim();
@@ -159,7 +213,7 @@ async function captureRuntimeHealthSnapshot(input: {
   evidenceRoot: string;
 }): Promise<RuntimeHealthSnapshot> {
   const verifyRuntimeCommand = "pnpm verify:runtime";
-  const verifyRuntimeResult = await runTsxScript(
+  const verifyRuntimeResult = await runTypeScriptScript(
     input.evidenceRoot,
     "scripts/verify-runtime.ts",
     {
@@ -184,8 +238,9 @@ async function captureRuntimeHealthSnapshot(input: {
     "scripts/verify-runtime.ts",
     verifyRuntimeResult.stdout
   );
-  const historyContractDriftCommand = "node --import tsx scripts/verify-history-contract-drift.ts";
-  const historyContractDriftResult = await runTsxScript(
+  const historyContractDriftCommand =
+    "node --experimental-transform-types --loader ./scripts/ts-runtime-loader.mjs scripts/verify-history-contract-drift.ts";
+  const historyContractDriftResult = await runTypeScriptScript(
     input.evidenceRoot,
     "scripts/verify-history-contract-drift.ts"
   );
@@ -245,10 +300,17 @@ async function main(): Promise<void> {
   await ensureWorkspace(workspacePaths);
 
   const options = parseArgs(process.argv.slice(2));
+  const activeNextTask = await loadSelfBootstrapNextTaskActiveEntry(
+    runtimeLayout.devRepoRoot
+  );
   const baseTemplate = buildSelfBootstrapRunTemplate({
     workspaceRoot: runtimeLayout.devRepoRoot,
     ownerId: options.ownerId,
-    focus: options.focus
+    focus: options.focus,
+    activeNextTask: {
+      path: activeNextTask.path,
+      ...activeNextTask.entry
+    }
   });
   const run = createRun(baseTemplate.runInput);
   let current = createCurrentDecision({
@@ -278,6 +340,33 @@ async function main(): Promise<void> {
     })
   );
   const runPaths = resolveRunPaths(workspacePaths, run.id);
+  const activeNextTaskSnapshotPath = join(
+    runPaths.artifactsDir,
+    SELF_BOOTSTRAP_NEXT_TASK_ACTIVE_ENTRY_SNAPSHOT_FILE_NAME
+  );
+  await mkdir(runPaths.artifactsDir, { recursive: true });
+  await writeFile(
+    activeNextTaskSnapshotPath,
+    JSON.stringify(activeNextTask.entry, null, 2) + "\n",
+    "utf8"
+  );
+  const activeNextTaskSnapshotRef = relative(
+    workspacePaths.rootDir,
+    activeNextTaskSnapshotPath
+  );
+  await appendRunJournal(
+    workspacePaths,
+    createRunJournalEntry({
+      run_id: run.id,
+      type: "run.self_bootstrap.active_next_task.captured",
+      payload: {
+        published_path: activeNextTask.path,
+        snapshot_path: activeNextTaskSnapshotRef,
+        title: activeNextTask.entry.title,
+        source_anchor: activeNextTask.entry.source_anchor
+      }
+    })
+  );
   const runtimeHealthSnapshotPath = runPaths.runtimeHealthSnapshotFile;
   await appendRunJournal(
     workspacePaths,
@@ -297,6 +386,10 @@ async function main(): Promise<void> {
     workspaceRoot: runtimeLayout.devRepoRoot,
     ownerId: options.ownerId,
     focus: options.focus,
+    activeNextTask: {
+      path: activeNextTask.path,
+      ...activeNextTask.entry
+    },
     runtimeHealthSnapshot: {
       path: runtimeHealthSnapshotPath,
       snapshot: runtimeHealthSnapshot
@@ -356,6 +449,8 @@ async function main(): Promise<void> {
         steer_id: steerId,
         launched: options.launch,
         template: "self-bootstrap",
+        active_next_task: activeNextTask.path,
+        active_next_task_snapshot: activeNextTaskSnapshotRef,
         runtime_health_snapshot: runtimeHealthSnapshotPath
       },
       null,

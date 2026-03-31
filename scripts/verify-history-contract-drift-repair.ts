@@ -46,11 +46,11 @@ function resolveSourceRoot(): string {
   return dirname(dirname(fileURLToPath(import.meta.url)));
 }
 
-function resolveTsxLoaderPath(sourceRoot: string): string {
-  return join(sourceRoot, "node_modules", "tsx", "dist", "loader.mjs");
+function resolveRuntimeLoaderPath(sourceRoot: string): string {
+  return join(sourceRoot, "scripts", "ts-runtime-loader.mjs");
 }
 
-function runTsxScript(input: {
+function runTypeScriptScript(input: {
   cwd: string;
   sourceRoot: string;
   scriptPath: string;
@@ -58,7 +58,12 @@ function runTsxScript(input: {
   return new Promise((resolve, reject) => {
     const child = spawn(
       process.execPath,
-      ["--import", resolveTsxLoaderPath(input.sourceRoot), input.scriptPath],
+      [
+        "--experimental-transform-types",
+        "--loader",
+        resolveRuntimeLoaderPath(input.sourceRoot),
+        input.scriptPath
+      ],
       {
         cwd: input.cwd,
         env: process.env,
@@ -193,7 +198,7 @@ async function main(): Promise<void> {
   const rootDir = await mkdtemp(join(tmpdir(), "aisa-history-contract-drift-"));
   const fixture = await seedDriftedAttempt(rootDir);
 
-  const verifyBefore = await runTsxScript({
+  const verifyBefore = await runTypeScriptScript({
     cwd: rootDir,
     sourceRoot,
     scriptPath: join(sourceRoot, "scripts", "verify-history-contract-drift.ts")
@@ -211,7 +216,7 @@ async function main(): Promise<void> {
   assert.equal(beforeReport.status, "drift_detected");
   assert.equal(beforeReport.drift_count, 1);
 
-  const repairResult = await runTsxScript({
+  const repairResult = await runTypeScriptScript({
     cwd: rootDir,
     sourceRoot,
     scriptPath: join(sourceRoot, "scripts", "repair-history-contract-drift.ts")
@@ -229,7 +234,7 @@ async function main(): Promise<void> {
   assert.equal(repairReport.repaired_count, 1);
   assert.equal(repairReport.after.drift_count, 0);
 
-  const verifyAfter = await runTsxScript({
+  const verifyAfter = await runTypeScriptScript({
     cwd: rootDir,
     sourceRoot,
     scriptPath: join(sourceRoot, "scripts", "verify-history-contract-drift.ts")

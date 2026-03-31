@@ -37,6 +37,7 @@
 - `CurrentDecision`
 - `AttemptEvaluation`
 - `AttemptReviewPacket`
+- `AttemptHandoffBundle`
 - `RunSteer`
 - `RunJournalEntry`
 
@@ -48,6 +49,7 @@
 - `runs/<run_id>/report.md`
 - `runs/<run_id>/artifacts/runtime-health-snapshot.json`
 - `runs/<run_id>/attempts/<attempt_id>/`
+- `runs/<run_id>/attempts/<attempt_id>/artifacts/handoff_bundle.json`
 
 ## 仓库结构
 

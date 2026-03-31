@@ -12,6 +12,7 @@ import {
   createRunJournalEntry,
   updateRun,
   updateAttempt,
+  AttemptHandoffBundleSchema,
   WorkerWritebackSchema,
   type Attempt,
   type Run,
@@ -30,6 +31,7 @@ import {
   getAttemptHeartbeat,
   getAttemptContext,
   getAttemptEvaluation,
+  getAttemptHandoffBundle,
   getAttemptEvaluationSynthesisRecord,
   getAttemptPreflightEvaluation,
   getAttemptReviewInputPacket,
@@ -127,6 +129,7 @@ type ScenarioObservation = {
     has_generated_at: boolean;
     has_attempt_contract: boolean;
     has_current_decision_snapshot: boolean;
+    snapshot_recommended_next_action: string | null;
     snapshot_blocking_reason: string | null;
     journal_count: number;
     has_failure_context: boolean;
@@ -166,6 +169,23 @@ type ScenarioObservation = {
     preflight_evaluation_status: string | null;
     preflight_evaluation_failure_code: string | null;
     preflight_evaluation_failure_reason: string | null;
+    handoff_bundle_path: string;
+    has_handoff_bundle: boolean;
+    handoff_bundle_matches_schema: boolean;
+    handoff_bundle_schema_error: string | null;
+    handoff_bundle_matches_attempt: boolean;
+    handoff_bundle_has_contract: boolean;
+    handoff_bundle_has_runtime_verification: boolean;
+    handoff_bundle_failure_code: string | null;
+    handoff_bundle_recommended_next_action: string | null;
+    handoff_bundle_source_refs: {
+      run_contract: string | null;
+      attempt_meta: string | null;
+      attempt_contract: string | null;
+      current_decision: string | null;
+      review_packet: string | null;
+      runtime_verification: string | null;
+    } | null;
     restart_required_message: string | null;
     restart_required_affected_files: string[];
   }>;
@@ -383,6 +403,38 @@ async function validatePersistedReviewPacket(input: {
     return {
       matchesSchema: schemaError === null,
       schemaError
+    };
+  } catch (error) {
+    return {
+      matchesSchema: false,
+      schemaError: error instanceof Error ? error.message : String(error)
+    };
+  }
+}
+
+async function validatePersistedHandoffBundle(input: {
+  handoffBundleFile: string;
+}): Promise<{
+  matchesSchema: boolean;
+  schemaError: string | null;
+}> {
+  try {
+    const rawHandoffBundle = await readFile(input.handoffBundleFile, "utf8");
+    const parsed = JSON.parse(rawHandoffBundle) as unknown;
+    const validation = AttemptHandoffBundleSchema.safeParse(parsed);
+
+    if (validation.success) {
+      return {
+        matchesSchema: true,
+        schemaError: null
+      };
+    }
+
+    return {
+      matchesSchema: false,
+      schemaError: validation.error.issues
+        .map((issue) => `${issue.path.join(".") || "$"}: ${issue.message}`)
+        .join("; ")
     };
   } catch (error) {
     return {
@@ -3152,12 +3204,24 @@ async function collectObservation(
     attempts
       .filter((attempt) => ["completed", "failed", "stopped"].includes(attempt.status))
       .map(async (attempt) => {
-        const reviewPacketPath = resolveAttemptPaths(workspacePaths, runId, attempt.id).reviewPacketFile;
-        const [reviewPacket, preflightEvaluation, reviewPacketSchemaValidation] = await Promise.all([
+        const attemptPaths = resolveAttemptPaths(workspacePaths, runId, attempt.id);
+        const reviewPacketPath = attemptPaths.reviewPacketFile;
+        const handoffBundlePath = attemptPaths.handoffBundleFile;
+        const [
+          reviewPacket,
+          handoffBundle,
+          preflightEvaluation,
+          reviewPacketSchemaValidation,
+          handoffBundleSchemaValidation
+        ] = await Promise.all([
           getAttemptReviewPacket(workspacePaths, runId, attempt.id),
+          getAttemptHandoffBundle(workspacePaths, runId, attempt.id),
           getAttemptPreflightEvaluation(workspacePaths, runId, attempt.id),
           validatePersistedReviewPacket({
             reviewPacketFile: reviewPacketPath
+          }),
+          validatePersistedHandoffBundle({
+            handoffBundleFile: handoffBundlePath
           })
         ]);
         const artifactManifest = reviewPacket?.artifact_manifest ?? [];
@@ -3212,6 +3276,8 @@ async function collectObservation(
             typeof reviewPacket?.generated_at === "string" && reviewPacket.generated_at.length > 0,
           has_attempt_contract: reviewPacket?.attempt_contract !== null,
           has_current_decision_snapshot: reviewPacket?.current_decision_snapshot !== null,
+          snapshot_recommended_next_action:
+            reviewPacket?.current_decision_snapshot?.recommended_next_action ?? null,
           snapshot_blocking_reason: reviewPacket?.current_decision_snapshot?.blocking_reason ?? null,
           journal_count: reviewPacket?.journal.length ?? 0,
           has_failure_context: reviewPacket?.failure_context !== null,
@@ -3261,6 +3327,30 @@ async function collectObservation(
           preflight_evaluation_status: preflightEvaluation?.status ?? null,
           preflight_evaluation_failure_code: preflightEvaluation?.failure_code ?? null,
           preflight_evaluation_failure_reason: preflightEvaluation?.failure_reason ?? null,
+          handoff_bundle_path: handoffBundlePath,
+          has_handoff_bundle: handoffBundle !== null,
+          handoff_bundle_matches_schema: handoffBundleSchemaValidation.matchesSchema,
+          handoff_bundle_schema_error: handoffBundleSchemaValidation.schemaError,
+          handoff_bundle_matches_attempt:
+            handoffBundle?.run_id === runId &&
+            handoffBundle?.attempt_id === attempt.id &&
+            handoffBundle?.attempt.id === attempt.id,
+          handoff_bundle_has_contract: handoffBundle?.approved_attempt_contract !== null,
+          handoff_bundle_has_runtime_verification:
+            handoffBundle?.runtime_verification !== null,
+          handoff_bundle_failure_code: handoffBundle?.failure_code ?? null,
+          handoff_bundle_recommended_next_action:
+            handoffBundle?.recommended_next_action ?? null,
+          handoff_bundle_source_refs: handoffBundle
+            ? {
+                run_contract: handoffBundle.source_refs.run_contract,
+                attempt_meta: handoffBundle.source_refs.attempt_meta,
+                attempt_contract: handoffBundle.source_refs.attempt_contract,
+                current_decision: handoffBundle.source_refs.current_decision,
+                review_packet: handoffBundle.source_refs.review_packet,
+                runtime_verification: handoffBundle.source_refs.runtime_verification
+              }
+            : null,
           restart_required_message:
             typeof restartRequiredPayload?.message === "string"
               ? restartRequiredPayload.message
@@ -3409,6 +3499,69 @@ function assertCase(scenario: ScenarioCase, observation: ScenarioObservation): v
     assert.ok(
       reviewPacket.has_runtime_verification_artifact,
       `${scenario.id}: review packet missing runtime verification manifest entry for ${reviewPacket.attempt_id}`
+    );
+    assert.ok(
+      reviewPacket.has_handoff_bundle,
+      `${scenario.id}: missing handoff bundle for ${reviewPacket.attempt_id}`
+    );
+    assert.ok(
+      reviewPacket.handoff_bundle_matches_schema,
+      `${scenario.id}: handoff bundle schema mismatch for ${reviewPacket.attempt_id}: ${reviewPacket.handoff_bundle_schema_error ?? "unknown"}`
+    );
+    assert.ok(
+      reviewPacket.handoff_bundle_matches_attempt,
+      `${scenario.id}: handoff bundle attempt metadata mismatch for ${reviewPacket.attempt_id}`
+    );
+    assert.ok(
+      reviewPacket.handoff_bundle_has_contract,
+      `${scenario.id}: handoff bundle missing approved attempt contract for ${reviewPacket.attempt_id}`
+    );
+    assert.equal(
+      reviewPacket.handoff_bundle_has_runtime_verification,
+      reviewPacket.has_runtime_verification,
+      `${scenario.id}: handoff bundle runtime verification should mirror review packet for ${reviewPacket.attempt_id}`
+    );
+    assert.equal(
+      reviewPacket.handoff_bundle_failure_code,
+      reviewPacket.runtime_verification_failure_code,
+      `${scenario.id}: handoff bundle failure code should mirror review packet for ${reviewPacket.attempt_id}`
+    );
+    assert.equal(
+      reviewPacket.handoff_bundle_recommended_next_action,
+      reviewPacket.snapshot_recommended_next_action,
+      `${scenario.id}: handoff bundle next action should match snapshot for ${reviewPacket.attempt_id}`
+    );
+    assert.equal(
+      reviewPacket.handoff_bundle_source_refs?.run_contract,
+      `runs/${observation.run_id}/contract.json`,
+      `${scenario.id}: handoff bundle should point at run contract for ${reviewPacket.attempt_id}`
+    );
+    assert.equal(
+      reviewPacket.handoff_bundle_source_refs?.attempt_meta,
+      `runs/${observation.run_id}/attempts/${reviewPacket.attempt_id}/meta.json`,
+      `${scenario.id}: handoff bundle should point at attempt meta for ${reviewPacket.attempt_id}`
+    );
+    assert.equal(
+      reviewPacket.handoff_bundle_source_refs?.attempt_contract,
+      `runs/${observation.run_id}/attempts/${reviewPacket.attempt_id}/attempt_contract.json`,
+      `${scenario.id}: handoff bundle should point at attempt contract for ${reviewPacket.attempt_id}`
+    );
+    assert.equal(
+      reviewPacket.handoff_bundle_source_refs?.current_decision,
+      `runs/${observation.run_id}/current.json`,
+      `${scenario.id}: handoff bundle should point at current decision for ${reviewPacket.attempt_id}`
+    );
+    assert.equal(
+      reviewPacket.handoff_bundle_source_refs?.review_packet,
+      `runs/${observation.run_id}/attempts/${reviewPacket.attempt_id}/review_packet.json`,
+      `${scenario.id}: handoff bundle should point at review packet for ${reviewPacket.attempt_id}`
+    );
+    assert.equal(
+      reviewPacket.handoff_bundle_source_refs?.runtime_verification,
+      reviewPacket.has_runtime_verification
+        ? `runs/${observation.run_id}/attempts/${reviewPacket.attempt_id}/artifacts/runtime-verification.json`
+        : null,
+      `${scenario.id}: handoff bundle should point at runtime verification for ${reviewPacket.attempt_id}`
     );
 
     if (reviewPacket.attempt_status === "completed") {
@@ -3665,7 +3818,7 @@ function parseNdjson<T>(text: string): T[] {
 }
 
 async function assertPersistedPostRestartPromptChain(): Promise<void> {
-  const runtimeDataRoot = resolve(process.cwd(), "..", ".aisa-runtime");
+  const runtimeDataRoot = resolve(process.cwd(), ".aisa-runtime");
   const reportPath = join(
     runtimeDataRoot,
     "runs",

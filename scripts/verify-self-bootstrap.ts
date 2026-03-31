@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdtemp, readFile, realpath } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -9,7 +9,11 @@ import {
   type Run,
   type WorkerWriteback
 } from "../packages/domain/src/index.ts";
-import { Orchestrator } from "../packages/orchestrator/src/index.ts";
+import {
+  Orchestrator,
+  SELF_BOOTSTRAP_NEXT_TASK_ACTIVE_ENTRY_RELATIVE_PATH,
+  SELF_BOOTSTRAP_NEXT_TASK_ACTIVE_ENTRY_SNAPSHOT_FILE_NAME
+} from "../packages/orchestrator/src/index.ts";
 import {
   ensureWorkspace,
   getAttemptContract,
@@ -50,11 +54,16 @@ class NoopAdapter {
 }
 
 const REQUIRED_ROOT_SCRIPT_COMMANDS = {
-  "verify:drive-run": "node --import tsx scripts/verify-drive-run.ts",
-  "verify:run-api": "node --import tsx scripts/verify-run-detail-api.ts",
-  "verify:self-bootstrap": "node --import tsx scripts/verify-self-bootstrap.ts",
-  "bootstrap:self": "node --import tsx scripts/bootstrap-self-run.ts",
-  "drive:run": "node --import tsx scripts/drive-run.ts"
+  "verify:drive-run":
+    "node --experimental-transform-types --loader ./scripts/ts-runtime-loader.mjs scripts/verify-drive-run.ts",
+  "verify:run-api":
+    "node --experimental-transform-types --loader ./scripts/ts-runtime-loader.mjs scripts/verify-run-detail-api.ts",
+  "verify:self-bootstrap":
+    "node --experimental-transform-types --loader ./scripts/ts-runtime-loader.mjs scripts/verify-self-bootstrap.ts",
+  "bootstrap:self":
+    "node --experimental-transform-types --loader ./scripts/ts-runtime-loader.mjs scripts/bootstrap-self-run.ts",
+  "drive:run":
+    "node --experimental-transform-types --loader ./scripts/ts-runtime-loader.mjs scripts/drive-run.ts"
 } as const;
 
 async function assertRootEntrypointsUseNodeImportTsx(): Promise<void> {
@@ -70,7 +79,7 @@ async function assertRootEntrypointsUseNodeImportTsx(): Promise<void> {
     assert.equal(
       actualCommand,
       expectedCommand,
-      `${scriptName} should stay on node --import tsx`
+      `${scriptName} should stay on the local TypeScript loader`
     );
     assert.ok(
       !actualCommand.startsWith("tsx "),
@@ -92,6 +101,8 @@ type BootstrapOutput = {
   steer_id: string | null;
   launched: boolean;
   template: string;
+  active_next_task: string;
+  active_next_task_snapshot: string;
   runtime_health_snapshot: string;
 };
 
@@ -99,8 +110,8 @@ function resolveSourceRoot(): string {
   return dirname(dirname(fileURLToPath(import.meta.url)));
 }
 
-function resolveTsxLoaderPath(sourceRoot: string): string {
-  return join(sourceRoot, "node_modules", "tsx", "dist", "loader.mjs");
+function resolveRuntimeLoaderPath(sourceRoot: string): string {
+  return join(sourceRoot, "scripts", "ts-runtime-loader.mjs");
 }
 
 function runTsxScript(input: {
@@ -114,8 +125,9 @@ function runTsxScript(input: {
     const child = spawn(
       process.execPath,
       [
-        "--import",
-        resolveTsxLoaderPath(input.sourceRoot),
+        "--experimental-transform-types",
+        "--loader",
+        resolveRuntimeLoaderPath(input.sourceRoot),
         input.scriptPath,
         ...(input.args ?? [])
       ],
@@ -174,6 +186,57 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+async function seedSelfBootstrapActiveTask(
+  workspaceRoot: string,
+  content: string
+): Promise<void> {
+  const publishedPath = join(
+    workspaceRoot,
+    SELF_BOOTSTRAP_NEXT_TASK_ACTIVE_ENTRY_RELATIVE_PATH
+  );
+  await mkdir(dirname(publishedPath), { recursive: true });
+  await writeFile(publishedPath, content, "utf8");
+}
+
+async function loadPublishedActiveTaskFixture(sourceRoot: string): Promise<{
+  content: string;
+  updatedAt: string;
+  title: string;
+  summary: string;
+  sourceAnchor: {
+    asset_path: string;
+    source_attempt_id?: string | null;
+    payload_sha256?: string | null;
+    promoted_at?: string | null;
+  };
+  sourceAnchorAssetPath: string;
+}> {
+  const content = await readFile(
+    join(sourceRoot, SELF_BOOTSTRAP_NEXT_TASK_ACTIVE_ENTRY_RELATIVE_PATH),
+    "utf8"
+  );
+  const parsed = JSON.parse(content) as {
+    updated_at: string;
+    title: string;
+    summary: string;
+    source_anchor: {
+      asset_path: string;
+      source_attempt_id?: string | null;
+      payload_sha256?: string | null;
+      promoted_at?: string | null;
+    };
+  };
+
+  return {
+    content,
+    updatedAt: parsed.updated_at,
+    title: parsed.title,
+    summary: parsed.summary,
+    sourceAnchor: parsed.source_anchor,
+    sourceAnchorAssetPath: parsed.source_anchor.asset_path
+  };
+}
+
 async function waitForFirstAttemptContext(input: {
   workspacePaths: ReturnType<typeof resolveWorkspacePaths>;
   runId: string;
@@ -216,9 +279,11 @@ async function main(): Promise<void> {
   await assertRootEntrypointsUseNodeImportTsx();
 
   const sourceRoot = resolveSourceRoot();
+  const publishedActiveTask = await loadPublishedActiveTaskFixture(sourceRoot);
   const rootDir = await mkdtemp(join(tmpdir(), "aisa-self-bootstrap-"));
   const workspacePaths = resolveWorkspacePaths(rootDir);
   await ensureWorkspace(workspacePaths);
+  await seedSelfBootstrapActiveTask(rootDir, publishedActiveTask.content);
   const bootstrapResult = await runTsxScript({
     cwd: rootDir,
     sourceRoot,
@@ -278,6 +343,16 @@ async function main(): Promise<void> {
   assert.equal(bootstrapOutput.current_status, "running");
   assert.equal(bootstrapOutput.launched, true);
   assert.equal(bootstrapOutput.template, "self-bootstrap");
+  assert.equal(
+    bootstrapOutput.active_next_task,
+    SELF_BOOTSTRAP_NEXT_TASK_ACTIVE_ENTRY_RELATIVE_PATH
+  );
+  assert.ok(
+    bootstrapOutput.active_next_task_snapshot.endsWith(
+      SELF_BOOTSTRAP_NEXT_TASK_ACTIVE_ENTRY_SNAPSHOT_FILE_NAME
+    ),
+    "bootstrap output should expose the active next task snapshot path"
+  );
   assert.ok(
     bootstrapOutput.runtime_health_snapshot.endsWith("runtime-health-snapshot.json"),
     "bootstrap output should expose the runtime health snapshot path"
@@ -301,6 +376,22 @@ async function main(): Promise<void> {
   );
   assert.equal(runtimeHealthSnapshot?.history_contract_drift.drift_count, 0);
   assert.ok(
+    !steers[0]?.content.includes("Codex/2026-03-25-development-handoff.md"),
+    "seeded steer should not fall back to the old handoff document as the first source"
+  );
+  assert.ok(
+    steers[0]?.content.includes(SELF_BOOTSTRAP_NEXT_TASK_ACTIVE_ENTRY_RELATIVE_PATH),
+    "seeded steer should point to the published active next task"
+  );
+  assert.ok(
+    steers[0]?.content.includes(publishedActiveTask.title),
+    "seeded steer should carry the active next task title"
+  );
+  assert.ok(
+    steers[0]?.content.includes(publishedActiveTask.sourceAnchorAssetPath),
+    "seeded steer should carry the active next task source anchor"
+  );
+  assert.ok(
     steers[0]?.content.includes("先看 context 里的 runtime_health_snapshot 结构化摘要。"),
     "seeded steer should prefer the structured runtime health snapshot in context"
   );
@@ -311,6 +402,22 @@ async function main(): Promise<void> {
   assert.ok(
     attempts[0]?.objective.includes("先看 context 里的 runtime_health_snapshot 结构化摘要。"),
     "first attempt should prefer structured runtime evidence over guessed file paths"
+  );
+  assert.ok(
+    !attempts[0]?.objective.includes("Codex/2026-03-25-development-handoff.md"),
+    "first attempt should not regress to the old handoff document"
+  );
+  assert.ok(
+    attempts[0]?.objective.includes(SELF_BOOTSTRAP_NEXT_TASK_ACTIVE_ENTRY_RELATIVE_PATH),
+    "first attempt should reference the published active next task"
+  );
+  assert.ok(
+    attempts[0]?.objective.includes(publishedActiveTask.title),
+    "first attempt should carry the active next task title"
+  );
+  assert.ok(
+    attempts[0]?.objective.includes(publishedActiveTask.sourceAnchorAssetPath),
+    "first attempt should carry the active next task source anchor"
   );
   assert.ok(
     steers[0]?.content.includes("ok"),
@@ -349,6 +456,23 @@ async function main(): Promise<void> {
     },
     "first attempt context should carry the runtime health snapshot summary"
   );
+  assert.deepEqual(
+    firstAttemptContext?.active_next_task,
+    {
+      path: SELF_BOOTSTRAP_NEXT_TASK_ACTIVE_ENTRY_RELATIVE_PATH,
+      snapshot_path: join(
+        "runs",
+        run.id,
+        "artifacts",
+        SELF_BOOTSTRAP_NEXT_TASK_ACTIVE_ENTRY_SNAPSHOT_FILE_NAME
+      ),
+      updated_at: publishedActiveTask.updatedAt,
+      title: publishedActiveTask.title,
+      summary: publishedActiveTask.summary,
+      source_anchor: publishedActiveTask.sourceAnchor
+    },
+    "first attempt context should carry the published active next task summary"
+  );
   const attemptContract = attempts[0]
     ? await getAttemptContract(workspacePaths, run.id, attempts[0].id)
     : null;
@@ -368,10 +492,85 @@ async function main(): Promise<void> {
   assert.ok(
     journal.some(
       (entry) =>
+        entry.type === "run.self_bootstrap.active_next_task.captured" &&
+        entry.payload.published_path ===
+          SELF_BOOTSTRAP_NEXT_TASK_ACTIVE_ENTRY_RELATIVE_PATH &&
+        entry.payload.snapshot_path === bootstrapOutput.active_next_task_snapshot
+    ),
+    "journal should record the captured active next task artifact"
+  );
+  assert.ok(
+    journal.some(
+      (entry) =>
         entry.type === "run.runtime_health_snapshot.captured" &&
         entry.payload.path === bootstrapOutput.runtime_health_snapshot
     ),
     "journal should record the runtime health snapshot artifact"
+  );
+
+  const missingActiveTaskRoot = await mkdtemp(
+    join(tmpdir(), "aisa-self-bootstrap-missing-")
+  );
+  const missingActiveTaskResult = await runTsxScript({
+    cwd: missingActiveTaskRoot,
+    sourceRoot,
+    scriptPath: join(sourceRoot, "scripts", "bootstrap-self-run.ts"),
+    args: ["--owner", "test-owner", "--focus", "Use runtime evidence to choose the next backend step."],
+    extraEnv: {
+      AISA_DEV_REPO_ROOT: missingActiveTaskRoot,
+      AISA_RUNTIME_DATA_ROOT: missingActiveTaskRoot,
+      AISA_RUNTIME_REPO_ROOT: sourceRoot
+    }
+  });
+  assert.notEqual(
+    missingActiveTaskResult.exitCode,
+    0,
+    "bootstrap:self should fail closed when the published active next task is missing"
+  );
+  assert.match(
+    missingActiveTaskResult.stderr,
+    /self-bootstrap-next-runtime-task-active\.json/,
+    "missing active next task failure should mention the published asset"
+  );
+
+  const invalidActiveTaskRoot = await mkdtemp(
+    join(tmpdir(), "aisa-self-bootstrap-invalid-")
+  );
+  await seedSelfBootstrapActiveTask(
+    invalidActiveTaskRoot,
+    JSON.stringify(
+      {
+        entry_type: "self_bootstrap_next_runtime_task_active",
+        updated_at: "2026-03-31T00:00:00Z",
+        source_anchor: {
+          asset_path: "Codex/bad.json"
+        },
+        summary: "broken"
+      },
+      null,
+      2
+    ) + "\n"
+  );
+  const invalidActiveTaskResult = await runTsxScript({
+    cwd: invalidActiveTaskRoot,
+    sourceRoot,
+    scriptPath: join(sourceRoot, "scripts", "bootstrap-self-run.ts"),
+    args: ["--owner", "test-owner", "--focus", "Use runtime evidence to choose the next backend step."],
+    extraEnv: {
+      AISA_DEV_REPO_ROOT: invalidActiveTaskRoot,
+      AISA_RUNTIME_DATA_ROOT: invalidActiveTaskRoot,
+      AISA_RUNTIME_REPO_ROOT: sourceRoot
+    }
+  });
+  assert.notEqual(
+    invalidActiveTaskResult.exitCode,
+    0,
+    "bootstrap:self should fail closed when the published active next task is malformed"
+  );
+  assert.match(
+    invalidActiveTaskResult.stderr,
+    /\.title/,
+    "invalid active next task failure should mention the broken required field"
   );
 
   console.log(
@@ -380,8 +579,12 @@ async function main(): Promise<void> {
         run_id: run.id,
         attempt_id: attempts[0]?.id ?? null,
         objective: attempts[0]?.objective ?? null,
+        active_next_task: bootstrapOutput.active_next_task,
+        active_next_task_snapshot: bootstrapOutput.active_next_task_snapshot,
         runtime_health_snapshot: bootstrapOutput.runtime_health_snapshot,
-        drift_count: runtimeHealthSnapshot?.history_contract_drift.drift_count ?? null
+        drift_count: runtimeHealthSnapshot?.history_contract_drift.drift_count ?? null,
+        missing_active_next_task_exit_code: missingActiveTaskResult.exitCode,
+        invalid_active_next_task_exit_code: invalidActiveTaskResult.exitCode
       },
       null,
       2

@@ -58,7 +58,12 @@ async function main(): Promise<void> {
 
   const child = spawn(
     process.execPath,
-    ["--import", "tsx", "apps/control-api/src/supervisor.ts"],
+    [
+      "--experimental-transform-types",
+      "--loader",
+      "./scripts/ts-runtime-loader.mjs",
+      "apps/control-api/src/supervisor.ts"
+    ],
     {
       cwd: process.cwd(),
       env: {

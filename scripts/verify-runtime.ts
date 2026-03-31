@@ -35,6 +35,16 @@ type RunAutonomyReport = {
   }>;
 };
 
+type WorkerAdapterReport = {
+  research_shell_reentry: string;
+  blocked_command_exit_code: number;
+  runtime_event_stream: string;
+  stalled_worker_guard: string;
+  malformed_findings_guard: string;
+  malformed_artifacts_guard: string;
+  status: "passed";
+};
+
 type VerifyDriveRunReport = {
   run_id: string;
   first_stop_next_action: string | null;
@@ -88,7 +98,12 @@ function runTsxScript(
   return new Promise((resolve, reject) => {
     const child = spawn(
       process.execPath,
-      ["--import", "tsx", scriptPath],
+      [
+        "--experimental-transform-types",
+        "--loader",
+        "./scripts/ts-runtime-loader.mjs",
+        scriptPath
+      ],
       {
         cwd: process.cwd(),
         env: {
@@ -201,7 +216,35 @@ async function assertRunAutonomyReplay(): Promise<RunAutonomyReport> {
     formatScriptFailure("scripts/verify-run-autonomy.ts", result)
   );
 
-  return JSON.parse(result.stdout) as RunAutonomyReport;
+  const report = JSON.parse(result.stdout) as RunAutonomyReport;
+  const stalledResearchCase = report.results.find(
+    (entry) => entry.id === "worker_stalled_research_retries_quickly"
+  );
+
+  assert.ok(
+    stalledResearchCase,
+    "run autonomy 回归必须包含 worker_stalled_research_retries_quickly。"
+  );
+  assert.equal(
+    stalledResearchCase.status,
+    "pass",
+    "research stalled 回放必须通过。"
+  );
+
+  return report;
+}
+
+async function assertWorkerAdapterReplay(): Promise<WorkerAdapterReport> {
+  const result = await runTsxScript("scripts/verify-worker-adapter.ts");
+  assert.equal(
+    result.exitCode,
+    0,
+    formatScriptFailure("scripts/verify-worker-adapter.ts", result)
+  );
+
+  const report = JSON.parse(result.stdout) as WorkerAdapterReport;
+  assert.equal(report.status, "passed", "worker adapter 回放应该明确回报 passed。");
+  return report;
 }
 
 async function assertGovernanceReplay(): Promise<GovernanceReport> {
@@ -275,6 +318,7 @@ async function main(): Promise<void> {
   await assertRuntimeLaneReplay();
   await assertRunDetailApiReplay();
   await assertRunStreamReplay();
+  const workerAdapter = await assertWorkerAdapterReplay();
   const driveRun = await assertDriveRunReplay();
   const runAutonomy = await assertRunAutonomyReplay();
   const governance = await assertGovernanceReplay();
@@ -290,8 +334,8 @@ async function main(): Promise<void> {
     JSON.stringify(
       {
         summary: skipSelfBootstrapReplay
-          ? "runtime 回放通过，drive-run、run autonomy 主链通过，嵌套 self-bootstrap 回放已按防递归保护跳过，历史 contract 漂移修复与体检都通过了。"
-          : "runtime 回放通过，drive-run、run autonomy、self-bootstrap 主链和历史 contract 漂移修复都通过了。",
+          ? "runtime 回放通过，worker adapter、drive-run、run autonomy 主链通过，嵌套 self-bootstrap 回放已按防递归保护跳过，历史 contract 漂移修复与体检都通过了。"
+          : "runtime 回放通过，worker adapter、drive-run、run autonomy、self-bootstrap 主链和历史 contract 漂移修复都通过了。",
         run_loop: {
           status: "passed"
         },
@@ -303,6 +347,14 @@ async function main(): Promise<void> {
         },
         run_stream: {
           status: "passed"
+        },
+        worker_adapter: {
+          status: workerAdapter.status,
+          research_shell_reentry: workerAdapter.research_shell_reentry,
+          runtime_event_stream: workerAdapter.runtime_event_stream,
+          stalled_worker_guard: workerAdapter.stalled_worker_guard,
+          malformed_findings_guard: workerAdapter.malformed_findings_guard,
+          malformed_artifacts_guard: workerAdapter.malformed_artifacts_guard
         },
         drive_run: {
           status: "passed",

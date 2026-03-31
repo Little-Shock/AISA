@@ -3,6 +3,7 @@ import { open, readFile, stat, unlink } from "node:fs/promises";
 import { join, relative, resolve } from "node:path";
 import {
   createAttemptRuntimeState,
+  createAttemptHandoffBundle,
   createAttempt,
   createAttemptContract,
   createAttemptPreflightEvaluation,
@@ -25,6 +26,8 @@ import {
   type AttemptContractDraft,
   type AttemptEvaluation,
   type AttemptEvaluationSynthesisRecord,
+  type AttemptFailureContext,
+  type AttemptHandoffBundle,
   type AttemptPreflightCheck,
   type AttemptPreflightFailureCode,
   type AttemptReviewInputPacket,
@@ -61,6 +64,7 @@ import {
   getAttempt,
   getAttemptContract,
   getAttemptContext,
+  getAttemptHandoffBundle,
   getAttemptHeartbeat,
   getAttemptEvaluation,
   getAttemptLogExcerpt,
@@ -98,6 +102,7 @@ import {
   saveAttemptEvaluationSynthesisRecord,
   saveAttemptPreflightEvaluation,
   saveAttemptHeartbeat,
+  saveAttemptHandoffBundle,
   saveAttemptReviewInputPacket,
   saveAttemptReviewOpinion,
   saveAttemptReviewPacket,
@@ -151,6 +156,12 @@ import {
   getEffectiveRunWorkspaceRoot
 } from "./run-workspace.js";
 import { type RuntimeLayout } from "./runtime-layout.js";
+import {
+  SELF_BOOTSTRAP_NEXT_TASK_ACTIVE_ENTRY_RELATIVE_PATH,
+  SELF_BOOTSTRAP_NEXT_TASK_ACTIVE_ENTRY_SNAPSHOT_FILE_NAME,
+  parseSelfBootstrapNextTaskActiveEntry,
+  type SelfBootstrapNextTaskActiveEntry
+} from "./self-bootstrap-next-task.js";
 
 export interface OrchestratorOptions {
   attemptHeartbeatIntervalMs?: number;
@@ -1145,6 +1156,12 @@ export class Orchestrator {
         this.workspacePaths,
         runId
       );
+      const activeNextTask = await this.getSelfBootstrapActiveNextTaskContext(
+        run,
+        runId,
+        attempts,
+        attempt.id
+      );
       const context = {
         contract: {
           title: run.title,
@@ -1166,6 +1183,11 @@ export class Orchestrator {
             content: runSteer.content
           })),
         previous_attempts: previousAttempts,
+        ...(activeNextTask
+          ? {
+              active_next_task: activeNextTask
+            }
+          : {}),
         ...(runtimeHealthSnapshot
           ? {
               runtime_health_snapshot: {
@@ -1611,8 +1633,19 @@ export class Orchestrator {
       reviewOpinions,
       evaluationSynthesis
     });
+    const reviewPacketRef = this.buildAttemptReviewPacketRef(input.runId, input.attempt.id);
+    const handoffBundle = this.buildAttemptHandoffBundle({
+      runId: input.runId,
+      attempt: input.attempt,
+      attemptContract,
+      currentSnapshot: reviewPacket.current_decision_snapshot,
+      failureContext: reviewPacket.failure_context,
+      runtimeVerification: reviewPacket.runtime_verification,
+      reviewPacketRef
+    });
 
     await saveAttemptReviewPacket(this.workspacePaths, reviewPacket);
+    await saveAttemptHandoffBundle(this.workspacePaths, handoffBundle);
     await saveAttempt(this.workspacePaths, input.attempt);
     if (input.currentSnapshot) {
       await saveCurrentDecision(this.workspacePaths, input.currentSnapshot);
@@ -1710,6 +1743,34 @@ export class Orchestrator {
 
   private buildAttemptEvaluationSynthesisRef(runId: string, attemptId: string): string {
     return `runs/${runId}/attempts/${attemptId}/evaluation_synthesis.json`;
+  }
+
+  private buildAttemptReviewPacketRef(runId: string, attemptId: string): string {
+    return `runs/${runId}/attempts/${attemptId}/review_packet.json`;
+  }
+
+  private buildAttemptRuntimeVerificationRef(runId: string, attemptId: string): string {
+    return `runs/${runId}/attempts/${attemptId}/artifacts/runtime-verification.json`;
+  }
+
+  private buildAttemptHandoffBundleRef(runId: string, attemptId: string): string {
+    return `runs/${runId}/attempts/${attemptId}/artifacts/handoff_bundle.json`;
+  }
+
+  private buildAttemptMetaRef(runId: string, attemptId: string): string {
+    return `runs/${runId}/attempts/${attemptId}/meta.json`;
+  }
+
+  private buildAttemptContractRef(runId: string, attemptId: string): string {
+    return `runs/${runId}/attempts/${attemptId}/attempt_contract.json`;
+  }
+
+  private buildRunContractRef(runId: string): string {
+    return `runs/${runId}/contract.json`;
+  }
+
+  private buildCurrentDecisionRef(runId: string): string {
+    return `runs/${runId}/current.json`;
   }
 
   private buildAttemptReviewInputPacketRef(runId: string, attemptId: string): string {
@@ -1932,16 +1993,34 @@ export class Orchestrator {
         continue;
       }
 
-      const reviewPacket = await getAttemptReviewPacket(
+      const [reviewPacket, handoffBundle] = await Promise.all([
+        getAttemptReviewPacket(this.workspacePaths, runId, attempt.id),
+        getAttemptHandoffBundle(this.workspacePaths, runId, attempt.id)
+      ]);
+      if (!reviewPacket) {
+        await this.persistAttemptReviewPacket(runId, attempt.id, current);
+        continue;
+      }
+
+      if (handoffBundle) {
+        continue;
+      }
+
+      const attemptContract = await getAttemptContract(
         this.workspacePaths,
         runId,
         attempt.id
       );
-      if (reviewPacket) {
-        continue;
-      }
-
-      await this.persistAttemptReviewPacket(runId, attempt.id, current);
+      const nextHandoffBundle = this.buildAttemptHandoffBundle({
+        runId,
+        attempt,
+        attemptContract,
+        currentSnapshot: reviewPacket.current_decision_snapshot,
+        failureContext: reviewPacket.failure_context,
+        runtimeVerification: reviewPacket.runtime_verification,
+        reviewPacketRef: this.buildAttemptReviewPacketRef(runId, attempt.id)
+      });
+      await saveAttemptHandoffBundle(this.workspacePaths, nextHandoffBundle);
     }
   }
 
@@ -1997,8 +2076,18 @@ export class Orchestrator {
       reviewOpinions,
       evaluationSynthesis
     });
+    const handoffBundle = this.buildAttemptHandoffBundle({
+      runId,
+      attempt,
+      attemptContract,
+      currentSnapshot: reviewPacket.current_decision_snapshot,
+      failureContext: reviewPacket.failure_context,
+      runtimeVerification: reviewPacket.runtime_verification,
+      reviewPacketRef: this.buildAttemptReviewPacketRef(runId, attemptId)
+    });
 
     await saveAttemptReviewPacket(this.workspacePaths, reviewPacket);
+    await saveAttemptHandoffBundle(this.workspacePaths, handoffBundle);
   }
 
   private buildReviewPacketFailureContext(input: {
@@ -2149,6 +2238,38 @@ export class Orchestrator {
         : null,
       generated_at: new Date().toISOString()
     };
+  }
+
+  private buildAttemptHandoffBundle(input: {
+    runId: string;
+    attempt: Attempt;
+    attemptContract: AttemptContract | null;
+    currentSnapshot: CurrentDecision | null;
+    failureContext: AttemptFailureContext | null;
+    runtimeVerification: AttemptRuntimeVerification | null;
+    reviewPacketRef: string | null;
+  }): AttemptHandoffBundle {
+    return createAttemptHandoffBundle({
+      attempt: input.attempt,
+      approved_attempt_contract: input.attemptContract,
+      current_decision_snapshot: input.currentSnapshot,
+      failure_context: input.failureContext,
+      runtime_verification: input.runtimeVerification,
+      source_refs: {
+        run_contract: this.buildRunContractRef(input.runId),
+        attempt_meta: this.buildAttemptMetaRef(input.runId, input.attempt.id),
+        attempt_contract: input.attemptContract
+          ? this.buildAttemptContractRef(input.runId, input.attempt.id)
+          : null,
+        current_decision: input.currentSnapshot
+          ? this.buildCurrentDecisionRef(input.runId)
+          : null,
+        review_packet: input.reviewPacketRef,
+        runtime_verification: input.runtimeVerification
+          ? this.buildAttemptRuntimeVerificationRef(input.runId, input.attempt.id)
+          : null
+      }
+    });
   }
 
   private async buildAttemptArtifactManifest(input: {
@@ -2521,6 +2642,53 @@ export class Orchestrator {
       "Execution changed live runtime source files already loaded by the in-process control-api/orchestrator.",
       `Restart before the next dispatch. Affected files: ${affectedFiles.join(", ")}`
     ].join(" ");
+  }
+
+  private async getSelfBootstrapActiveNextTaskContext(
+    run: Run,
+    runId: string,
+    attempts: Attempt[],
+    currentAttemptId: string
+  ): Promise<{
+    path: string;
+    snapshot_path: string;
+    updated_at: string;
+    title: string;
+    summary: string;
+    source_anchor: SelfBootstrapNextTaskActiveEntry["source_anchor"];
+  } | null> {
+    const previousAttemptCount = attempts.filter(
+      (item) => item.id !== currentAttemptId
+    ).length;
+    if (!(previousAttemptCount === 0 && run.title === "AISA 自举下一步规划")) {
+      return null;
+    }
+
+    const snapshotPath = join(
+      resolveRunPaths(this.workspacePaths, runId).artifactsDir,
+      SELF_BOOTSTRAP_NEXT_TASK_ACTIVE_ENTRY_SNAPSHOT_FILE_NAME
+    );
+    let snapshot: SelfBootstrapNextTaskActiveEntry;
+
+    try {
+      snapshot = parseSelfBootstrapNextTaskActiveEntry(
+        JSON.parse(await readFile(snapshotPath, "utf8"))
+      );
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      throw new Error(
+        `self-bootstrap blocked because active next task snapshot is missing or invalid: ${reason}`
+      );
+    }
+
+    return {
+      path: SELF_BOOTSTRAP_NEXT_TASK_ACTIVE_ENTRY_RELATIVE_PATH,
+      snapshot_path: relative(this.workspacePaths.rootDir, snapshotPath),
+      updated_at: snapshot.updated_at,
+      title: snapshot.title,
+      summary: snapshot.summary,
+      source_anchor: snapshot.source_anchor
+    };
   }
 
   private buildPlannedAttemptObjective(
@@ -3184,6 +3352,13 @@ export class Orchestrator {
         journal,
         autoResumePolicy.reasonPrefix
       );
+      const latestAttempt = this.getLatestAttempt(current, attempts);
+      const latestHandoffBundle = latestAttempt
+        ? await getAttemptHandoffBundle(this.workspacePaths, runId, latestAttempt.id)
+        : null;
+      const latestHandoffBundleRef = latestAttempt
+        ? this.buildAttemptHandoffBundleRef(runId, latestAttempt.id)
+        : null;
 
       if (automaticResumeCount >= autoResumePolicy.maxCycles) {
         await this.persistAutomaticResumeExhausted(runId, current, journal, automaticResumeCount);
@@ -3194,7 +3369,10 @@ export class Orchestrator {
         runId,
         current,
         attempts,
-        journal
+        journal,
+        latestAttempt,
+        latestHandoffBundle,
+        latestHandoffBundleRef
       });
 
       if (blocker) {
@@ -3206,7 +3384,10 @@ export class Orchestrator {
         runId,
         current,
         attempts,
-        journal
+        journal,
+        latestAttempt,
+        latestHandoffBundle,
+        latestHandoffBundleRef
       });
 
       if (!plan) {
@@ -3235,7 +3416,8 @@ export class Orchestrator {
             cycle: automaticResumeCount + 1,
             next_action: plan.next_action,
             attempt_type: plan.attempt_type,
-            reason: plan.reason
+            reason: plan.reason,
+            handoff_bundle_ref: plan.handoffBundleRef
           }
         })
       );
@@ -3247,10 +3429,14 @@ export class Orchestrator {
     current: CurrentDecision;
     attempts: Attempt[];
     journal: Awaited<ReturnType<typeof listRunJournal>>;
+    latestAttempt: Attempt | null;
+    latestHandoffBundle: AttemptHandoffBundle | null;
+    latestHandoffBundleRef: string | null;
   }): Promise<{
     reason: string;
     message: string;
     failureCode?: AttemptRuntimeVerification["failure_code"];
+    handoffBundleRef?: string | null;
   } | null> {
     const governance = await getRunGovernanceState(this.workspacePaths, input.runId);
     if (governance?.status === "blocked" && governance.blocker_repeat_count >= 2) {
@@ -3261,10 +3447,9 @@ export class Orchestrator {
       };
     }
 
-    const latestAttempt = this.getLatestAttempt(input.current, input.attempts);
     const workspaceScopeMessage = this.getRunWorkspaceScopeBlockedMessage(
       input.journal,
-      latestAttempt?.id ?? input.current.latest_attempt_id ?? null
+      input.latestAttempt?.id ?? input.current.latest_attempt_id ?? null
     );
     if (workspaceScopeMessage) {
       return {
@@ -3273,16 +3458,16 @@ export class Orchestrator {
       };
     }
 
-    if (!latestAttempt) {
+    if (!input.latestAttempt) {
       return null;
     }
 
     const runtimeVerificationBlocker =
-      latestAttempt.attempt_type === "execution"
-        ? await this.getAutomaticResumeRuntimeVerificationBlocker(
-            input.runId,
-            latestAttempt.id
-          )
+      input.latestAttempt.attempt_type === "execution"
+        ? this.getAutomaticResumeRuntimeVerificationBlocker({
+            handoffBundle: input.latestHandoffBundle,
+            handoffBundleRef: input.latestHandoffBundleRef
+          })
         : null;
     if (runtimeVerificationBlocker) {
       return runtimeVerificationBlocker;
@@ -3290,7 +3475,7 @@ export class Orchestrator {
 
     const restartRequiredEntry = this.getLatestAttemptJournalEntry(
       input.journal,
-      latestAttempt.id,
+      input.latestAttempt.id,
       ["attempt.restart_required"]
     );
     const restartRequiredMessage = restartRequiredEntry
@@ -3306,14 +3491,15 @@ export class Orchestrator {
       };
     }
 
-    if (latestAttempt.status !== "failed") {
+    if (input.latestAttempt.status !== "failed") {
       return null;
     }
 
     const failureMessage = await this.getLatestAttemptFailureMessage({
       current: input.current,
       journal: input.journal,
-      latestAttempt
+      latestAttempt: input.latestAttempt,
+      handoffBundle: input.latestHandoffBundle
     });
     const failureMode = this.classifyFailureMode(failureMessage);
 
@@ -3323,7 +3509,8 @@ export class Orchestrator {
 
     return {
       reason: failureMode,
-      message: `上一轮${latestAttempt.attempt_type === "execution" ? "execution" : "research"}命中 provider 鉴权失败，自动续跑已暂停。原始阻塞：${failureMessage}`
+      message: `上一轮${input.latestAttempt.attempt_type === "execution" ? "execution" : "research"}命中 provider 鉴权失败，自动续跑已暂停。原始阻塞：${failureMessage}`,
+      handoffBundleRef: input.latestHandoffBundleRef
     };
   }
 
@@ -3332,6 +3519,9 @@ export class Orchestrator {
     current: CurrentDecision;
     attempts: Attempt[];
     journal: Awaited<ReturnType<typeof listRunJournal>>;
+    latestAttempt: Attempt | null;
+    latestHandoffBundle: AttemptHandoffBundle | null;
+    latestHandoffBundleRef: string | null;
   }): Promise<
     | {
         next_action: string;
@@ -3339,43 +3529,47 @@ export class Orchestrator {
         summary: string;
         blocking_reason: string | null;
         reason: string;
+        handoffBundleRef: string | null;
       }
     | null
   > {
-    const latestAttempt = this.getLatestAttempt(input.current, input.attempts);
     const governance = await getRunGovernanceState(this.workspacePaths, input.runId);
-    if (!latestAttempt) {
+    if (!input.latestAttempt) {
       return {
         next_action: "start_first_attempt",
         attempt_type: "research",
         summary: "人工窗口超时，系统自动恢复并重新启动首次研究。",
         blocking_reason: input.current.blocking_reason,
-        reason: "no_attempts_yet"
+        reason: "no_attempts_yet",
+        handoffBundleRef: null
       };
     }
 
     const restartRequiredEntry = this.getLatestAttemptJournalEntry(
       input.journal,
-      latestAttempt.id,
+      input.latestAttempt.id,
       ["attempt.restart_required"]
     );
     if (
       restartRequiredEntry &&
       this.hasRuntimeRestartedSinceJournalEntry(restartRequiredEntry.ts) &&
-      latestAttempt.attempt_type === "execution"
+      input.latestAttempt.attempt_type === "execution"
     ) {
       return {
         next_action: "continue_execution",
         attempt_type: "execution",
         summary: "检测到 runtime 已在 source drift 后重启，系统继续上一轮 execution。",
         blocking_reason: null,
-        reason: "runtime_restarted_continue_execution"
+        reason: "runtime_restarted_continue_execution",
+        handoffBundleRef: input.latestHandoffBundleRef
       };
     }
 
-    if (this.hasCheckpointBlocker(input.journal, latestAttempt.id)) {
+    if (this.hasCheckpointBlocker(input.journal, input.latestAttempt.id)) {
       const checkpointMessage =
-        this.getAttemptJournalMessage(input.journal, latestAttempt.id, [
+        input.latestHandoffBundle?.failure_context?.message ??
+        input.latestHandoffBundle?.current_decision_snapshot?.blocking_reason ??
+        this.getAttemptJournalMessage(input.journal, input.latestAttempt.id, [
           "attempt.checkpoint.blocked"
         ]) ??
         input.current.blocking_reason ??
@@ -3387,78 +3581,88 @@ export class Orchestrator {
         summary:
           "人工窗口超时，系统直接继续执行，先把提交现场和工作区阻塞处理掉。",
         blocking_reason: checkpointMessage,
-        reason: "checkpoint_blocked_retries_execution"
+        reason: "checkpoint_blocked_retries_execution",
+        handoffBundleRef: input.latestHandoffBundleRef
       };
     }
 
-    if (latestAttempt.status === "stopped") {
+    if (input.latestAttempt.status === "stopped") {
       return {
         next_action: "retry_attempt",
-        attempt_type: latestAttempt.attempt_type,
-        summary: `人工窗口超时，系统自动恢复上一轮${latestAttempt.attempt_type === "execution" ? "执行" : "研究"}尝试。`,
+        attempt_type: input.latestAttempt.attempt_type,
+        summary: `人工窗口超时，系统自动恢复上一轮${input.latestAttempt.attempt_type === "execution" ? "执行" : "研究"}尝试。`,
         blocking_reason:
+          input.latestHandoffBundle?.current_decision_snapshot?.blocking_reason ??
           input.current.blocking_reason ??
           "上一轮尝试中断，系统会先按原契约恢复。",
-        reason: "resume_stopped_attempt"
+        reason: "resume_stopped_attempt",
+        handoffBundleRef: input.latestHandoffBundleRef
       };
     }
 
-    if (latestAttempt.status === "failed") {
+    if (input.latestAttempt.status === "failed") {
       const failureMessage = await this.getLatestAttemptFailureMessage({
         current: input.current,
         journal: input.journal,
-        latestAttempt
+        latestAttempt: input.latestAttempt,
+        handoffBundle: input.latestHandoffBundle
       });
       const failureMode = this.classifyFailureMode(failureMessage);
 
       if (failureMode === "provider_rate_limited") {
         return {
           next_action: "retry_attempt",
-          attempt_type: latestAttempt.attempt_type,
+          attempt_type: input.latestAttempt.attempt_type,
           summary:
-            latestAttempt.attempt_type === "execution"
+            input.latestAttempt.attempt_type === "execution"
               ? "provider 限流，系统短退避后自动重试上一轮执行。"
               : "provider 限流，系统短退避后自动重试上一轮研究。",
           blocking_reason:
             failureMessage ??
+            input.latestHandoffBundle?.current_decision_snapshot?.blocking_reason ??
             input.current.blocking_reason ??
             "上一轮命中 provider 限流，系统会短退避后重试。",
           reason:
-            latestAttempt.attempt_type === "execution"
+            input.latestAttempt.attempt_type === "execution"
               ? "provider_rate_limited_retry_execution"
-              : "provider_rate_limited_retry_research"
+              : "provider_rate_limited_retry_research",
+          handoffBundleRef: input.latestHandoffBundleRef
         };
       }
 
       if (failureMode === "worker_stalled") {
         return {
           next_action: "retry_attempt",
-          attempt_type: latestAttempt.attempt_type,
+          attempt_type: input.latestAttempt.attempt_type,
           summary:
-            latestAttempt.attempt_type === "execution"
+            input.latestAttempt.attempt_type === "execution"
               ? "worker 卡住，系统短退避后自动重试上一轮执行。"
               : "worker 卡住，系统短退避后自动重试上一轮研究。",
           blocking_reason:
             failureMessage ??
+            input.latestHandoffBundle?.current_decision_snapshot?.blocking_reason ??
             input.current.blocking_reason ??
             "上一轮 worker 卡住，系统会短退避后重试。",
           reason:
-            latestAttempt.attempt_type === "execution"
+            input.latestAttempt.attempt_type === "execution"
               ? "worker_stalled_retry_execution"
-              : "worker_stalled_retry_research"
+              : "worker_stalled_retry_research",
+          handoffBundleRef: input.latestHandoffBundleRef
         };
       }
 
-      if (latestAttempt.attempt_type === "execution") {
+      if (input.latestAttempt.attempt_type === "execution") {
         return {
           next_action: "retry_attempt",
           attempt_type: "execution",
           summary:
             "人工窗口超时，系统自动继续执行并直接处理上一轮执行卡点。",
           blocking_reason:
+            input.latestHandoffBundle?.current_decision_snapshot?.blocking_reason ??
             input.current.blocking_reason ??
             "上一轮执行失败，继续执行并直接修掉当前阻塞。",
-          reason: "failed_execution_retries_directly"
+          reason: "failed_execution_retries_directly",
+          handoffBundleRef: input.latestHandoffBundleRef
         };
       }
 
@@ -3467,13 +3671,15 @@ export class Orchestrator {
         attempt_type: "research",
         summary: "人工窗口超时，系统自动继续研究并优先诊断阻塞点。",
         blocking_reason:
+          input.latestHandoffBundle?.current_decision_snapshot?.blocking_reason ??
           input.current.blocking_reason ??
           "上一轮研究失败，先定位阻塞点再继续。",
-        reason: "failed_research_retry"
+        reason: "failed_research_retry",
+        handoffBundleRef: input.latestHandoffBundleRef
       };
     }
 
-    if (latestAttempt.status === "completed") {
+    if (input.latestAttempt.status === "completed") {
       if (
         governance &&
         governance.status !== "blocked" &&
@@ -3482,33 +3688,40 @@ export class Orchestrator {
         governance.mainline_summary
       ) {
         return {
-          next_action: latestAttempt.attempt_type === "research" ? "start_execution" : "continue_execution",
+          next_action:
+            input.latestAttempt.attempt_type === "research" ? "start_execution" : "continue_execution",
           attempt_type: "execution",
           summary: "人工窗口超时，治理层要求沿着已经验证的 execution 主线继续。",
           blocking_reason:
             governance.context_summary.blocker_summary ?? governance.active_problem_summary,
-          reason: "governance_preserves_execution_mainline"
+          reason: "governance_preserves_execution_mainline",
+          handoffBundleRef: input.latestHandoffBundleRef
         };
       }
 
       const nextAttemptType =
-        input.current.recommended_attempt_type ?? latestAttempt.attempt_type;
+        input.latestHandoffBundle?.recommended_attempt_type ??
+        input.latestHandoffBundle?.current_decision_snapshot?.recommended_attempt_type ??
+        input.current.recommended_attempt_type ??
+        input.latestAttempt.attempt_type;
       if (nextAttemptType === "execution") {
         return {
           next_action:
-            latestAttempt.attempt_type === "research" ? "start_execution" : "continue_execution",
+            input.latestAttempt.attempt_type === "research" ? "start_execution" : "continue_execution",
           attempt_type: "execution",
           summary:
-            latestAttempt.attempt_type === "research"
+            input.latestAttempt.attempt_type === "research"
               ? "人工窗口超时，系统直接进入下一轮执行，不再重复方案研究。"
               : "人工窗口超时，系统继续执行当前已收敛的下一步。",
           blocking_reason:
+            input.latestHandoffBundle?.current_decision_snapshot?.blocking_reason ??
             input.current.blocking_reason ??
             "已有明确的下一步执行方向，直接进入 execution。",
           reason:
-            latestAttempt.attempt_type === "research"
+            input.latestAttempt.attempt_type === "research"
               ? "completed_research_starts_execution"
-              : "completed_execution_continues_execution"
+              : "completed_execution_continues_execution",
+          handoffBundleRef: input.latestHandoffBundleRef
         };
       }
 
@@ -3518,9 +3731,11 @@ export class Orchestrator {
         summary:
           "人工窗口超时，系统自动进入怀疑式研究，重新审查现有证据并收束下一步。",
         blocking_reason:
+          input.latestHandoffBundle?.current_decision_snapshot?.blocking_reason ??
           input.current.blocking_reason ??
           "需要重新审查现有证据，避免沿着旧假设继续空转。",
-        reason: "completed_attempt_needs_skeptical_review"
+        reason: "completed_attempt_needs_skeptical_review",
+        handoffBundleRef: input.latestHandoffBundleRef
       };
     }
 
@@ -3590,11 +3805,17 @@ export class Orchestrator {
         maxCycles: this.maxAutomaticResumeCycles
       };
     }
+    const latestHandoffBundle = await getAttemptHandoffBundle(
+      this.workspacePaths,
+      latestAttempt.run_id,
+      latestAttempt.id
+    );
 
     const failureMessage = await this.getLatestAttemptFailureMessage({
       current: input.current,
       journal: input.journal,
-      latestAttempt
+      latestAttempt,
+      handoffBundle: latestHandoffBundle
     });
     const failureMode = this.classifyFailureMode(failureMessage);
     if (failureMode === "provider_rate_limited") {
@@ -3625,31 +3846,27 @@ export class Orchestrator {
     };
   }
 
-  private async getAutomaticResumeRuntimeVerificationBlocker(
-    runId: string,
-    attemptId: string
-  ): Promise<{
+  private getAutomaticResumeRuntimeVerificationBlocker(input: {
+    handoffBundle: AttemptHandoffBundle | null;
+    handoffBundleRef: string | null;
+  }): {
     reason: string;
     message: string;
     failureCode?: AttemptRuntimeVerification["failure_code"];
-  } | null> {
-    const runtimeVerification = await getAttemptRuntimeVerification(
-      this.workspacePaths,
-      runId,
-      attemptId
-    );
-
-    if (runtimeVerification?.status !== "failed") {
+    handoffBundleRef?: string | null;
+  } | null {
+    if (input.handoffBundle?.runtime_verification?.status !== "failed") {
       return null;
     }
 
-    switch (runtimeVerification.failure_code) {
+    switch (input.handoffBundle.failure_code ?? input.handoffBundle.runtime_verification.failure_code) {
       case "no_git_changes":
         return {
           reason: "runtime_verification_failed",
           failureCode: "no_git_changes",
           message:
-            "上一轮 execution 的运行时回放失败码是 no_git_changes，说明没有留下新的 git 可见改动，自动续跑已暂停。"
+            "上一轮 execution 的运行时回放失败码是 no_git_changes，说明没有留下新的 git 可见改动，自动续跑已暂停。",
+          handoffBundleRef: input.handoffBundleRef
         };
       default:
         return null;
@@ -3735,6 +3952,7 @@ export class Orchestrator {
     current: CurrentDecision;
     journal: Awaited<ReturnType<typeof listRunJournal>>;
     latestAttempt: Attempt;
+    handoffBundle?: AttemptHandoffBundle | null;
   }): Promise<string | null> {
     const [stderrSignal, stdoutSignal] = await Promise.all([
       this.getAttemptLogFailureSignal(
@@ -3750,6 +3968,8 @@ export class Orchestrator {
     ]);
 
     return this.pickFailureMessageCandidate([
+      input.handoffBundle?.failure_context?.message,
+      input.handoffBundle?.current_decision_snapshot?.blocking_reason,
       this.getAttemptJournalMessage(input.journal, input.latestAttempt.id, ["attempt.failed"]),
       input.current.blocking_reason,
       stderrSignal,
@@ -3910,6 +4130,7 @@ export class Orchestrator {
       reason: string;
       message: string;
       failureCode?: AttemptRuntimeVerification["failure_code"];
+      handoffBundleRef?: string | null;
     }
   ): Promise<void> {
     if (this.hasAutoResumeTerminalEvent(journal, "run.auto_resume.blocked")) {
@@ -3925,6 +4146,7 @@ export class Orchestrator {
         payload: {
           reason: blocker?.reason ?? "manual_only_blocker",
           failure_code: blocker?.failureCode ?? null,
+          handoff_bundle_ref: blocker?.handoffBundleRef ?? null,
           message:
             blocker?.message ??
             current.blocking_reason ??
@@ -4393,3 +4615,14 @@ export {
   maybePromoteVerifiedCheckpoint,
   type RuntimePromotionOutcome
 } from "./runtime-promotion.js";
+
+export {
+  SELF_BOOTSTRAP_NEXT_TASK_ACTIVE_ENTRY_RELATIVE_PATH,
+  SELF_BOOTSTRAP_NEXT_TASK_ACTIVE_ENTRY_SNAPSHOT_FILE_NAME,
+  SELF_BOOTSTRAP_NEXT_TASK_PROMOTION_ARTIFACT_FILE_NAME,
+  SELF_BOOTSTRAP_NEXT_TASK_SOURCE_ASSET_SNAPSHOT_FILE_NAME,
+  loadSelfBootstrapNextTaskActiveEntry,
+  parseSelfBootstrapNextTaskActiveEntry,
+  type SelfBootstrapNextTaskActiveEntry,
+  type SelfBootstrapNextTaskSourceAnchor
+} from "./self-bootstrap-next-task.js";

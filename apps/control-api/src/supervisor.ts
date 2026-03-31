@@ -10,6 +10,7 @@ import {
 const currentDir = dirname(fileURLToPath(import.meta.url));
 const packageRoot = resolve(currentDir, "..");
 const repositoryRoot = resolve(packageRoot, "..", "..");
+const tsRuntimeLoaderPath = resolve(repositoryRoot, "scripts", "ts-runtime-loader.mjs");
 const runtimeLayout = resolveRuntimeLayout({
   repositoryRoot,
   env: process.env
@@ -109,7 +110,12 @@ function runChild(): Promise<number | null> {
   return new Promise((resolve, reject) => {
     const child = spawn(
       process.execPath,
-      ["--import", "tsx", childEntry],
+      [
+        "--experimental-transform-types",
+        "--loader",
+        tsRuntimeLoaderPath,
+        childEntry
+      ],
       {
         cwd: childCwd,
         env: {

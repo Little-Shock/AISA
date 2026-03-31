@@ -1,0 +1,45 @@
+
+> autoresearch-swarm-dashboard@0.1.0 verify:runtime /Users/atou/.aisa-run-worktrees/AISA-3b3efc0d/run_e9ef30e4
+> node --experimental-transform-types --loader ./scripts/ts-runtime-loader.mjs scripts/verify-runtime.ts
+
+{
+  "summary": "runtime 回放通过，drive-run、run autonomy、self-bootstrap 主链和历史 contract 漂移修复都通过了。",
+  "run_loop": {
+    "status": "passed"
+  },
+  "control_api_supervisor": {
+    "status": "passed"
+  },
+  "run_detail_api": {
+    "status": "passed"
+  },
+  "run_stream": {
+    "status": "passed"
+  },
+  "drive_run": {
+    "status": "passed",
+    "synced_self_bootstrap_artifacts": {
+      "publication_artifact": "/var/folders/pz/tlr8gv4n4r35_tkpr17n81nr0000gn/T/aisa-drive-run-giMQNW/runs/run_97a693fc/attempts/att_9dac02c5/artifacts/self-bootstrap-next-task-promotion.json",
+      "source_asset_snapshot": "/var/folders/pz/tlr8gv4n4r35_tkpr17n81nr0000gn/T/aisa-drive-run-giMQNW/runs/run_97a693fc/attempts/att_9dac02c5/artifacts/self-bootstrap-next-task-source-asset.snapshot.json",
+      "published_active_entry": "/var/folders/pz/tlr8gv4n4r35_tkpr17n81nr0000gn/T/aisa-drive-run-giMQNW/runs/run_97a693fc/attempts/att_9dac02c5/artifacts/self-bootstrap-next-task-active-entry.snapshot.json"
+    }
+  },
+  "run_autonomy": {
+    "status": "passed",
+    "passed": 15,
+    "failed": 0
+  },
+  "governance": {
+    "status": "passed",
+    "passed": 5,
+    "failed": 0
+  },
+  "self_bootstrap": {
+    "status": "passed"
+  },
+  "history_contract_drift": {
+    "status": "ok",
+    "drift_count": 0,
+    "attempts": []
+  }
+}
