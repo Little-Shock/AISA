@@ -36,6 +36,7 @@ import {
   createRunWorkspaceScopePolicy,
   Orchestrator
 } from "../packages/orchestrator/src/index.ts";
+import { CODEX_CLI_EXECUTION_EFFORT_APPLIED_DETAIL } from "../packages/worker-adapters/src/index.ts";
 
 async function main(): Promise<void> {
   const rootDir = await mkdtemp(join(tmpdir(), "aisa-run-detail-api-"));
@@ -52,7 +53,15 @@ async function main(): Promise<void> {
     success_criteria: ["Expose attempt result, evaluation, and runtime verification."],
     constraints: [],
     owner_id: "test-owner",
-    workspace_root: projectRoot
+    workspace_root: projectRoot,
+    harness_profile: {
+      execution: {
+        effort: "high"
+      },
+      reviewer: {
+        effort: "low"
+      }
+    }
   });
   const current = createCurrentDecision({
     run_id: run.id,
@@ -120,6 +129,32 @@ async function main(): Promise<void> {
     },
     current_decision: {
       summary: "Run completed with persisted execution evidence."
+    },
+    worker_effort: {
+      execution: {
+        requested_effort: "high",
+        default_effort: "medium",
+        source: "run.harness_profile.execution.effort",
+        status: "applied",
+        applied: true,
+        detail: CODEX_CLI_EXECUTION_EFFORT_APPLIED_DETAIL
+      },
+      reviewer: {
+        requested_effort: "low",
+        default_effort: "medium",
+        source: "run.harness_profile.reviewer.effort",
+        status: "unsupported",
+        applied: false,
+        detail: "当前 reviewer 入口不是独立 CLI 模型调用，effort 只会保留为配置记录。"
+      },
+      synthesizer: {
+        requested_effort: "medium",
+        default_effort: "medium",
+        source: "run.harness_profile.synthesizer.effort",
+        status: "unsupported",
+        applied: false,
+        detail: "当前 synthesizer 入口不是独立 CLI 模型调用，effort 只会保留为配置记录。"
+      }
     },
     previous_attempts: [
       {
@@ -649,6 +684,18 @@ async function main(): Promise<void> {
     assert.equal(response.statusCode, 200);
     assert.equal(staleResponse.statusCode, 200);
     const payload = response.json() as {
+      run: {
+        harness_profile: {
+          execution: { effort: string };
+          reviewer: { effort: string };
+          synthesizer: { effort: string };
+        };
+      };
+      worker_effort: {
+        execution: { requested_effort: string; status: string };
+        reviewer: { requested_effort: string; status: string };
+        synthesizer: { requested_effort: string; status: string };
+      };
       run_health: {
         status: string;
       };
@@ -659,6 +706,11 @@ async function main(): Promise<void> {
         context: {
           contract: { title: string };
           current_decision: { summary: string };
+          worker_effort: {
+            execution: { requested_effort: string; status: string };
+            reviewer: { requested_effort: string; status: string };
+            synthesizer: { requested_effort: string; status: string };
+          };
           previous_attempts: Array<{ id: string; status: string }>;
         } | null;
         failure_context: {
@@ -766,6 +818,15 @@ async function main(): Promise<void> {
       ["attempt.created", "attempt.started", "attempt.recovery_required"]
     );
     assert.equal(payload.run_health.status, "waiting_steer");
+    assert.equal(payload.run.harness_profile.execution.effort, "high");
+    assert.equal(payload.run.harness_profile.reviewer.effort, "low");
+    assert.equal(payload.run.harness_profile.synthesizer.effort, "medium");
+    assert.equal(payload.worker_effort.execution.requested_effort, "high");
+    assert.equal(payload.worker_effort.execution.status, "applied");
+    assert.equal(payload.worker_effort.reviewer.requested_effort, "low");
+    assert.equal(payload.worker_effort.reviewer.status, "unsupported");
+    assert.equal(payload.worker_effort.synthesizer.requested_effort, "medium");
+    assert.equal(payload.worker_effort.synthesizer.status, "unsupported");
     assert.equal(stalePayload.run_health.status, "stale_running_attempt");
     assert.equal(stalePayload.run_health.likely_zombie, true);
 
@@ -777,6 +838,9 @@ async function main(): Promise<void> {
     const runsPayload = runsResponse.json() as {
       runs: Array<{
         run: { id: string };
+        worker_effort: {
+          execution: { requested_effort: string; status: string };
+        };
         run_health: {
           status: string;
           likely_zombie: boolean;
@@ -785,6 +849,8 @@ async function main(): Promise<void> {
       }>;
     };
     const runSummary = runsPayload.runs.find((item) => item.run.id === run.id);
+    assert.equal(runSummary?.worker_effort.execution.requested_effort, "high");
+    assert.equal(runSummary?.worker_effort.execution.status, "applied");
     assert.equal(runSummary?.latest_attempt_runtime_state, null);
     assert.equal(runSummary?.run_health.status, "waiting_steer");
 

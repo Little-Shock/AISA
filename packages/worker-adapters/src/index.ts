@@ -21,6 +21,7 @@ import type {
   Goal,
   Run,
   VerificationCommand,
+  WorkerEffortLevel,
   WorkerWriteback
 } from "@autoresearch/domain";
 import {
@@ -57,6 +58,19 @@ export interface BranchExecutionResult {
   reportMarkdown: string;
   exitCode: number;
 }
+
+export const CODEX_CLI_EXECUTION_EFFORT_CONFIG_KEY = "model_reasoning_effort";
+export const CODEX_CLI_EXECUTION_EFFORT_APPLIED_DETAIL =
+  `当前 execution 入口会通过 Codex CLI 配置键 ${CODEX_CLI_EXECUTION_EFFORT_CONFIG_KEY} 原生透传 effort。`;
+
+export type CodexCliWorkerEffortSetting = {
+  requested_effort: WorkerEffortLevel;
+  default_effort: "medium";
+  source: string;
+  status: "applied" | "unsupported";
+  applied: boolean;
+  detail: string;
+};
 
 const RESEARCH_ALLOWED_COMMANDS = [
   "awk",
@@ -207,6 +221,12 @@ export async function prepareResearchShellGuard(input: {
     allowedCommands,
     blockedCommands: [...RESEARCH_BLOCKED_COMMANDS]
   };
+}
+
+export function buildCodexCliExecutionEffortConfigOverride(
+  effort: WorkerEffortLevel
+): string {
+  return `${CODEX_CLI_EXECUTION_EFFORT_CONFIG_KEY}=${JSON.stringify(effort)}`;
 }
 
 async function ensureResearchShellCommandLink(
@@ -1359,6 +1379,7 @@ export class CodexCliWorkerAdapter {
     attempt: Attempt;
     attemptContract: AttemptContract;
     context: unknown;
+    worker_effort?: CodexCliWorkerEffortSetting;
     workspacePaths: WorkspacePaths;
   }): Promise<BranchExecutionResult> {
     const { run, attempt, attemptContract, context, workspacePaths } = input;
@@ -1369,6 +1390,11 @@ export class CodexCliWorkerAdapter {
       this.config.sandbox,
       attempt.attempt_type
     );
+    const workerEffort =
+      input.worker_effort ??
+      resolveCodexCliWorkerEffort({
+        source: "run.harness_profile.execution.effort"
+      });
 
     await mkdir(attemptPaths.artifactsDir, { recursive: true });
 
@@ -1382,7 +1408,8 @@ export class CodexCliWorkerAdapter {
         workspace_root: attempt.workspace_root,
         objective: attempt.objective,
         success_criteria: attempt.success_criteria,
-        attempt_contract: attemptContract
+        attempt_contract: attemptContract,
+        worker_effort: workerEffort
       }),
       writeTextFile(promptFile, prompt)
     ]);
@@ -1408,6 +1435,13 @@ export class CodexCliWorkerAdapter {
 
     if (this.config.model) {
       args.push("-m", this.config.model);
+    }
+
+    if (workerEffort.applied && workerEffort.status === "applied") {
+      args.push(
+        "-c",
+        buildCodexCliExecutionEffortConfigOverride(workerEffort.requested_effort)
+      );
     }
 
     args.push("-");
@@ -1547,6 +1581,20 @@ export function loadCodexCliConfig(env: NodeJS.ProcessEnv): CodexCliConfig {
       env.AISA_CODEX_STALL_KILL_GRACE_MS ?? env.CODEX_STALL_KILL_GRACE_MS,
       5_000
     )
+  };
+}
+
+export function resolveCodexCliWorkerEffort(input: {
+  requestedEffort?: WorkerEffortLevel | null;
+  source?: string;
+} = {}): CodexCliWorkerEffortSetting {
+  return {
+    requested_effort: input.requestedEffort ?? "medium",
+    default_effort: "medium",
+    source: input.source ?? "run.harness_profile.execution.effort",
+    status: "applied",
+    applied: true,
+    detail: CODEX_CLI_EXECUTION_EFFORT_APPLIED_DETAIL
   };
 }
 

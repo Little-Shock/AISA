@@ -306,12 +306,14 @@ export async function buildServer(
       latestHeartbeat: latestAttemptDetail?.heartbeat ?? null,
       staleAfterMs: runHealthStaleMs
     });
+    const workerEffort = orchestrator.describeRunWorkerEffort(run);
 
     return {
       run,
       current,
       governance,
       run_health: runHealth,
+      worker_effort: workerEffort,
       attempts,
       attempt_details: attemptDetails,
       steers,
@@ -346,6 +348,7 @@ export async function buildServer(
       run,
       current,
       governance,
+      worker_effort: orchestrator.describeRunWorkerEffort(run),
       run_health: assessRunHealth({
         current,
         latestAttempt,

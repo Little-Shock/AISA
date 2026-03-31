@@ -21,6 +21,7 @@ import {
   updateRunGovernanceState,
   updateRunSteer,
   updateSteer,
+  resolveRunHarnessProfile,
   type Attempt,
   type AttemptContract,
   type AttemptContractDraft,
@@ -44,6 +45,7 @@ import {
   type Run,
   type RunGovernanceState,
   type VerificationCommand,
+  type WorkerEffortLevel,
   type WorkerWriteback
 } from "@autoresearch/domain";
 import { appendEvent } from "@autoresearch/event-log";
@@ -122,7 +124,11 @@ import {
   type WorkspacePaths
 } from "@autoresearch/state-store";
 import { ContextManager } from "@autoresearch/context-manager";
-import { CodexCliWorkerAdapter } from "@autoresearch/worker-adapters";
+import {
+  CodexCliWorkerAdapter,
+  resolveCodexCliWorkerEffort,
+  type CodexCliWorkerEffortSetting
+} from "@autoresearch/worker-adapters";
 import {
   captureAttemptCheckpointPreflight,
   maybeCreateVerifiedExecutionCheckpoint,
@@ -159,6 +165,7 @@ import { type RuntimeLayout } from "./runtime-layout.js";
 import {
   SELF_BOOTSTRAP_NEXT_TASK_ACTIVE_ENTRY_RELATIVE_PATH,
   SELF_BOOTSTRAP_NEXT_TASK_ACTIVE_ENTRY_SNAPSHOT_FILE_NAME,
+  loadSelfBootstrapNextTaskRecommendedAttemptDraft,
   parseSelfBootstrapNextTaskActiveEntry,
   type SelfBootstrapNextTaskActiveEntry
 } from "./self-bootstrap-next-task.js";
@@ -190,6 +197,21 @@ export type RuntimeRestartRequest = {
   affectedFiles: string[];
   message: string;
   promotedSha?: string | null;
+};
+
+export type RunWorkerEffortSlotView = {
+  requested_effort: WorkerEffortLevel;
+  default_effort: "medium";
+  source: string;
+  status: "applied" | "unsupported";
+  applied: boolean;
+  detail: string;
+};
+
+export type RunWorkerEffortView = {
+  execution: CodexCliWorkerEffortSetting;
+  reviewer: RunWorkerEffortSlotView;
+  synthesizer: RunWorkerEffortSlotView;
 };
 
 type RunDispatchLeaseRecord = {
@@ -466,6 +488,31 @@ export class Orchestrator {
     }
   }
 
+  describeRunWorkerEffort(run: Run): RunWorkerEffortView {
+    const harnessProfile = resolveRunHarnessProfile(run);
+
+    return {
+      execution: resolveCodexCliWorkerEffort({
+        requestedEffort: harnessProfile.execution.effort,
+        source: "run.harness_profile.execution.effort"
+      }),
+      reviewer: this.buildJudgeEffortView({
+        requestedEffort: harnessProfile.reviewer.effort,
+        source: "run.harness_profile.reviewer.effort",
+        usesCliTransport: this.reviewers.some(
+          (reviewer) => reviewer.reviewer.adapter !== "deterministic-heuristic"
+        ),
+        slot: "reviewer"
+      }),
+      synthesizer: this.buildJudgeEffortView({
+        requestedEffort: harnessProfile.synthesizer.effort,
+        source: "run.harness_profile.synthesizer.effort",
+        usesCliTransport: this.synthesizer.kind === "cli",
+        slot: "synthesizer"
+      })
+    };
+  }
+
   async tick(): Promise<void> {
     if (this.tickPromise) {
       return await this.tickPromise;
@@ -506,6 +553,24 @@ export class Orchestrator {
     }
 
     await this.tickRuns();
+  }
+
+  private buildJudgeEffortView(input: {
+    requestedEffort: WorkerEffortLevel;
+    source: string;
+    usesCliTransport: boolean;
+    slot: "reviewer" | "synthesizer";
+  }): RunWorkerEffortSlotView {
+    return {
+      requested_effort: input.requestedEffort,
+      default_effort: "medium",
+      source: input.source,
+      status: "unsupported",
+      applied: false,
+      detail: input.usesCliTransport
+        ? `当前 ${input.slot} CLI 入口还没有标准化的原生 effort 透传。`
+        : `当前 ${input.slot} 入口不是独立 CLI 模型调用，effort 只会保留为配置记录。`
+    };
   }
 
   async executeBranch(goalId: string, branchId: string): Promise<void> {
@@ -1156,6 +1221,7 @@ export class Orchestrator {
         this.workspacePaths,
         runId
       );
+      const workerEffort = this.describeRunWorkerEffort(run);
       const activeNextTask = await this.getSelfBootstrapActiveNextTaskContext(
         run,
         runId,
@@ -1182,6 +1248,7 @@ export class Orchestrator {
             id: runSteer.id,
             content: runSteer.content
           })),
+        worker_effort: workerEffort,
         previous_attempts: previousAttempts,
         ...(activeNextTask
           ? {
@@ -1276,6 +1343,8 @@ export class Orchestrator {
         attempt,
         attemptContract: preflightOutcome.dispatchableAttemptContract,
         context,
+        worker_effort:
+          attempt.attempt_type === "execution" ? workerEffort.execution : undefined,
         workspacePaths: this.workspacePaths
       });
 

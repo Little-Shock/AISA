@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { lstat, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -24,6 +24,12 @@ import {
 } from "../packages/orchestrator/src/index.js";
 import { ensureRunManagedWorkspace } from "../packages/orchestrator/src/run-workspace.js";
 import { createDefaultRunWorkspaceScopePolicy } from "../packages/orchestrator/src/workspace-scope.js";
+import {
+  buildCodexCliExecutionEffortConfigOverride,
+  CODEX_CLI_EXECUTION_EFFORT_APPLIED_DETAIL,
+  CodexCliWorkerAdapter,
+  resolveCodexCliWorkerEffort
+} from "../packages/worker-adapters/src/index.js";
 import { synthesizeAttemptEvaluation } from "../packages/judge/src/index.js";
 import {
   appendRunJournal,
@@ -729,14 +735,29 @@ class ScenarioAdapter {
 
 class ContextCaptureAdapter {
   readonly type = "fake-codex";
+  readonly capturedCalls: Array<{
+    attempt_id: string;
+    attempt_type: Attempt["attempt_type"];
+    context: unknown;
+    worker_effort: unknown;
+  }> = [];
 
   async runAttemptTask(input: {
     attempt: Attempt;
+    context?: unknown;
+    worker_effort?: unknown;
   }): Promise<{
     writeback: WorkerWriteback;
     reportMarkdown: string;
     exitCode: number;
   }> {
+    this.capturedCalls.push({
+      attempt_id: input.attempt.id,
+      attempt_type: input.attempt.attempt_type,
+      context: input.context ?? null,
+      worker_effort: input.worker_effort ?? null
+    });
+
     return {
       writeback: {
         summary: `Captured context for ${input.attempt.id}.`,
@@ -750,6 +771,58 @@ class ContextCaptureAdapter {
       exitCode: 0
     };
   }
+}
+
+async function createCodexArgCaptureScript(input: {
+  rootDir: string;
+  fileName: string;
+  argsFileName: string;
+  jsonPayload: string;
+}): Promise<{ scriptPath: string; argsPath: string }> {
+  const scriptPath = join(input.rootDir, input.fileName);
+  const argsPath = join(input.rootDir, input.argsFileName);
+  const lines = [
+    "#!/bin/sh",
+    `ARGS_PATH=${JSON.stringify(argsPath)}`,
+    ": > \"$ARGS_PATH\"",
+    "for arg in \"$@\"; do",
+    "  printf '%s\\n' \"$arg\" >> \"$ARGS_PATH\"",
+    "done",
+    "OUTPUT=\"\"",
+    "SAW_JSON=0",
+    "while [ \"$#\" -gt 0 ]; do",
+    "  if [ \"$1\" = \"--json\" ]; then",
+    "    SAW_JSON=1",
+    "    shift",
+    "    continue",
+    "  fi",
+    "  if [ \"$1\" = \"--output-last-message\" ]; then",
+    "    OUTPUT=\"$2\"",
+    "    shift 2",
+    "    continue",
+    "  fi",
+    "  shift",
+    "done",
+    "cat >/dev/null",
+    "if [ \"$SAW_JSON\" -ne 1 ]; then",
+    "  echo \"missing --json\" >&2",
+    "  exit 3",
+    "fi",
+    "if [ -z \"$OUTPUT\" ]; then",
+    "  echo \"missing --output-last-message\" >&2",
+    "  exit 2",
+    "fi",
+    "cat <<'EOF' > \"$OUTPUT\"",
+    input.jsonPayload,
+    "EOF",
+    "exit 0"
+  ];
+  await writeFile(scriptPath, lines.join("\n"), "utf8");
+  await chmod(scriptPath, 0o755);
+  return {
+    scriptPath,
+    argsPath
+  };
 }
 
 async function settle(input: {
@@ -1057,6 +1130,391 @@ async function assertMissingRuntimeHealthSnapshotDoesNotFabricateContext(): Prom
     Object.prototype.hasOwnProperty.call(context, "runtime_health_snapshot"),
     false,
     "missing_runtime_health_snapshot_context: runtime should not fabricate a health snapshot field"
+  );
+}
+
+async function assertExecutionHarnessEffortFlowsToDispatchContext(): Promise<void> {
+  const rootDir = await mkdtemp(join(tmpdir(), "aisa-execution-effort-context-"));
+  const workspacePaths = resolveWorkspacePaths(rootDir);
+  await ensureWorkspace(workspacePaths);
+  await initializeGitRepo(rootDir, false);
+
+  const run = createRun({
+    title: "execution-effort-context",
+    description: "Verify execution effort is read from the run harness profile.",
+    success_criteria: ["Expose execution effort in dispatch context."],
+    constraints: [],
+    owner_id: "test",
+    workspace_root: rootDir,
+    harness_profile: {
+      execution: {
+        effort: "high"
+      }
+    }
+  });
+  await saveRun(workspacePaths, run);
+  await saveCurrentDecision(
+    workspacePaths,
+    createCurrentDecision({
+      run_id: run.id,
+      run_status: "running",
+      recommended_next_action: "continue_execution",
+      recommended_attempt_type: "execution",
+      summary: "Bootstrapped for execution effort verification."
+    })
+  );
+  await appendRunJournal(
+    workspacePaths,
+    createRunJournalEntry({
+      run_id: run.id,
+      type: "run.created",
+      payload: {
+        title: run.title
+      }
+    })
+  );
+
+  const attempt = createAttempt({
+    run_id: run.id,
+    attempt_type: "execution",
+    worker: "fake-codex",
+    objective: "Verify execution effort wiring.",
+    success_criteria: run.success_criteria,
+    workspace_root: rootDir
+  });
+  await saveAttempt(workspacePaths, attempt);
+  await saveAttemptContract(
+    workspacePaths,
+    createAttemptContract({
+      attempt_id: attempt.id,
+      run_id: run.id,
+      attempt_type: attempt.attempt_type,
+      objective: attempt.objective,
+      success_criteria: attempt.success_criteria,
+      required_evidence: ["Expose execution effort in context and adapter input."],
+      expected_artifacts: ["runs/<run_id>/attempts/<attempt_id>/context.json"],
+      verification_plan: {
+        commands: [
+          {
+            purpose: "prove the test fixture reached runtime verification",
+            command: "test -n execution-effort-context"
+          }
+        ]
+      }
+    })
+  );
+  await saveCurrentDecision(
+    workspacePaths,
+    createCurrentDecision({
+      run_id: run.id,
+      run_status: "running",
+      latest_attempt_id: attempt.id,
+      recommended_next_action: "continue_execution",
+      recommended_attempt_type: "execution",
+      summary: "Prepared a pending execution attempt for effort verification."
+    })
+  );
+  await appendRunJournal(
+    workspacePaths,
+    createRunJournalEntry({
+      run_id: run.id,
+      attempt_id: attempt.id,
+      type: "attempt.created",
+      payload: {
+        attempt_type: attempt.attempt_type,
+        objective: attempt.objective
+      }
+    })
+  );
+
+  const adapter = new ContextCaptureAdapter();
+  const orchestrator = new Orchestrator(
+    workspacePaths,
+    adapter as never,
+    undefined,
+    60_000,
+    {
+      reviewerConfigs: [
+        {
+          kind: "heuristic",
+          reviewer_id: "heuristic-reviewer",
+          role: "runtime_reviewer"
+        }
+      ],
+      synthesizerConfig: {
+        kind: "deterministic"
+      }
+    }
+  );
+  await settle({
+    orchestrator,
+    workspacePaths,
+    runId: run.id,
+    iterations: 4
+  });
+
+  assert.equal(
+    adapter.capturedCalls.length,
+    1,
+    "execution_harness_effort_context: adapter should see exactly one execution dispatch"
+  );
+  assert.equal(
+    adapter.capturedCalls[0]?.attempt_type,
+    "execution",
+    "execution_harness_effort_context: captured dispatch should stay on execution"
+  );
+  assert.deepEqual(adapter.capturedCalls[0]?.worker_effort, {
+    requested_effort: "high",
+    default_effort: "medium",
+    source: "run.harness_profile.execution.effort",
+    status: "applied",
+    applied: true,
+    detail: CODEX_CLI_EXECUTION_EFFORT_APPLIED_DETAIL
+  });
+
+  const context = (await getAttemptContext(
+    workspacePaths,
+    run.id,
+    attempt.id
+  )) as Record<string, unknown> | null;
+  assert.ok(
+    context && typeof context === "object",
+    "execution_harness_effort_context: persisted context should exist"
+  );
+  assert.deepEqual(context?.worker_effort, {
+    execution: {
+      requested_effort: "high",
+      default_effort: "medium",
+      source: "run.harness_profile.execution.effort",
+      status: "applied",
+      applied: true,
+      detail: CODEX_CLI_EXECUTION_EFFORT_APPLIED_DETAIL
+    },
+    reviewer: {
+      requested_effort: "medium",
+      default_effort: "medium",
+      source: "run.harness_profile.reviewer.effort",
+      status: "unsupported",
+      applied: false,
+      detail: "当前 reviewer 入口不是独立 CLI 模型调用，effort 只会保留为配置记录。"
+    },
+    synthesizer: {
+      requested_effort: "medium",
+      default_effort: "medium",
+      source: "run.harness_profile.synthesizer.effort",
+      status: "unsupported",
+      applied: false,
+      detail: "当前 synthesizer 入口不是独立 CLI 模型调用，effort 只会保留为配置记录。"
+    }
+  });
+}
+
+async function assertExecutionEffortNativeConfigReachesCodexCli(): Promise<void> {
+  const rootDir = await mkdtemp(join(tmpdir(), "aisa-execution-effort-native-"));
+  const workspacePaths = resolveWorkspacePaths(rootDir);
+  await ensureWorkspace(workspacePaths);
+
+  const run = createRun({
+    title: "execution-effort-native-config",
+    description: "Verify execution effort reaches Codex CLI as a native config override.",
+    success_criteria: ["Pass the requested effort through the CLI config override."],
+    constraints: [],
+    owner_id: "test",
+    workspace_root: rootDir,
+    harness_profile: {
+      execution: {
+        effort: "high"
+      }
+    }
+  });
+  const attempt = createAttempt({
+    run_id: run.id,
+    attempt_type: "execution",
+    worker: "codex",
+    objective: "Verify native execution effort passthrough.",
+    success_criteria: run.success_criteria,
+    workspace_root: rootDir
+  });
+  const attemptContract = createAttemptContract({
+    attempt_id: attempt.id,
+    run_id: run.id,
+    attempt_type: attempt.attempt_type,
+    objective: attempt.objective,
+    success_criteria: attempt.success_criteria,
+    required_evidence: ["Pass the requested effort through the CLI config override."],
+    expected_artifacts: ["runs/<run_id>/attempts/<attempt_id>/task-spec.json"],
+    verification_plan: {
+      commands: [
+        {
+          purpose: "prove the native effort fixture reached the worker adapter",
+          command: "test -n execution-effort-native-config"
+        }
+      ]
+    }
+  });
+
+  const { scriptPath, argsPath } = await createCodexArgCaptureScript({
+    rootDir,
+    fileName: "fake-codex-native-effort.sh",
+    argsFileName: "fake-codex-native-effort.args.txt",
+    jsonPayload: JSON.stringify(
+      {
+        summary: "native effort 已透传。",
+        findings: [
+          {
+            type: "fact",
+            content: "execution 槽位已经附带原生 effort 配置。",
+            evidence: ["runs/<run_id>/attempts/<attempt_id>/task-spec.json"]
+          }
+        ],
+        questions: [],
+        recommended_next_steps: [],
+        confidence: 0.9,
+        artifacts: [
+          {
+            type: "patch",
+            path: "runs/<run_id>/attempts/<attempt_id>/artifacts/diff.patch"
+          }
+        ]
+      },
+      null,
+      2
+    )
+  });
+  const adapter = new CodexCliWorkerAdapter({
+    command: scriptPath,
+    sandbox: "workspace-write",
+    skipGitRepoCheck: true
+  });
+  const workerEffort = resolveCodexCliWorkerEffort({
+    requestedEffort: "high"
+  });
+
+  const result = await adapter.runAttemptTask({
+    run,
+    attempt,
+    attemptContract,
+    context: {},
+    worker_effort: workerEffort,
+    workspacePaths
+  });
+
+  assert.equal(
+    result.writeback.summary,
+    "native effort 已透传。",
+    "execution_effort_native_config: fake Codex run should complete"
+  );
+
+  const capturedArgs = (await readFile(argsPath, "utf8"))
+    .split("\n")
+    .filter((line) => line.length > 0);
+  const configFlagIndex = capturedArgs.indexOf("-c");
+  assert.notEqual(
+    configFlagIndex,
+    -1,
+    "execution_effort_native_config: adapter should pass -c"
+  );
+  assert.equal(
+    capturedArgs[configFlagIndex + 1],
+    buildCodexCliExecutionEffortConfigOverride("high"),
+    "execution_effort_native_config: adapter should use the confirmed native config key"
+  );
+
+  const taskSpec = JSON.parse(
+    await readFile(
+      join(resolveAttemptPaths(workspacePaths, run.id, attempt.id).attemptDir, "task-spec.json"),
+      "utf8"
+    )
+  ) as {
+    worker_effort: {
+      requested_effort: string;
+      status: string;
+      applied: boolean;
+      detail: string;
+    };
+  };
+  assert.equal(
+    taskSpec.worker_effort.requested_effort,
+    "high",
+    "execution_effort_native_config: task spec should keep the requested effort"
+  );
+  assert.equal(
+    taskSpec.worker_effort.status,
+    "applied",
+    "execution_effort_native_config: task spec should mark execution effort as applied"
+  );
+  assert.equal(
+    taskSpec.worker_effort.applied,
+    true,
+    "execution_effort_native_config: task spec should mark execution effort as applied"
+  );
+  assert.equal(
+    taskSpec.worker_effort.detail,
+    CODEX_CLI_EXECUTION_EFFORT_APPLIED_DETAIL,
+    "execution_effort_native_config: task spec should explain the native CLI passthrough"
+  );
+}
+
+async function assertCliJudgeEffortSettingsStayVisibleWhenUnsupported(): Promise<void> {
+  const rootDir = await mkdtemp(join(tmpdir(), "aisa-judge-effort-visibility-"));
+  const workspacePaths = resolveWorkspacePaths(rootDir);
+  await ensureWorkspace(workspacePaths);
+
+  const run = createRun({
+    title: "judge-effort-visibility",
+    description: "Verify reviewer and synthesizer effort stays machine-readable.",
+    success_criteria: ["Expose reviewer and synthesizer effort even when unsupported."],
+    constraints: [],
+    owner_id: "test",
+    workspace_root: rootDir,
+    harness_profile: {
+      reviewer: {
+        effort: "low"
+      },
+      synthesizer: {
+        effort: "high"
+      }
+    }
+  });
+  const orchestrator = new Orchestrator(
+    workspacePaths,
+    new ContextCaptureAdapter() as never,
+    undefined,
+    60_000,
+    {
+      reviewerConfigs: [
+        {
+          kind: "cli",
+          reviewer_id: "cli-reviewer",
+          role: "runtime_reviewer",
+          command: process.execPath,
+          args: ["-e", "process.exit(0)"]
+        }
+      ],
+      synthesizerConfig: {
+        kind: "cli",
+        synthesizer_id: "cli-synth",
+        role: "runtime_synthesizer",
+        command: process.execPath,
+        args: ["-e", "process.exit(0)"]
+      }
+    }
+  );
+  const workerEffort = orchestrator.describeRunWorkerEffort(run);
+
+  assert.equal(workerEffort.reviewer.requested_effort, "low");
+  assert.equal(workerEffort.reviewer.status, "unsupported");
+  assert.match(
+    workerEffort.reviewer.detail,
+    /reviewer CLI 入口/u,
+    "judge_effort_visibility: reviewer detail should explain the unsupported CLI transport"
+  );
+  assert.equal(workerEffort.synthesizer.requested_effort, "high");
+  assert.equal(workerEffort.synthesizer.status, "unsupported");
+  assert.match(
+    workerEffort.synthesizer.detail,
+    /synthesizer CLI 入口/u,
+    "judge_effort_visibility: synthesizer detail should explain the unsupported CLI transport"
   );
 }
 
@@ -3818,7 +4276,12 @@ function parseNdjson<T>(text: string): T[] {
 }
 
 async function assertPersistedPostRestartPromptChain(): Promise<void> {
-  const runtimeDataRoot = resolve(process.cwd(), ".aisa-runtime");
+  const runtimeDataRoot = resolve(
+    process.cwd(),
+    "testdata",
+    "verify-run-loop",
+    "post-restart-prompt-chain"
+  );
   const reportPath = join(
     runtimeDataRoot,
     "runs",
@@ -4005,6 +4468,48 @@ async function main(): Promise<void> {
   } catch (error) {
     results.push({
       id: "missing_runtime_health_snapshot_context",
+      status: "fail",
+      error: error instanceof Error ? error.message : String(error)
+    });
+  }
+
+  try {
+    await assertExecutionHarnessEffortFlowsToDispatchContext();
+    results.push({
+      id: "execution_harness_effort_context",
+      status: "pass"
+    });
+  } catch (error) {
+    results.push({
+      id: "execution_harness_effort_context",
+      status: "fail",
+      error: error instanceof Error ? error.message : String(error)
+    });
+  }
+
+  try {
+    await assertExecutionEffortNativeConfigReachesCodexCli();
+    results.push({
+      id: "execution_effort_native_config",
+      status: "pass"
+    });
+  } catch (error) {
+    results.push({
+      id: "execution_effort_native_config",
+      status: "fail",
+      error: error instanceof Error ? error.message : String(error)
+    });
+  }
+
+  try {
+    await assertCliJudgeEffortSettingsStayVisibleWhenUnsupported();
+    results.push({
+      id: "cli_judge_effort_visibility",
+      status: "pass"
+    });
+  } catch (error) {
+    results.push({
+      id: "cli_judge_effort_visibility",
       status: "fail",
       error: error instanceof Error ? error.message : String(error)
     });

@@ -67,6 +67,39 @@ export const BudgetSchema = z.object({
   max_concurrency: z.number().int().positive()
 });
 
+export const WorkerEffortLevelValues = ["low", "medium", "high"] as const;
+export const WorkerEffortLevelSchema = z.enum(WorkerEffortLevelValues);
+
+export const RunHarnessEffortPreferenceSchema = z.object({
+  effort: WorkerEffortLevelSchema.default("medium")
+});
+
+const DEFAULT_RUN_HARNESS_PROFILE = {
+  version: 1 as const,
+  execution: {
+    effort: "medium" as const
+  },
+  reviewer: {
+    effort: "medium" as const
+  },
+  synthesizer: {
+    effort: "medium" as const
+  }
+};
+
+export const RunHarnessProfileSchema = z.object({
+  version: z.number().int().min(1).max(1).default(1),
+  execution: RunHarnessEffortPreferenceSchema.default(
+    DEFAULT_RUN_HARNESS_PROFILE.execution
+  ),
+  reviewer: RunHarnessEffortPreferenceSchema.default(
+    DEFAULT_RUN_HARNESS_PROFILE.reviewer
+  ),
+  synthesizer: RunHarnessEffortPreferenceSchema.default(
+    DEFAULT_RUN_HARNESS_PROFILE.synthesizer
+  )
+});
+
 export const GoalSchema = z.object({
   id: z.string(),
   title: z.string().min(1),
@@ -90,6 +123,7 @@ export const RunSchema = z.object({
   owner_id: z.string(),
   workspace_root: z.string().min(1),
   managed_workspace_root: z.string().min(1).nullable().default(null),
+  harness_profile: RunHarnessProfileSchema.default(DEFAULT_RUN_HARNESS_PROFILE),
   budget: BudgetSchema,
   created_at: z.string().datetime(),
   updated_at: z.string().datetime()
@@ -767,6 +801,11 @@ export type BranchSpec = z.infer<typeof BranchSpecSchema>;
 export type EvalSpec = z.infer<typeof EvalSpecSchema>;
 export type VerificationCommand = z.infer<typeof VerificationCommandSchema>;
 export type ExecutionVerificationPlan = z.infer<typeof ExecutionVerificationPlanSchema>;
+export type WorkerEffortLevel = z.infer<typeof WorkerEffortLevelSchema>;
+export type RunHarnessEffortPreference = z.infer<
+  typeof RunHarnessEffortPreferenceSchema
+>;
+export type RunHarnessProfile = z.infer<typeof RunHarnessProfileSchema>;
 export type AttemptDoneRubricItem = z.infer<typeof AttemptDoneRubricItemSchema>;
 export type AttemptFailureMode = z.infer<typeof AttemptFailureModeSchema>;
 export type AttemptContractDraft = z.infer<typeof AttemptContractDraftSchema>;
@@ -901,6 +940,20 @@ export function createRun(input: CreateRunInput): Run {
     created_at: now,
     updated_at: now
   });
+}
+
+export function createDefaultRunHarnessProfile(): RunHarnessProfile {
+  return RunHarnessProfileSchema.parse(DEFAULT_RUN_HARNESS_PROFILE);
+}
+
+export function resolveRunHarnessProfile(
+  input?:
+    | {
+        harness_profile?: RunHarnessProfile | null;
+      }
+    | null
+): RunHarnessProfile {
+  return RunHarnessProfileSchema.parse(input?.harness_profile ?? undefined);
 }
 
 export function updateRun(run: Run, patch: Partial<Run>): Run {

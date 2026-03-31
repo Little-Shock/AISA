@@ -1,0 +1,88 @@
+{
+  "report_version": 1,
+  "run_id": "run_3374dc3f",
+  "attempt_id": "att_cccd2297",
+  "legacy_execution_attempt_id": "att_d62b75b4",
+  "post_restart_execution_attempt_id": "att_cccd2297",
+  "guard_strings": {
+    "findings_guard": "Allowed findings.type values: \"fact\", \"hypothesis\", \"risk\". Do not invent values like \"gap\".",
+    "artifacts_guard": "artifacts must be an array of objects with stable keys. Allowed artifacts[].type values: \"patch\", \"command_result\", \"test_result\", \"report\", \"log\", \"screenshot\".",
+    "artifact_example": "Copy this artifacts object shape when you have one: {\"type\":\"patch\",\"path\":\"runs/<run_id>/attempts/<attempt_id>/artifacts/diff.patch\"}",
+    "plain_string_guard": "Do not return artifacts as plain strings like \"artifacts/diff.patch\"."
+  },
+  "restart_transition": {
+    "manual_recovery_event_id": "rje_4f493cc4",
+    "run_launch_event_id": "rje_111637d8",
+    "new_attempt_started_at": "2026-03-26T16:27:07.525Z"
+  },
+  "evidence_chain": [
+    {
+      "id": "legacy_prompt_missing_findings_guard",
+      "path": "runs/run_3374dc3f/attempts/att_d62b75b4/worker-prompt.md",
+      "check": "must_not_include",
+      "value": "Allowed findings.type values: \"fact\", \"hypothesis\", \"risk\". Do not invent values like \"gap\"."
+    },
+    {
+      "id": "legacy_prompt_missing_artifacts_guard",
+      "path": "runs/run_3374dc3f/attempts/att_d62b75b4/worker-prompt.md",
+      "check": "must_not_include",
+      "value": "artifacts must be an array of objects with stable keys. Allowed artifacts[].type values: \"patch\", \"command_result\", \"test_result\", \"report\", \"log\", \"screenshot\"."
+    },
+    {
+      "id": "legacy_schema_failure_records_string_artifacts",
+      "path": "runs/run_3374dc3f/attempts/att_d62b75b4/review_packet.json",
+      "check": "must_include",
+      "value": "Expected object, received string"
+    },
+    {
+      "id": "research_identified_old_runtime_dispatch",
+      "path": "runs/run_3374dc3f/attempts/att_60ace537/result.json",
+      "check": "must_include",
+      "value": "旧内存态派发了这次 execution"
+    },
+    {
+      "id": "manual_recovery_promoted_the_post_restart_execution",
+      "path": "runs/run_3374dc3f/journal.ndjson",
+      "check": "must_include",
+      "value": "\"type\":\"run.manual_recovery\""
+    },
+    {
+      "id": "post_restart_prompt_has_findings_guard",
+      "path": "runs/run_3374dc3f/attempts/att_cccd2297/worker-prompt.md",
+      "check": "must_include",
+      "value": "Allowed findings.type values: \"fact\", \"hypothesis\", \"risk\". Do not invent values like \"gap\"."
+    },
+    {
+      "id": "post_restart_prompt_has_artifacts_guard",
+      "path": "runs/run_3374dc3f/attempts/att_cccd2297/worker-prompt.md",
+      "check": "must_include",
+      "value": "artifacts must be an array of objects with stable keys. Allowed artifacts[].type values: \"patch\", \"command_result\", \"test_result\", \"report\", \"log\", \"screenshot\"."
+    },
+    {
+      "id": "post_restart_prompt_has_artifact_example",
+      "path": "runs/run_3374dc3f/attempts/att_cccd2297/worker-prompt.md",
+      "check": "must_include",
+      "value": "Copy this artifacts object shape when you have one: {\"type\":\"patch\",\"path\":\"runs/<run_id>/attempts/<attempt_id>/artifacts/diff.patch\"}"
+    },
+    {
+      "id": "post_restart_prompt_forbids_plain_string_artifacts",
+      "path": "runs/run_3374dc3f/attempts/att_cccd2297/worker-prompt.md",
+      "check": "must_include",
+      "value": "Do not return artifacts as plain strings like \"artifacts/diff.patch\"."
+    }
+  ],
+  "replay_commands": [
+    {
+      "purpose": "验证当前 worker prompt 模板和坏写回护栏",
+      "command": "pnpm verify:worker-adapter"
+    },
+    {
+      "purpose": "验证 runtime source drift 与 post-restart prompt 证据链",
+      "command": "pnpm verify:run-loop"
+    },
+    {
+      "purpose": "验证 restart_required 不会被自动续跑越过",
+      "command": "pnpm verify:run-autonomy"
+    }
+  ]
+}

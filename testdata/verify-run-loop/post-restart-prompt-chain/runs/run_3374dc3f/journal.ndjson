@@ -1,0 +1,3 @@
+{"id":"rje_4f493cc4","run_id":"run_3374dc3f","attempt_id":null,"ts":"2026-03-26T16:27:01.000Z","type":"run.manual_recovery","payload":{"reason":"runtime source drift"}}
+{"id":"rje_111637d8","run_id":"run_3374dc3f","attempt_id":null,"ts":"2026-03-26T16:27:05.000Z","type":"run.launched","payload":{"template":"self-bootstrap"}}
+{"id":"rje_restart_started","run_id":"run_3374dc3f","attempt_id":"att_cccd2297","ts":"2026-03-26T16:27:07.525Z","type":"attempt.started","payload":{"attempt_type":"execution"}}

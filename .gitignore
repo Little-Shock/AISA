@@ -15,5 +15,8 @@ artifacts/
 reports/
 plans/
 runs/
+!testdata/verify-run-loop/post-restart-prompt-chain/
+!testdata/verify-run-loop/post-restart-prompt-chain/runs/
+!testdata/verify-run-loop/post-restart-prompt-chain/runs/**
 
 *.tsbuildinfo

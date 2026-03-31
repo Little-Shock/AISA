@@ -1,0 +1,6 @@
+{
+  "failure_context": {
+    "message": "Worker writeback rejected malformed artifacts payload.",
+    "details": "Expected object, received string"
+  }
+}
