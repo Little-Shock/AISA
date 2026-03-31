@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import {
   createAttempt,
   createAttemptContract,
@@ -17,7 +17,8 @@ import {
 import { maybeCreateVerifiedExecutionCheckpoint } from "../packages/orchestrator/src/git-checkpoint.js";
 import {
   buildGovernanceCheckpointContext,
-  buildGovernanceSignature
+  buildGovernanceSignature,
+  validateGovernedAttemptCandidate
 } from "../packages/orchestrator/src/governance.js";
 import { Orchestrator } from "../packages/orchestrator/src/index.js";
 import {
@@ -473,6 +474,31 @@ async function verifyMissingArtifactReferenceBlocksDispatch(): Promise<void> {
   );
 }
 
+async function verifyFullwidthPunctuationArtifactReferenceIsAccepted(): Promise<void> {
+  const { run, rootDir } = await bootstrapRun("fullwidth-artifact-ref");
+  const artifactPath = join(rootDir, "runs", run.id, "artifacts", "runtime-health-snapshot.json");
+  await mkdir(dirname(artifactPath), { recursive: true });
+  await writeFile(artifactPath, JSON.stringify({ ok: true }, null, 2) + "\n", "utf8");
+
+  const decision = await validateGovernedAttemptCandidate({
+    governance: null,
+    candidate: {
+      attemptType: "research",
+      objective: [
+        "继续分析当前运行时状态。",
+        `快照来源锚点：${artifactPath}。`,
+        `相对引用也要成立：runs/${run.id}/artifacts/runtime-health-snapshot.json。`
+      ].join("\n"),
+      nextAction: "continue_research",
+      nextExecutionDraft: null
+    },
+    rootDir
+  });
+
+  assert.equal(decision.status, "ok", "existing artifact refs with Chinese punctuation should stay valid");
+  assert.deepEqual(decision.invalidRefs, []);
+}
+
 async function verifyCheckpointIncludesGovernanceContext(): Promise<void> {
   const { run, workspacePaths, rootDir } = await bootstrapRun("checkpoint-context");
   await writeExecutionWorkspacePackage(rootDir);
@@ -566,6 +592,10 @@ async function main(): Promise<void> {
     {
       id: "missing_artifact_reference_blocks_dispatch",
       run: verifyMissingArtifactReferenceBlocksDispatch
+    },
+    {
+      id: "fullwidth_punctuation_artifact_reference_is_accepted",
+      run: verifyFullwidthPunctuationArtifactReferenceIsAccepted
     },
     {
       id: "checkpoint_includes_governance_context",

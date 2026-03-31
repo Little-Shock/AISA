@@ -739,6 +739,39 @@ async function waitForRunningAttemptsToSettle(
   }
 }
 
+async function waitForRunCondition(input: {
+  workspacePaths: ReturnType<typeof resolveWorkspacePaths>;
+  runId: string;
+  predicate: (snapshot: {
+    current: Awaited<ReturnType<typeof getCurrentDecision>>;
+    attempts: Awaited<ReturnType<typeof listAttempts>>;
+  }) => boolean;
+  timeoutMs?: number;
+  failureMessage: string;
+}): Promise<void> {
+  const deadline = Date.now() + (input.timeoutMs ?? 3_000);
+
+  while (Date.now() < deadline) {
+    const [current, attempts] = await Promise.all([
+      getCurrentDecision(input.workspacePaths, input.runId),
+      listAttempts(input.workspacePaths, input.runId)
+    ]);
+
+    if (
+      input.predicate({
+        current,
+        attempts
+      })
+    ) {
+      return;
+    }
+
+    await sleep(50);
+  }
+
+  throw new Error(input.failureMessage);
+}
+
 async function isRunQuiescent(
   workspacePaths: ReturnType<typeof resolveWorkspacePaths>,
   runId: string
@@ -1128,6 +1161,19 @@ async function assertMultiReviewerPipelinePersistsOpinionsAndSynthesizesEvaluati
     });
   });
 
+  await waitForRunCondition({
+    workspacePaths,
+    runId: run.id,
+    failureMessage:
+      "multi_reviewer_pipeline: research attempt did not settle to the execution-ready state",
+    predicate: ({ current, attempts }) =>
+      current?.recommended_next_action === "start_execution" &&
+      current.latest_attempt_id !== null &&
+      attempts.some(
+        (attempt) => attempt.attempt_type === "research" && attempt.status === "completed"
+      )
+  });
+
   const attempts = await listAttempts(workspacePaths, run.id);
   const researchAttempt = attempts.find(
     (attempt) => attempt.attempt_type === "research" && attempt.status === "completed"
@@ -1362,6 +1408,19 @@ async function assertCliSynthesizerPersistsArtifactAndFinalizesEvaluation(): Pro
     });
   });
 
+  await waitForRunCondition({
+    workspacePaths,
+    runId: run.id,
+    failureMessage:
+      "cli_synthesizer_pipeline: research attempt did not settle to the execution-ready state",
+    predicate: ({ current, attempts }) =>
+      current?.recommended_next_action === "start_execution" &&
+      current.latest_attempt_id !== null &&
+      attempts.some(
+        (attempt) => attempt.attempt_type === "research" && attempt.status === "completed"
+      )
+  });
+
   const attempts = await listAttempts(workspacePaths, run.id);
   const researchAttempt = attempts.find(
     (attempt) => attempt.attempt_type === "research" && attempt.status === "completed"
@@ -1567,6 +1626,18 @@ async function runCliSynthesizerFailureCase(
         iterations: 2
       });
     });
+  });
+
+  await waitForRunCondition({
+    workspacePaths,
+    runId: run.id,
+    failureMessage: `cli_synthesizer_${mode}: expected a failed research attempt to settle`,
+    predicate: ({ current, attempts }) =>
+      current?.recommended_next_action === "wait_for_human" &&
+      current.waiting_for_human === true &&
+      attempts.some(
+        (attempt) => attempt.attempt_type === "research" && attempt.status === "failed"
+      )
   });
 
   const attempts = await listAttempts(workspacePaths, run.id);
@@ -1905,6 +1976,18 @@ async function runCliReviewerFailureCase(
       runId: run.id,
       iterations: 2
     });
+  });
+
+  await waitForRunCondition({
+    workspacePaths,
+    runId: run.id,
+    failureMessage: `cli_reviewer_${mode}: expected a failed research attempt to settle`,
+    predicate: ({ current, attempts }) =>
+      current?.recommended_next_action === "wait_for_human" &&
+      current.waiting_for_human === true &&
+      attempts.some(
+        (attempt) => attempt.attempt_type === "research" && attempt.status === "failed"
+      )
   });
 
   const attempts = await listAttempts(workspacePaths, run.id);
@@ -2707,7 +2790,20 @@ async function runConcurrentOwnerCase(input: {
   await primary.tick();
   await new Promise((resolve) => setTimeout(resolve, 50));
   await secondary.tick();
-  await new Promise((resolve) => setTimeout(resolve, 350));
+  await waitForRunningAttemptsToSettle(input.workspacePaths, input.run.id, 3_000);
+  await waitForRunCondition({
+    workspacePaths: input.workspacePaths,
+    runId: input.run.id,
+    failureMessage:
+      "concurrent owner case did not settle to the post-research execution state",
+    predicate: ({ current, attempts }) =>
+      current?.run_status === "running" &&
+      current.waiting_for_human === false &&
+      current.recommended_next_action === "start_execution" &&
+      attempts.some(
+        (attempt) => attempt.attempt_type === "research" && attempt.status === "completed"
+      )
+  });
 
   const persistedRun = await getRun(input.workspacePaths, input.run.id);
   assert.equal(persistedRun.id, input.run.id, "concurrent owner case: persisted run missing");

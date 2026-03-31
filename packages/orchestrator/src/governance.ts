@@ -337,7 +337,7 @@ export function deriveRunGovernanceState(input: {
 }
 
 function stripTrailingPunctuation(value: string): string {
-  return value.replace(/[),.;:\]}>"'`]+$/gu, "");
+  return value.replace(/[),.;:\]}>"'`，。；：！？、）】》」』〕〉］｝｣｡．]+$/gu, "");
 }
 
 export function extractRepoArtifactReferences(input: {
