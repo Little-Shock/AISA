@@ -25,6 +25,12 @@ export function AttemptCard({
       const verdict = command.passed ? "通过" : "失败";
       return `${verdict} · ${command.purpose} · ${command.command} · ${command.exit_code}/${command.expected_exit_code}`;
     }) ?? [];
+  const resultFindings =
+    detail.result?.findings.map((finding) => {
+      const evidence =
+        finding.evidence.length > 0 ? ` · 证据 ${finding.evidence.join(" / ")}` : "";
+      return `${localizeUiText(finding.type)} · ${localizeUiText(finding.content)}${evidence}`;
+    }) ?? [];
 
   return (
     <article className="attempt-card">
@@ -61,6 +67,7 @@ export function AttemptCard({
           label="回放"
           value={statusLabel(detail.runtime_verification?.status ?? "未运行")}
         />
+        <MiniMetric label="发现" value={String(detail.result?.findings.length ?? 0)} />
       </div>
 
       <div className="attempt-grid">
@@ -89,6 +96,7 @@ export function AttemptCard({
           <p className="body-copy">
             {localizeUiText(detail.result?.summary ?? "还没有写回结果。")}
           </p>
+          <SectionList title="关键发现" items={resultFindings} />
           <SectionList title="下一步" items={detail.result?.recommended_next_steps ?? []} />
           <SectionList title="判断缺口" items={detail.evaluation?.missing_evidence ?? []} />
           <SectionList title="运行时回放" items={replayCommands} />

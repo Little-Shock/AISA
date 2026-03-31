@@ -26,6 +26,10 @@ import {
 } from "./dashboard-primitives";
 import type { RunDetail, RunOperatorState, RunSummaryItem } from "./dashboard-types";
 
+function runHealthLabel(status: string | null | undefined): string {
+  return status ? statusLabel(status) : "未知";
+}
+
 export function RunOverviewPanel({
   runDetail,
   selectedRun,
@@ -59,6 +63,16 @@ export function RunOverviewPanel({
 }) {
   const signalBadges = deriveRunSignalBadges(selectedRun, nowTs);
   const operatorChecklist = deriveRunOperatorChecklist(selectedRun, nowTs);
+  const governance = runDetail.governance;
+  const runHealth = runDetail.run_health;
+  const governanceStatus = governance ? statusLabel(governance.status) : "未建立";
+  const healthStatus = runHealthLabel(runHealth?.status);
+  const latestActivityLabel = runHealth?.latest_activity_at
+    ? formatRelativeTime(runHealth.latest_activity_at, nowTs)
+    : "暂无";
+  const heartbeatLabel = selectedRunHeartbeat?.heartbeat_at
+    ? formatRelativeTime(selectedRunHeartbeat.heartbeat_at, nowTs)
+    : "暂无";
 
   return (
     <Panel
@@ -69,7 +83,7 @@ export function RunOverviewPanel({
           <Button
             type="button"
             variant="outline"
-            className="h-10 rounded-full border-emerald-900/12 bg-emerald-900/6 px-5 text-[var(--emerald)]"
+            className="h-10 px-5 font-pixel text-[10px] tracking-[0.16em] text-[var(--emerald)]"
             onClick={onRefresh}
           >
             {refreshLabel}
@@ -111,8 +125,12 @@ export function RunOverviewPanel({
           label="下一动作"
           value={nextActionLabel(runDetail.current?.recommended_next_action)}
         />
+        <InfoCard label="治理状态" value={governanceStatus} />
+        <InfoCard label="运行健康" value={healthStatus} />
         <InfoCard label="最新尝试" value={runDetail.current?.latest_attempt_id ?? "暂无"} />
         <InfoCard label="尝试数量" value={String(runDetail.attempts.length)} />
+        <InfoCard label="治理主线" value={governance?.mainline_attempt_id ?? "暂无"} />
+        <InfoCard label="最新活动" value={latestActivityLabel} />
         <InfoCard label="状态更新时间" value={formatDateTime(selectedRunCurrentUpdatedAt)} />
         <InfoCard label="负责人" value={runDetail.run.owner_id} />
         <InfoCard label="工作区" value={runDetail.run.workspace_root} />
@@ -125,9 +143,7 @@ export function RunOverviewPanel({
         <InfoCard
           label="心跳"
           value={
-            selectedRunHeartbeat?.heartbeat_at
-              ? `最近 ${formatRelativeTime(selectedRunHeartbeat.heartbeat_at, nowTs)}`
-              : "暂无"
+            selectedRunHeartbeat?.heartbeat_at ? `最近 ${heartbeatLabel}` : "暂无"
           }
         />
       </div>
@@ -140,6 +156,22 @@ export function RunOverviewPanel({
           title={selectedRunOperatorState.kind === "needs_action" ? "当前需介入" : "当前需排查"}
         >
           {selectedRunOperatorState.recovery_hint}
+        </Callout>
+      ) : null}
+
+      {governance?.status === "blocked" ? (
+        <Callout tone="rose" title="治理阻塞">
+          {localizeUiText(
+            governance.context_summary.blocker_summary ??
+              governance.active_problem_summary ??
+              governance.context_summary.headline
+          )}
+        </Callout>
+      ) : null}
+
+      {runHealth?.status === "stale_running_attempt" ? (
+        <Callout tone="rose" title="疑似僵尸运行">
+          {localizeUiText(runHealth.summary)}
         </Callout>
       ) : null}
 
@@ -172,6 +204,16 @@ export function RunOverviewPanel({
           />
           <SectionList title="最近活动" items={selectedRunRuntimeState?.recent_activities ?? []} />
           <SectionList title="已完成步骤" items={selectedRunRuntimeState?.completed_steps ?? []} />
+          <SectionList
+            title="治理主线"
+            items={[
+              `治理状态：${governanceStatus}`,
+              `主线摘要：${localizeUiText(governance?.mainline_summary ?? "暂无")}`,
+              `主线类型：${governance?.mainline_attempt_type ? attemptTypeLabel(governance.mainline_attempt_type) : "暂无"}`,
+              `主线尝试：${governance?.mainline_attempt_id ?? "暂无"}`,
+              `最近有效进展：${governance?.last_meaningful_progress_at ? formatRelativeTime(governance.last_meaningful_progress_at, nowTs) : "暂无"}`
+            ]}
+          />
           <CodeBlock
             title="过程内容"
             value={
@@ -187,6 +229,8 @@ export function RunOverviewPanel({
               ...runDetail.run.constraints.map((constraint) => localizeUiText(constraint))
             ]}
           />
+          <SectionList title="允许动作" items={governance?.next_allowed_actions ?? []} />
+          <SectionList title="避免重复" items={governance?.context_summary.avoid_summary ?? []} />
         </SubPanel>
 
         <SubPanel title="当前判断" accent="amber">
@@ -204,7 +248,20 @@ export function RunOverviewPanel({
               `实时阶段：${runtimePhaseLabel(selectedRunRuntimeState?.phase)}`,
               `最近事件：${selectedRunRuntimeState?.last_event_at ? formatRelativeTime(selectedRunRuntimeState.last_event_at, nowTs) : "暂无"}`,
               `事件总数：${String(selectedRunRuntimeState?.event_count ?? 0)}`,
-              `介入等级：${selectedRunOperatorState?.label ?? "暂无"}`
+              `介入等级：${selectedRunOperatorState?.label ?? "暂无"}`,
+              `治理状态：${governanceStatus}`,
+              `运行健康：${healthStatus}`
+            ]}
+          />
+          <SectionList
+            title="治理与健康快照"
+            items={[
+              `治理摘要：${localizeUiText(governance?.context_summary.headline ?? "暂无治理摘要")}`,
+              `阻塞重复次数：${String(governance?.blocker_repeat_count ?? 0)}`,
+              `排除计划数：${String(governance?.excluded_plans.length ?? 0)}`,
+              `最新活动：${latestActivityLabel}`,
+              `心跳：${selectedRunHeartbeat?.heartbeat_at ? heartbeatLabel : "暂无"}`,
+              `疑似僵尸：${runHealth?.likely_zombie ? "是" : "否"}`
             ]}
           />
           <SectionList
@@ -222,6 +279,24 @@ export function RunOverviewPanel({
           <CodeBlock
             title="恢复提示"
             value={selectedRunOperatorState?.recovery_hint ?? "当前没有明确恢复建议。"}
+          />
+          <CodeBlock
+            title="治理摘要"
+            value={[
+              `治理状态：${governanceStatus}`,
+              `健康状态：${healthStatus}`,
+              `更新时间：${formatDateTime(governance?.updated_at)}`,
+              `摘要生成：${formatDateTime(governance?.context_summary.generated_at)}`,
+              "",
+              localizeUiText(governance?.context_summary.headline ?? "尚未建立治理结论。"),
+              governance?.context_summary.progress_summary
+                ? `\n进展：${localizeUiText(governance.context_summary.progress_summary)}`
+                : "",
+              governance?.context_summary.blocker_summary
+                ? `\n阻塞：${localizeUiText(governance.context_summary.blocker_summary)}`
+                : "",
+              runHealth?.summary ? `\nHealth：${localizeUiText(runHealth.summary)}` : ""
+            ].join("")}
           />
           <CodeBlock
             title="最终输出"
@@ -330,7 +405,7 @@ export function RunSteerPanel({
         </div>
         <Button
           type="button"
-          className="mt-2 h-11 w-full rounded-full"
+          className="mt-2 h-11 w-full font-pixel text-[10px] tracking-[0.16em]"
           onClick={onSubmit}
           disabled={busy || !steerText.trim()}
         >
@@ -501,7 +576,7 @@ function TextAreaForSteer({
           "例如：下一轮先验证回放约定是否成立，再决定是否继续 execution；不要直接重试相同步骤。"
         )}
         onChange={(event) => onChange(event.target.value)}
-        className="min-h-[132px] rounded-[1.15rem] border-black/10 bg-[rgba(255,252,247,0.92)] px-4 py-3 leading-7 text-[var(--ink)] shadow-none"
+        className="min-h-[132px] border-2 border-amber-400/60 bg-[rgba(7,14,27,0.94)] px-4 py-3 font-mono leading-7 text-[var(--ink)] shadow-[4px_4px_0_0_rgba(251,191,36,0.24)]"
         rows={5}
       />
     </label>

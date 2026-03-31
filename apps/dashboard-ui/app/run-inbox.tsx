@@ -84,6 +84,10 @@ const PRESET_OPTIONS: Array<{
   }
 ];
 
+function runHealthLabel(status: string | null | undefined): string {
+  return status ? statusLabel(status) : "未知";
+}
+
 function selectionTone(
   activeFilter: RunInboxFilter,
   focusLens: RunFocusLens
@@ -402,6 +406,10 @@ export function RunInboxPanel({
               ),
               110
             );
+            const governanceHeadline = truncateText(
+              localizeUiText(item.governance?.context_summary.headline ?? ""),
+              110
+            );
             const workspaceLabel = abbreviateWorkspace(item.run.workspace_root);
             const latestRunSignalAt =
               item.current?.updated_at ??
@@ -417,6 +425,8 @@ export function RunInboxPanel({
               ),
               110
             );
+            const governanceStatus = item.governance ? statusLabel(item.governance.status) : "未建";
+            const healthStatus = runHealthLabel(item.run_health?.status);
 
             return (
               <button
@@ -469,6 +479,19 @@ export function RunInboxPanel({
                   <span className="run-card-chip">
                     阶段 {runtimePhaseLabel(runtimeState?.phase)}
                   </span>
+                  <span className="run-card-chip run-card-chip-system">治理 {governanceStatus}</span>
+                  <span
+                    className={`run-card-chip ${
+                      item.run_health?.status === "stale_running_attempt"
+                        ? "run-card-chip-rose"
+                        : item.run_health?.status === "waiting_steer" ||
+                            item.run_health?.status === "unknown"
+                          ? "run-card-chip-amber"
+                          : "run-card-chip-emerald"
+                    }`}
+                  >
+                    健康 {healthStatus}
+                  </span>
                   {runningSince ? (
                     <span className="run-card-chip run-card-chip-live">
                       已跑 {formatElapsed(runningSince, nowTs)}
@@ -481,6 +504,13 @@ export function RunInboxPanel({
                 <MeasuredText className="run-card-summary" lines={3} text={taskSummary} />
                 {liveProgress ? (
                   <MeasuredText className="run-card-summary" lines={2} text={liveProgress} />
+                ) : null}
+                {governanceHeadline ? (
+                  <MeasuredText
+                    className="run-card-summary run-card-summary-terminal"
+                    lines={2}
+                    text={governanceHeadline}
+                  />
                 ) : null}
                 <MeasuredText
                   className="run-card-summary"

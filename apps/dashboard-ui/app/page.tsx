@@ -1,9 +1,7 @@
 "use client";
 
 import { startTransition, useEffect, useMemo, useRef, useState } from "react";
-import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
-import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   activityLabel,
   localizeUiText,
@@ -49,6 +47,12 @@ import {
   RunSteerPanel,
   RunVerificationPanel
 } from "./run-detail-panels";
+import {
+  AgentGridBoard,
+  CommandEmptyState,
+  InterferenceZone,
+  MasterConsole
+} from "./retro-console";
 import { InterventionQueuePanel, RunInboxPanel } from "./run-inbox";
 
 const apiBaseUrl = "/api/control";
@@ -161,7 +165,14 @@ export default function Page() {
     () => (selectedRun ? deriveRunOperatorState(selectedRun, nowTs) : null),
     [nowTs, selectedRun]
   );
-  const operatorSnapshot = useMemo(
+  const operatorSnapshot = useMemo<
+    Array<{
+      label: string;
+      value: string;
+      hint: string;
+      tone: "rose" | "amber" | "emerald";
+    }>
+  >(
     () => [
       {
         label: "人工接球",
@@ -248,6 +259,8 @@ export default function Page() {
   const liveAttemptText = currentAttemptStartedAt
     ? `当前尝试已运行 ${formatElapsed(currentAttemptStartedAt, nowTs)}`
     : "当前没有进行中的尝试";
+  const humanHandoffCount = operatorSnapshot[0]?.value ?? "00";
+  const runtimeRiskCount = operatorSnapshot[1]?.value ?? "00";
 
   async function fetchControlJson<T>(path: string, fallback: string): Promise<T> {
     const response = await fetch(`${apiBaseUrl}${path}`, {
@@ -310,6 +323,8 @@ export default function Page() {
                     updated_at: nextDetail.current.updated_at
                   }
                 : null,
+              governance: nextDetail.governance,
+              run_health: nextDetail.run_health,
               attempt_count: nextDetail.attempts.length,
               latest_attempt: latestDetail?.attempt ?? null,
               latest_attempt_runtime_state: latestDetail?.runtime_state ?? null,
@@ -599,307 +614,152 @@ export default function Page() {
 
   return (
     <main className="dashboard-shell">
-      <div className="dashboard-frame">
-        <section className="hero-panel">
-          <div className="hero-copy">
-            <div className="hero-eyebrow">AISA / Operator Console</div>
-            <h1 className="hero-title">
-              运行台优先
-              <span>先处理需要人工介入的运行，再回头看兼容保留的目标与分支面板。</span>
-            </h1>
-            <p className="hero-description">
-              这里把 run 的真实状态、阻塞原因、恢复提示、尝试证据和回放结果拉到前台。
-              目标不是讲更大的 swarm 故事，而是让一条运行任务能连续几小时到几天稳定推进。
-            </p>
-          </div>
+      <div className="dashboard-frame space-y-6">
+        <MasterConsole
+          overviewStats={overviewStats}
+          operatorSnapshot={operatorSnapshot}
+          viewMode={viewMode}
+          onViewModeChange={setViewMode}
+          controlApiDisplay={controlApiDisplay}
+          defaultWorkspace={defaultWorkspace}
+          liveStatusText={liveStatusText}
+          liveStatusDetail={liveStatusDetail}
+        />
 
-          <div className="hero-meta">
-            <div className="meta-card">
-              <span className="meta-label">控制 API</span>
-              <strong>{controlApiDisplay}</strong>
-            </div>
-            <div className="meta-card">
-              <span className="meta-label">默认工作区</span>
-              <strong>{defaultWorkspace}</strong>
-            </div>
-          </div>
+        <InterferenceZone
+          dataState={dataState}
+          error={error}
+          liveAttemptText={liveAttemptText}
+          latestSyncAgeMs={latestSyncAgeMs}
+          humanHandoffCount={humanHandoffCount}
+          runtimeRiskCount={runtimeRiskCount}
+        />
 
-          <div className="stats-row">
-            {overviewStats.map((stat) => (
-              <article key={stat.label} className="stat-card">
-                <span className="stat-label">{stat.label}</span>
-                <strong className="stat-value">{stat.value}</strong>
-              </article>
-            ))}
-          </div>
-
-          <Tabs
-            value={viewMode}
-            onValueChange={(value) => setViewMode(value as ViewMode)}
-            className="gap-0"
-          >
-            <TabsList className="inline-flex rounded-full border border-black/8 bg-[rgba(255,251,245,0.78)] p-1 shadow-sm backdrop-blur">
-              <TabsTrigger value="runs" className="rounded-full px-4">
-                运行台
-              </TabsTrigger>
-              <TabsTrigger value="goals" className="rounded-full px-4">
-                目标台
-              </TabsTrigger>
-            </TabsList>
-          </Tabs>
-        </section>
-
-        {error ? (
-          <Alert
-            variant="destructive"
-            className="mt-[18px] rounded-[1.35rem] border-destructive/25 bg-[var(--rose-soft)] text-[var(--rose)]"
-          >
-            <AlertTitle>控制台错误</AlertTitle>
-            <AlertDescription className="text-current/90">{error}</AlertDescription>
-          </Alert>
-        ) : null}
-
-        <section className={`live-strip live-strip-${dataState}`}>
-          <div className="live-strip-status">
-            <span
-              className={`live-dot${refreshState.isRefreshing ? " is-refreshing" : ""}`}
-              aria-hidden="true"
+        {viewMode === "runs" ? (
+          runs.length === 0 ? (
+            <CommandEmptyState
+              onSwitchGoals={() => setViewMode("goals")}
+              operatorSnapshot={operatorSnapshot}
             />
-            <div>
-              <strong>{liveStatusText}</strong>
-              <p>
-                {liveStatusDetail}
-                {refreshState.lastErrorMessage && dataState === "offline"
-                  ? ` · ${refreshState.lastErrorMessage}`
-                  : ""}
-              </p>
-            </div>
-          </div>
-
-          <div className="live-strip-metrics">
-            <div className="live-strip-metric">
-              <span>刷新节奏</span>
-              <strong>总览 4 秒 / 详情实时</strong>
-            </div>
-            <div className="live-strip-metric">
-              <span>数据年龄</span>
-              <strong>
-                {latestSyncAgeMs !== null ? formatDuration(latestSyncAgeMs) : "未同步"}
-              </strong>
-            </div>
-            <div className="live-strip-metric">
-              <span>当前运行</span>
-              <strong>{liveAttemptText}</strong>
-            </div>
-          </div>
-        </section>
-
-        <div className={`content-grid content-grid-${dataState}`}>
-          <aside className="left-rail">
-            {viewMode === "runs" ? (
-              <>
-                <Panel
-                  title="Operator Snapshot"
-                  subtitle="这里不再只是状态统计，而是 operator 当前最该处理的四类待办。"
-                >
-                  <div className="operator-snapshot-grid">
-                    {operatorSnapshot.map((item) => (
-                      <article
-                        key={item.label}
-                        className={`operator-snapshot-card operator-snapshot-card-${item.tone}`}
-                      >
-                        <span className="operator-snapshot-label">{item.label}</span>
-                        <strong className="operator-snapshot-value">{item.value}</strong>
-                        <span className="operator-snapshot-hint">{item.hint}</span>
-                      </article>
-                    ))}
-                  </div>
-                </Panel>
-                <InterventionQueuePanel
-                  runs={runs}
-                  nowTs={nowTs}
-                  selectedRunId={selectedRunId}
-                  onSelectRun={(runId) => {
-                    void selectRun(runId);
-                  }}
-                />
-                <RunInboxPanel
-                  runs={runs}
-                  nowTs={nowTs}
-                  selectedRunId={selectedRunId}
-                  activeFilter={runInboxFilter}
-                  focusLens={runFocusLens}
-                  onFilterChange={setRunInboxFilter}
-                  onFocusLensChange={setRunFocusLens}
-                  onSelectRun={(runId) => {
-                    void selectRun(runId);
-                  }}
-                />
-              </>
-            ) : (
-              <>
-                <Panel
-                  title="发起新目标"
-                  subtitle="这部分保留给旧 goal / branch 主线，作为兼容视图继续存在。"
-                  actions={<InlineTag label="Legacy Compatibility" tone="amber" />}
-                >
-                  <div className="form-stack">
-                    <Field
-                      label="目标标题"
-                      value={goalForm.title}
-                      onChange={(value) => setGoalForm((current) => ({ ...current, title: value }))}
-                    />
-                    <TextAreaField
-                      label="问题描述"
-                      value={goalForm.description}
-                      onChange={(value) =>
-                        setGoalForm((current) => ({ ...current, description: value }))
-                      }
-                    />
-                    <TextAreaField
-                      label="成功标准"
-                      value={goalForm.success_criteria}
-                      onChange={(value) =>
-                        setGoalForm((current) => ({ ...current, success_criteria: value }))
-                      }
-                    />
-                    <TextAreaField
-                      label="约束条件"
-                      value={goalForm.constraints}
-                      onChange={(value) =>
-                        setGoalForm((current) => ({ ...current, constraints: value }))
-                      }
-                    />
-                    <Field
-                      label="负责人"
-                      value={goalForm.owner_id}
-                      onChange={(value) =>
-                        setGoalForm((current) => ({ ...current, owner_id: value }))
-                      }
-                    />
-                    <Field
-                      label="工作区路径"
-                      value={goalForm.workspace_root}
-                      onChange={(value) =>
-                        setGoalForm((current) => ({ ...current, workspace_root: value }))
-                      }
-                    />
-                    <Button
-                      type="button"
-                      className="h-11 rounded-full px-5"
-                      onClick={() => void createGoal()}
-                      disabled={busy === "create"}
-                    >
-                      {busy === "create" ? "创建中..." : "创建目标"}
-                    </Button>
-                  </div>
-                </Panel>
-
-                <Panel
-                  title={`目标池 · ${goals.length}`}
-                  subtitle="兼容保留的旧面板，用来查看 goal / branch 主线的历史与过渡状态。"
-                  actions={<InlineTag label="Legacy View" tone="amber" />}
-                >
-                  <div className="goal-list">
-                    {goals.length === 0 ? (
-                      <EmptyState text="还没有目标。先在上方创建一个，然后启动第一轮分支。" />
-                    ) : (
-                      goals.map((item) => {
-                        const selected = item.goal.id === selectedGoalId;
-                        return (
-                          <button
-                            key={item.goal.id}
-                            type="button"
-                            className={`goal-card${selected ? " is-selected" : ""}`}
-                            onClick={() => {
-                              void selectGoal(item.goal.id);
-                            }}
-                          >
-                            <div className="goal-card-head">
-                              <strong>{localizeUiText(item.goal.title)}</strong>
-                              <StatusPill value={item.goal.status} />
-                            </div>
-                            <div className="goal-card-body">{item.goal.workspace_root}</div>
-                            <div className="goal-card-meta">
-                              分支 {item.branch_count} · 运行中 {item.running_count} · 已保留{" "}
-                              {item.kept_count}
-                            </div>
-                          </button>
-                        );
-                      })
-                    )}
-                  </div>
-                </Panel>
-              </>
-            )}
-          </aside>
-
-          <section className="main-stage">
-            {viewMode === "runs" ? (
-              runDetail && selectedRun ? (
-                <>
-                  <RunOverviewPanel
-                    runDetail={runDetail}
-                    selectedRun={selectedRun}
-                    selectedRunOperatorState={selectedRunOperatorState}
-                    selectedRunRuntimeState={selectedRunRuntimeState}
-                    selectedRunHeartbeat={selectedRunHeartbeat}
-                    selectedRunAttemptDetail={selectedRunAttemptDetail}
-                    selectedRunCurrentUpdatedAt={selectedRunCurrentUpdatedAt}
+          ) : (
+            <>
+              <div className="grid gap-6 xl:grid-cols-[260px_minmax(0,1.2fr)_480px]">
+                <aside className="space-y-6 min-w-0">
+                  <InterventionQueuePanel
+                    runs={runs}
                     nowTs={nowTs}
-                    dataState={dataState}
-                    liveStatusText={liveStatusText}
-                    liveAttemptText={liveAttemptText}
-                    refreshLabel={refreshState.isRefreshing ? "同步中..." : "刷新"}
-                    lastSuccessAtLabel={formatTimeOrFallback(refreshState.lastSuccessAt)}
-                    onRefresh={() => {
-                      void refreshDashboard({
-                        goalId: selectedGoalId,
-                        runId: runDetail.run.id
-                      });
+                    selectedRunId={selectedRunId}
+                    onSelectRun={(runId) => {
+                      void selectRun(runId);
+                    }}
+                  />
+                </aside>
+
+                <div className="space-y-6 min-w-0 xl:col-span-1">
+                  <AgentGridBoard
+                    runs={runs}
+                    nowTs={nowTs}
+                    selectedRunId={selectedRunId}
+                    onSelectRun={(runId) => {
+                      void selectRun(runId);
                     }}
                   />
 
-                  <div className="dual-grid">
-                    <RunSteerPanel
+                  {runDetail && selectedRun ? (
+                    <RunOverviewPanel
                       runDetail={runDetail}
+                      selectedRun={selectedRun}
+                      selectedRunOperatorState={selectedRunOperatorState}
+                      selectedRunRuntimeState={selectedRunRuntimeState}
+                      selectedRunHeartbeat={selectedRunHeartbeat}
                       selectedRunAttemptDetail={selectedRunAttemptDetail}
-                      steerText={runSteerText}
-                      steerAttemptId={runSteerAttemptId}
-                      onSteerTextChange={setRunSteerText}
-                      onSteerAttemptChange={setRunSteerAttemptId}
-                      onSubmit={() => {
-                        void queueRunSteer(runDetail.run.id);
+                      selectedRunCurrentUpdatedAt={selectedRunCurrentUpdatedAt}
+                      nowTs={nowTs}
+                      dataState={dataState}
+                      liveStatusText={liveStatusText}
+                      liveAttemptText={liveAttemptText}
+                      refreshLabel={refreshState.isRefreshing ? "同步中..." : "刷新"}
+                      lastSuccessAtLabel={formatTimeOrFallback(refreshState.lastSuccessAt)}
+                      onRefresh={() => {
+                        void refreshDashboard({
+                          goalId: selectedGoalId,
+                          runId: runDetail.run.id
+                        });
                       }}
-                      busy={busy === `run-steer:${runDetail.run.id}`}
                     />
-                    <RunVerificationPanel
-                      selectedRunAttemptDetail={selectedRunAttemptDetail}
-                    />
-                  </div>
+                  ) : (
+                    <Panel
+                      title="等待选择 Agent"
+                      subtitle="从上方 Agent Grid 中选择一张卡片，右侧控制台和下方详情区会切到对应运行任务。"
+                    >
+                      <EmptyState text="当前还没有选中的运行任务。" />
+                    </Panel>
+                  )}
+                </div>
 
-                  <RunReportPanel report={runDetail.report} />
+                <aside className="space-y-6 min-w-0 xl:sticky xl:top-4 xl:self-start">
+                  <RunInboxPanel
+                    runs={runs}
+                    nowTs={nowTs}
+                    selectedRunId={selectedRunId}
+                    activeFilter={runInboxFilter}
+                    focusLens={runFocusLens}
+                    onFilterChange={setRunInboxFilter}
+                    onFocusLensChange={setRunFocusLens}
+                    onSelectRun={(runId) => {
+                      void selectRun(runId);
+                    }}
+                  />
 
-                  <Panel title="尝试时间线" subtitle="每条尝试都展示约定、结果、判断、回放验证和日志尾部。">
-                    <div className="attempt-list">
-                      {runDetail.attempt_details.length === 0 ? (
-                        <EmptyState text="还没有尝试细节。" />
-                      ) : (
-                        [...runDetail.attempt_details].reverse().map((detailItem) => (
-                          <AttemptCard key={detailItem.attempt.id} detail={detailItem} />
-                        ))
-                      )}
+                  {runDetail ? (
+                    <>
+                      <RunVerificationPanel selectedRunAttemptDetail={selectedRunAttemptDetail} />
+                      <RunSteerPanel
+                        runDetail={runDetail}
+                        selectedRunAttemptDetail={selectedRunAttemptDetail}
+                        steerText={runSteerText}
+                        steerAttemptId={runSteerAttemptId}
+                        onSteerTextChange={setRunSteerText}
+                        onSteerAttemptChange={setRunSteerAttemptId}
+                        onSubmit={() => {
+                          void queueRunSteer(runDetail.run.id);
+                        }}
+                        busy={busy === `run-steer:${runDetail.run.id}`}
+                      />
+                    </>
+                  ) : null}
+                </aside>
+              </div>
+
+              {runDetail && selectedRun ? (
+                <>
+                  <div className="grid gap-6 xl:grid-cols-[minmax(0,1.25fr)_480px]">
+                    <div className="space-y-6 min-w-0">
+                      <RunReportPanel report={runDetail.report} />
+
+                      <Panel title="尝试时间线" subtitle="每条尝试都展示约定、结果、判断、回放验证和日志尾部。">
+                        <div className="attempt-list">
+                          {runDetail.attempt_details.length === 0 ? (
+                            <EmptyState text="还没有尝试细节。" />
+                          ) : (
+                            [...runDetail.attempt_details].reverse().map((detailItem) => (
+                              <AttemptCard key={detailItem.attempt.id} detail={detailItem} />
+                            ))
+                          )}
+                        </div>
+                      </Panel>
                     </div>
-                  </Panel>
 
-                  <RunJournalPanel journal={runDetail.journal} nowTs={nowTs} />
+                    <div className="min-w-0">
+                      <RunJournalPanel journal={runDetail.journal} nowTs={nowTs} />
+                    </div>
+                  </div>
                 </>
-              ) : (
-                <Panel title="还没有选中运行任务" subtitle="先从左侧运行池里选一条运行任务。">
-                  <EmptyState text="这块区域会展示介入等级、恢复建议、运行约定、尝试证据、运行日志和最终报告。" />
-                </Panel>
-              )
-            ) : detail && selectedGoal ? (
+              ) : null}
+            </>
+          )
+        ) : detail && selectedGoal ? (
+          <section className="space-y-6">
               <>
                 <Panel
                   title={detail.goal.title}
@@ -1033,13 +893,103 @@ export default function Page() {
                   </Panel>
                 </div>
               </>
-            ) : (
-              <Panel title="还没有选中目标" subtitle="先从左侧目标池里选一个，或者直接创建新目标。">
-                <EmptyState text="这块区域会展示目标概览、分支看板、共享上下文、实时报告和事件时间线。" />
-              </Panel>
-            )}
           </section>
-        </div>
+        ) : (
+          <section className="grid gap-6 xl:grid-cols-[420px_minmax(0,1fr)]">
+            <div className="space-y-6">
+              <Panel
+                title="发起新目标"
+                subtitle="战略目标视图仍保留，用于创建新的 swarm 目标并观察历史目标树。"
+                actions={<InlineTag label="Legacy Strategy View" tone="amber" />}
+              >
+                <div className="form-stack">
+                  <Field
+                    label="目标标题"
+                    value={goalForm.title}
+                    onChange={(value) => setGoalForm((current) => ({ ...current, title: value }))}
+                  />
+                  <TextAreaField
+                    label="问题描述"
+                    value={goalForm.description}
+                    onChange={(value) =>
+                      setGoalForm((current) => ({ ...current, description: value }))
+                    }
+                  />
+                  <TextAreaField
+                    label="成功标准"
+                    value={goalForm.success_criteria}
+                    onChange={(value) =>
+                      setGoalForm((current) => ({ ...current, success_criteria: value }))
+                    }
+                  />
+                  <TextAreaField
+                    label="约束条件"
+                    value={goalForm.constraints}
+                    onChange={(value) =>
+                      setGoalForm((current) => ({ ...current, constraints: value }))
+                    }
+                  />
+                  <Field
+                    label="负责人"
+                    value={goalForm.owner_id}
+                    onChange={(value) =>
+                      setGoalForm((current) => ({ ...current, owner_id: value }))
+                    }
+                  />
+                  <Field
+                    label="工作区路径"
+                    value={goalForm.workspace_root}
+                    onChange={(value) =>
+                      setGoalForm((current) => ({ ...current, workspace_root: value }))
+                    }
+                  />
+                  <Button type="button" onClick={() => void createGoal()} disabled={busy === "create"}>
+                    {busy === "create" ? "创建中..." : "创建目标"}
+                  </Button>
+                </div>
+              </Panel>
+
+              <Panel
+                title={`目标池 · ${goals.length}`}
+                subtitle="兼容保留的目标池，战略视角仍从这里进入。"
+                actions={<InlineTag label="Legacy View" tone="amber" />}
+              >
+                <div className="goal-list">
+                  {goals.length === 0 ? (
+                    <EmptyState text="还没有目标。先在上方创建一个，然后启动第一轮分支。" />
+                  ) : (
+                    goals.map((item) => {
+                      const selected = item.goal.id === selectedGoalId;
+                      return (
+                        <button
+                          key={item.goal.id}
+                          type="button"
+                          className={`goal-card${selected ? " is-selected" : ""}`}
+                          onClick={() => {
+                            void selectGoal(item.goal.id);
+                          }}
+                        >
+                          <div className="goal-card-head">
+                            <strong>{localizeUiText(item.goal.title)}</strong>
+                            <StatusPill value={item.goal.status} />
+                          </div>
+                          <div className="goal-card-body">{item.goal.workspace_root}</div>
+                          <div className="goal-card-meta">
+                            分支 {item.branch_count} · 运行中 {item.running_count} · 已保留 {item.kept_count}
+                          </div>
+                        </button>
+                      );
+                    })
+                  )}
+                </div>
+              </Panel>
+            </div>
+
+            <Panel title="还没有选中目标" subtitle="先从左侧目标池里选一个，或者直接创建新目标。">
+              <EmptyState text="这块区域会展示目标概览、分支看板、共享上下文、实时报告和事件时间线。" />
+            </Panel>
+          </section>
+        )}
       </div>
     </main>
   );

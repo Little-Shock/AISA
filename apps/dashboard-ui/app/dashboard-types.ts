@@ -86,6 +86,50 @@ export type AttemptHeartbeat = {
   released_at: string | null;
 };
 
+export type RunGovernanceState = {
+  status: string;
+  active_problem_signature: string | null;
+  active_problem_summary: string | null;
+  blocker_repeat_count: number;
+  mainline_signature: string | null;
+  mainline_summary: string | null;
+  mainline_attempt_type: string | null;
+  mainline_attempt_id: string | null;
+  excluded_plans: Array<{
+    plan_signature: string;
+    objective: string;
+    reason: string;
+    source_attempt_id: string | null;
+    source_attempt_status: string | null;
+    evidence_refs: string[];
+    excluded_at: string;
+  }>;
+  next_allowed_actions: string[];
+  last_meaningful_progress_at: string | null;
+  last_meaningful_progress_attempt_id: string | null;
+  context_summary: {
+    headline: string;
+    progress_summary: string | null;
+    blocker_summary: string | null;
+    avoid_summary: string[];
+    generated_at: string;
+  };
+  updated_at: string;
+} | null;
+
+export type RunHealthAssessment = {
+  status: string;
+  summary: string;
+  likely_zombie: boolean;
+  stale_after_ms: number;
+  latest_attempt_id: string | null;
+  latest_attempt_status: string | null;
+  latest_activity_at: string | null;
+  latest_activity_age_ms: number | null;
+  heartbeat_at: string | null;
+  heartbeat_age_ms: number | null;
+} | null;
+
 export type RunSummaryItem = {
   run: {
     id: string;
@@ -104,6 +148,8 @@ export type RunSummaryItem = {
     waiting_for_human: boolean;
     updated_at: string;
   } | null;
+  governance: RunGovernanceState;
+  run_health: RunHealthAssessment;
   attempt_count: number;
   latest_attempt: {
     id: string;
@@ -144,6 +190,8 @@ export type RunDetail = {
     waiting_for_human: boolean;
     updated_at: string;
   } | null;
+  governance: RunGovernanceState;
+  run_health: RunHealthAssessment;
   attempts: Array<{
     id: string;
     attempt_type: string;
