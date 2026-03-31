@@ -1,5 +1,9 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
+import {
+  AttemptContractDraftSchema,
+  type AttemptContractDraft
+} from "@autoresearch/domain";
 
 export const SELF_BOOTSTRAP_NEXT_TASK_PROMOTION_ARTIFACT_FILE_NAME =
   "self-bootstrap-next-task-promotion.json";
@@ -59,6 +63,50 @@ export async function loadSelfBootstrapNextTaskActiveEntry(workspaceRoot: string
     path: SELF_BOOTSTRAP_NEXT_TASK_ACTIVE_ENTRY_RELATIVE_PATH,
     absolutePath,
     entry: parseSelfBootstrapNextTaskActiveEntry(parsed)
+  };
+}
+
+export async function loadSelfBootstrapNextTaskRecommendedAttemptDraft(input: {
+  workspaceRoot: string;
+  sourceAssetPath: string;
+}): Promise<{
+  path: string;
+  absolutePath: string;
+  draft: AttemptContractDraft;
+}> {
+  const absolutePath = join(input.workspaceRoot, input.sourceAssetPath);
+  let content: string;
+
+  try {
+    content = await readFile(absolutePath, "utf8");
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    throw new Error(`self-bootstrap source asset ${input.sourceAssetPath} is unreadable: ${reason}`);
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(content);
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    throw new Error(`self-bootstrap source asset ${input.sourceAssetPath} is invalid JSON: ${reason}`);
+  }
+
+  const sourceAsset = expectObject(parsed, input.sourceAssetPath);
+  let draft: AttemptContractDraft;
+  try {
+    draft = AttemptContractDraftSchema.parse(sourceAsset.recommended_next_attempt);
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    throw new Error(
+      `self-bootstrap source asset ${input.sourceAssetPath}.recommended_next_attempt is invalid: ${reason}`
+    );
+  }
+
+  return {
+    path: input.sourceAssetPath,
+    absolutePath,
+    draft
   };
 }
 

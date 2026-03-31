@@ -369,6 +369,79 @@ function buildDefaultExecutionFailureModes(): AttemptContract["failure_modes"] {
   ];
 }
 
+function normalizeExecutionObjective(value: string | null | undefined): string {
+  return (value ?? "")
+    .normalize("NFKC")
+    .toLowerCase()
+    .replace(/[`"'“”‘’]/gu, "")
+    .replace(/[^\p{L}\p{N}\/._-]+/gu, " ")
+    .replace(/\s+/gu, " ")
+    .trim();
+}
+
+function executionObjectivesDescribeSameWork(
+  plannedObjective: string | null | undefined,
+  candidateObjective: string | null | undefined
+): boolean {
+  const planned = normalizeExecutionObjective(plannedObjective);
+  const candidate = normalizeExecutionObjective(candidateObjective);
+  if (planned.length === 0 || candidate.length === 0) {
+    return false;
+  }
+
+  return planned === candidate || planned.includes(candidate) || candidate.includes(planned);
+}
+
+type ExecutionSteerIntent =
+  | "preserve_existing_contract"
+  | "replace_existing_contract"
+  | "unspecified";
+
+function classifyExecutionSteerIntent(steerMessages: string[]): ExecutionSteerIntent {
+  const normalized = normalizeExecutionObjective(steerMessages.join("\n"));
+  if (normalized.length === 0) {
+    return "unspecified";
+  }
+
+  const replacePatterns = [
+    /\b(switch|replace|change)\b/,
+    /\bnew target\b/,
+    /\bdo not reuse\b/,
+    /\bdont reuse\b/,
+    /\bdo not keep\b/,
+    /\bstop using\b/,
+    /切到新/,
+    /切换/,
+    /改成/,
+    /不要再沿用/,
+    /不要沿用/,
+    /不要复用/
+  ];
+  if (replacePatterns.some((pattern) => pattern.test(normalized))) {
+    return "replace_existing_contract";
+  }
+
+  const preservePatterns = [
+    /\bretry the same\b/,
+    /\bsame execution step\b/,
+    /\bkeep the original\b/,
+    /\bkeep original\b/,
+    /\bkeep the existing\b/,
+    /\bpreserve the contract\b/,
+    /同一步/,
+    /继续同一/,
+    /保留原/,
+    /沿用原/,
+    /保留原有/,
+    /保留现有/
+  ];
+  if (preservePatterns.some((pattern) => pattern.test(normalized))) {
+    return "preserve_existing_contract";
+  }
+
+  return "unspecified";
+}
+
 function isExecutionContractDraft(
   contract: AttemptContractDraft | null | undefined
 ): contract is AttemptContractDraft {
@@ -1057,7 +1130,7 @@ export class Orchestrator {
         });
         return {
           attempt,
-          contract: await this.buildAttemptContract(run, attempt, null, "start_first_attempt", null)
+          contract: await this.buildAttemptContract(run, attempt, null, null)
         };
       }
 
@@ -1071,7 +1144,7 @@ export class Orchestrator {
       });
       return {
         attempt,
-        contract: await this.buildAttemptContract(run, attempt, null, "start_first_attempt", null)
+        contract: await this.buildAttemptContract(run, attempt, null, null)
       };
     }
 
@@ -1144,6 +1217,23 @@ export class Orchestrator {
       );
     }
 
+    const executionPlanningState =
+      attemptType === "execution"
+        ? await this.resolveExecutionContractPlanningState({
+            run,
+            runId,
+            objective,
+            nextExecutionDraft,
+            latestAttempt,
+            recommendedNextAction: candidateDecision.candidate.nextAction,
+            steerMessages: queuedSteers.map((runSteer) => runSteer.content)
+          })
+        : {
+            draft: null,
+            reusableExecutionContract: null
+          };
+    nextExecutionDraft = executionPlanningState.draft;
+
     const attempt = createAttempt({
       run_id: run.id,
       attempt_type: attemptType,
@@ -1152,6 +1242,9 @@ export class Orchestrator {
       success_criteria:
         attemptType === "execution" && nextExecutionDraft?.success_criteria
           ? nextExecutionDraft.success_criteria
+          : attemptType === "execution" &&
+              executionPlanningState.reusableExecutionContract?.success_criteria.length
+            ? executionPlanningState.reusableExecutionContract.success_criteria
           : run.success_criteria,
       workspace_root: getEffectiveRunWorkspaceRoot(run)
     });
@@ -1161,8 +1254,7 @@ export class Orchestrator {
         run,
         attempt,
         nextExecutionDraft,
-        candidateDecision.candidate.nextAction,
-        latestAttempt
+        executionPlanningState.reusableExecutionContract
       )
     };
   }
@@ -3052,21 +3144,103 @@ export class Orchestrator {
     return null;
   }
 
+  private async getPublishedSelfBootstrapExecutionDraft(
+    run: Run,
+    runId: string
+  ): Promise<AttemptContractDraft | null> {
+    if (run.title !== "AISA 自举下一步规划") {
+      return null;
+    }
+
+    const snapshotPath = join(
+      resolveRunPaths(this.workspacePaths, runId).artifactsDir,
+      SELF_BOOTSTRAP_NEXT_TASK_ACTIVE_ENTRY_SNAPSHOT_FILE_NAME
+    );
+    let snapshot: SelfBootstrapNextTaskActiveEntry;
+
+    try {
+      snapshot = parseSelfBootstrapNextTaskActiveEntry(
+        JSON.parse(await readFile(snapshotPath, "utf8"))
+      );
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      throw new Error(
+        `self-bootstrap blocked because active next task snapshot is missing or invalid while building execution contract: ${reason}`
+      );
+    }
+
+    const sourceAsset = await loadSelfBootstrapNextTaskRecommendedAttemptDraft({
+      workspaceRoot: run.workspace_root,
+      sourceAssetPath: snapshot.source_anchor.asset_path
+    });
+    return sourceAsset.draft.attempt_type === "execution" ? sourceAsset.draft : null;
+  }
+
+  private async resolveExecutionContractPlanningState(input: {
+    run: Run;
+    runId: string;
+    objective: string;
+    nextExecutionDraft: AttemptContractDraft | null;
+    latestAttempt: Attempt | null;
+    recommendedNextAction: string | null;
+    steerMessages: string[];
+  }): Promise<{
+    draft: AttemptContractDraft | null;
+    reusableExecutionContract: AttemptContract | null;
+  }> {
+    const steerIntent = classifyExecutionSteerIntent(input.steerMessages);
+    const shouldCarryForwardPreviousExecutionPlan =
+      input.recommendedNextAction === "retry_attempt" ||
+      input.recommendedNextAction === "continue_execution" ||
+      steerIntent === "preserve_existing_contract";
+    const alignedDraft =
+      isExecutionContractDraft(input.nextExecutionDraft) &&
+      (shouldCarryForwardPreviousExecutionPlan ||
+        (steerIntent !== "replace_existing_contract" &&
+          executionObjectivesDescribeSameWork(
+            input.objective,
+            input.nextExecutionDraft.objective
+          )))
+        ? input.nextExecutionDraft
+        : null;
+    const publishedDraft = alignedDraft
+      ? null
+      : await this.getPublishedSelfBootstrapExecutionDraft(input.run, input.runId);
+    const reusableExecutionContractCandidate =
+      input.latestAttempt?.attempt_type === "execution" &&
+      ["retry_attempt", "continue_execution", "apply_steer"].includes(
+        input.recommendedNextAction ?? ""
+      )
+        ? await getAttemptContract(this.workspacePaths, input.run.id, input.latestAttempt.id)
+        : null;
+
+    return {
+      draft:
+        alignedDraft ??
+        (publishedDraft &&
+        executionObjectivesDescribeSameWork(input.objective, publishedDraft.objective)
+          ? publishedDraft
+          : null),
+      reusableExecutionContract:
+        reusableExecutionContractCandidate &&
+        (shouldCarryForwardPreviousExecutionPlan ||
+          (steerIntent !== "replace_existing_contract" &&
+            executionObjectivesDescribeSameWork(
+              input.objective,
+              reusableExecutionContractCandidate.objective
+            )))
+          ? reusableExecutionContractCandidate
+          : null
+    };
+  }
+
   private async buildAttemptContract(
     run: Run,
     attempt: Attempt,
     nextExecutionDraft: AttemptContractDraft | null,
-    recommendedNextAction: string | null,
-    latestAttempt: Attempt | null
+    reusableExecutionContract: AttemptContract | null
   ): Promise<AttemptContract> {
     if (attempt.attempt_type === "execution") {
-      const reusableExecutionContract =
-        latestAttempt?.attempt_type === "execution" &&
-        ["retry_attempt", "continue_execution", "apply_steer"].includes(
-          recommendedNextAction ?? ""
-        )
-          ? await getAttemptContract(this.workspacePaths, run.id, latestAttempt.id)
-          : null;
       const draft = isExecutionContractDraft(nextExecutionDraft)
         ? nextExecutionDraft
         : null;

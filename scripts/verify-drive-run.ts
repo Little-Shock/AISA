@@ -11,6 +11,7 @@ import {
   createRun,
   createRunJournalEntry,
   createRunSteer,
+  updateAttempt,
   type Attempt,
   type Run,
   type WorkerWriteback
@@ -32,6 +33,7 @@ import {
   resolveWorkspacePaths,
   saveAttempt,
   saveAttemptContract,
+  saveAttemptResult,
   saveCurrentDecision,
   saveAttemptRuntimeState,
   saveRun,
@@ -42,6 +44,7 @@ import {
   captureAttemptCheckpointPreflight,
   maybeCreateVerifiedExecutionCheckpoint
 } from "../packages/orchestrator/src/git-checkpoint.ts";
+import { syncRuntimeLayoutHint } from "../packages/orchestrator/src/runtime-layout.ts";
 import { ensureRunManagedWorkspace } from "../packages/orchestrator/src/run-workspace.ts";
 import { createDefaultRunWorkspaceScopePolicy } from "../packages/orchestrator/src/workspace-scope.ts";
 import {
@@ -344,6 +347,43 @@ class ProgressingAdapter {
   }
 }
 
+class SingleResearchPassAdapter {
+  readonly type = "fake-codex";
+
+  async runAttemptTask(input: {
+    attempt: Attempt;
+  }): Promise<{
+    writeback: WorkerWriteback;
+    reportMarkdown: string;
+    exitCode: number;
+  }> {
+    assert.equal(
+      input.attempt.attempt_type,
+      "research",
+      "runtime layout scope test should only need the first research pass"
+    );
+
+    return {
+      writeback: {
+        summary: "Research completed inside the dev lane workspace.",
+        findings: [
+          {
+            type: "fact",
+            content: "The dev lane workspace stayed inside the allowed runtime scope.",
+            evidence: ["scripts/drive-run.ts"]
+          }
+        ],
+        questions: [],
+        recommended_next_steps: [],
+        confidence: 0.74,
+        artifacts: []
+      },
+      reportMarkdown: "# research",
+      exitCode: 0
+    };
+  }
+}
+
 class CompletedRuntimeStateExecutionAdapter {
   readonly type = "fake-codex";
 
@@ -473,6 +513,8 @@ async function main(hostJudgeConfig: HostJudgeConfigSnapshot): Promise<void> {
   await verifyManagedWorkspaceCheckpointCatchesUpDirtyBaseline();
   await verifyExecutionAttemptRuntimeStateTransitionsAcrossVerification();
   await verifyDriveRunDoesNotLeaveRunningAttemptBehind();
+  await assertSteeredExecutionDoesNotReuseMismatchedContract();
+  await assertDriveRunHonorsRuntimeLayoutScope();
 
   const run = createRun({
     title: "Drive a self-bootstrap run locally",
@@ -542,6 +584,7 @@ async function main(hostJudgeConfig: HostJudgeConfigSnapshot): Promise<void> {
 
   const secondStop = await driveRun({
     workspaceRoot: rootDir,
+    repositoryRoot: rootDir,
     runId: run.id,
     adapter: adapter as never,
     pollIntervalMs: 50,
@@ -1111,6 +1154,7 @@ async function verifyDriveRunDoesNotLeaveRunningAttemptBehind(): Promise<void> {
 
   const result = await driveRun({
     workspaceRoot: rootDir,
+    repositoryRoot: rootDir,
     runId: run.id,
     adapter: new DelayedResearchAdapter() as never,
     pollIntervalMs: 10,
@@ -1136,6 +1180,293 @@ async function verifyDriveRunDoesNotLeaveRunningAttemptBehind(): Promise<void> {
     heartbeat?.status,
     "released",
     "drive-run must release the active heartbeat before it returns"
+  );
+}
+
+async function assertSteeredExecutionDoesNotReuseMismatchedContract(): Promise<void> {
+  const rootDir = await mkdtemp(join(tmpdir(), "aisa-steered-contract-reset-"));
+  const workspacePaths = resolveWorkspacePaths(rootDir);
+  await ensureWorkspace(workspacePaths);
+  await initializeGitRepo(rootDir);
+  await writeFile(
+    join(rootDir, "package.json"),
+    JSON.stringify(
+      {
+        name: "steered-contract-reset",
+        private: true,
+        scripts: {
+          "verify:runtime": "echo runtime-ok"
+        }
+      },
+      null,
+      2
+    ) + "\n",
+    "utf8"
+  );
+
+  const run = createRun({
+    title: "Steered execution should reset stale contracts",
+    description: "Ensure apply_steer does not carry forward a contract for the wrong objective.",
+    success_criteria: ["Switch the execution objective without reusing the stale contract."],
+    constraints: [],
+    owner_id: "test-owner",
+    workspace_root: rootDir
+  });
+  await saveRun(workspacePaths, run);
+
+  const researchAttempt = updateAttempt(
+    createAttempt({
+      run_id: run.id,
+      attempt_type: "research",
+      worker: "fake-codex",
+      objective: "Find the next execution step.",
+      success_criteria: run.success_criteria,
+      workspace_root: rootDir
+    }),
+    {
+      status: "completed",
+      started_at: new Date().toISOString(),
+      ended_at: new Date().toISOString()
+    }
+  );
+  await saveAttempt(workspacePaths, researchAttempt);
+  await saveAttemptContract(
+    workspacePaths,
+    createAttemptContract({
+      attempt_id: researchAttempt.id,
+      run_id: run.id,
+      attempt_type: researchAttempt.attempt_type,
+      objective: researchAttempt.objective,
+      success_criteria: researchAttempt.success_criteria,
+      required_evidence: [
+        "Ground findings in concrete files, commands, or artifacts.",
+        "If execution is recommended, leave a replayable execution contract for the next attempt."
+      ],
+      expected_artifacts: ["review_packet.json"]
+    })
+  );
+  await saveAttemptResult(workspacePaths, run.id, researchAttempt.id, {
+    summary: "Research locked an execution contract for the old objective.",
+    findings: [],
+    questions: [],
+    recommended_next_steps: ["Keep fixing the old verifier path."],
+    confidence: 0.81,
+    next_attempt_contract: {
+      attempt_type: "execution",
+      objective: "Keep fixing the old verifier path.",
+      success_criteria: ["Leave OLD proof in the workspace."],
+      required_evidence: ["OLD required evidence"],
+      done_rubric: [
+        {
+          code: "old_done",
+          description: "old done rubric"
+        }
+      ],
+      failure_modes: [
+        {
+          code: "old_failure",
+          description: "old failure mode"
+        }
+      ],
+      forbidden_shortcuts: ["OLD shortcut"],
+      expected_artifacts: ["old-proof.txt"],
+      verification_plan: {
+        commands: [
+          {
+            purpose: "old replay command",
+            command: "test -f old-proof.txt"
+          }
+        ]
+      }
+    },
+    artifacts: []
+  });
+
+  const staleExecutionAttempt = updateAttempt(
+    createAttempt({
+      run_id: run.id,
+      attempt_type: "execution",
+      worker: "fake-codex",
+      objective: "Keep fixing the old verifier path.",
+      success_criteria: ["Leave OLD proof in the workspace."],
+      workspace_root: rootDir
+    }),
+    {
+      status: "stopped",
+      started_at: new Date().toISOString(),
+      ended_at: new Date().toISOString()
+    }
+  );
+  await saveAttempt(workspacePaths, staleExecutionAttempt);
+  await saveAttemptContract(
+    workspacePaths,
+    createAttemptContract({
+      attempt_id: staleExecutionAttempt.id,
+      run_id: run.id,
+      attempt_type: staleExecutionAttempt.attempt_type,
+      objective: staleExecutionAttempt.objective,
+      success_criteria: staleExecutionAttempt.success_criteria,
+      required_evidence: ["OLD required evidence"],
+      done_rubric: [
+        {
+          code: "old_done",
+          description: "old done rubric"
+        }
+      ],
+      failure_modes: [
+        {
+          code: "old_failure",
+          description: "old failure mode"
+        }
+      ],
+      forbidden_shortcuts: ["OLD shortcut"],
+      expected_artifacts: ["old-proof.txt"],
+      verification_plan: {
+        commands: [
+          {
+            purpose: "old replay command",
+            command: "test -f old-proof.txt"
+          }
+        ]
+      }
+    })
+  );
+  await saveCurrentDecision(
+    workspacePaths,
+    createCurrentDecision({
+      run_id: run.id,
+      run_status: "running",
+      latest_attempt_id: staleExecutionAttempt.id,
+      recommended_next_action: "apply_steer",
+      recommended_attempt_type: "execution",
+      summary: "Steer queued. Loop will use it in the next attempt.",
+      waiting_for_human: false
+    })
+  );
+  await saveRunSteer(
+    workspacePaths,
+    createRunSteer({
+      run_id: run.id,
+      content: "把 execution 切到新的 preflight gate 目标，不要再沿用旧 verifier 目标。"
+    })
+  );
+
+  const orchestrator = new Orchestrator(
+    workspacePaths,
+    new SingleResearchPassAdapter() as never,
+    undefined,
+    60_000
+  );
+  await orchestrator.tick();
+
+  const attempts = await listAttempts(workspacePaths, run.id);
+  const freshExecutionAttempt = attempts.at(-1);
+  assert.ok(freshExecutionAttempt, "steered contract reset test should create a fresh execution attempt");
+  assert.notEqual(
+    freshExecutionAttempt?.id,
+    staleExecutionAttempt.id,
+    "steered contract reset test should create a new execution attempt instead of mutating the stale one"
+  );
+  assert.equal(
+    freshExecutionAttempt?.attempt_type,
+    "execution",
+    "steered contract reset test should stay on execution"
+  );
+  const freshContract = await getAttemptContract(
+    workspacePaths,
+    run.id,
+    freshExecutionAttempt!.id
+  );
+  assert.ok(freshContract, "fresh execution attempt should persist attempt_contract.json");
+  assert.ok(
+    freshExecutionAttempt?.objective.includes("preflight gate"),
+    "new execution objective should come from the steer, not the stale contract"
+  );
+  assert.deepEqual(
+    freshContract?.success_criteria,
+    run.success_criteria,
+    "mismatched stale draft should not overwrite the new execution success criteria"
+  );
+  assert.notDeepEqual(
+    freshContract?.required_evidence,
+    ["OLD required evidence"],
+    "mismatched stale contract should not carry old required_evidence into the new execution attempt"
+  );
+  assert.notDeepEqual(
+    freshContract?.expected_artifacts,
+    ["old-proof.txt"],
+    "mismatched stale contract should not carry old expected_artifacts into the new execution attempt"
+  );
+  assert.notDeepEqual(
+    freshContract?.verification_plan?.commands.map((command) => command.command) ?? [],
+    ["test -f old-proof.txt"],
+    "mismatched stale contract should not carry the old replay command into the new execution attempt"
+  );
+}
+
+async function assertDriveRunHonorsRuntimeLayoutScope(): Promise<void> {
+  const runtimeRepoRoot = await mkdtemp(join(tmpdir(), "aisa-drive-run-runtime-repo-"));
+  const devRepoRoot = await mkdtemp(join(tmpdir(), "aisa-drive-run-dev-repo-"));
+  const runtimeDataRoot = await mkdtemp(join(tmpdir(), "aisa-drive-run-runtime-data-"));
+  const managedWorkspaceRoot = await mkdtemp(join(tmpdir(), "aisa-drive-run-managed-"));
+  const workspacePaths = resolveWorkspacePaths(runtimeDataRoot);
+  await ensureWorkspace(workspacePaths);
+  await mkdir(join(runtimeRepoRoot, "artifacts"), { recursive: true });
+  syncRuntimeLayoutHint({
+    repositoryRoot: runtimeRepoRoot,
+    runtimeRepoRoot,
+    devRepoRoot,
+    runtimeDataRoot,
+    managedWorkspaceRoot
+  });
+
+  const run = createRun({
+    title: "Runtime layout scope should allow the dev lane",
+    description: "Verify drive-run inherits the runtime layout and does not block the dev lane workspace.",
+    success_criteria: ["Complete the first research pass from the dev lane workspace."],
+    constraints: [],
+    owner_id: "test-owner",
+    workspace_root: devRepoRoot
+  });
+  await saveRun(workspacePaths, run);
+  await saveCurrentDecision(
+    workspacePaths,
+    createCurrentDecision({
+      run_id: run.id,
+      run_status: "running",
+      recommended_next_action: "start_first_attempt",
+      recommended_attempt_type: "research",
+      summary: "Use the dev lane workspace for the first research pass."
+    })
+  );
+
+  const result = await driveRun({
+    workspaceRoot: runtimeDataRoot,
+    repositoryRoot: runtimeRepoRoot,
+    runId: run.id,
+    adapter: new SingleResearchPassAdapter() as never,
+    pollIntervalMs: 50,
+    maxPolls: 40,
+    stopAfterCompletedAttempts: 1
+  });
+  assert.equal(
+    result.stopReason,
+    "completed_attempt_limit",
+    "runtime layout scope test should complete the first research pass instead of blocking the dev lane workspace"
+  );
+  assert.equal(
+    result.completedAttemptCount,
+    1,
+    "runtime layout scope test should persist one completed research attempt"
+  );
+  assert.ok(
+    !result.current?.blocking_reason?.includes("工作区超出允许范围"),
+    "runtime layout scope test should stay free of workspace_outside_allowed_scope noise"
+  );
+  const journal = await listRunJournal(workspacePaths, run.id);
+  assert.ok(
+    !journal.some((entry) => entry.type === "run.workspace_scope.blocked"),
+    "runtime layout scope test should not emit a workspace_scope blocker for the dev lane"
   );
 }
 

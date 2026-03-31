@@ -10,6 +10,11 @@ import {
   type OrchestratorOptions
 } from "../packages/orchestrator/src/index.ts";
 import {
+  buildRuntimeWorkspaceScopeRoots,
+  resolveRuntimeLayout
+} from "../packages/orchestrator/src/runtime-layout.ts";
+import { createRunWorkspaceScopePolicy } from "../packages/orchestrator/src/workspace-scope.ts";
+import {
   CodexCliWorkerAdapter,
   loadCodexCliConfig,
   resolveSandboxForAttempt,
@@ -57,18 +62,38 @@ export async function driveRun(input: {
   workspaceRoot: string;
   runId: string;
   adapter: AttemptAdapter;
+  repositoryRoot?: string;
   pollIntervalMs?: number;
   maxPolls?: number;
   stopAfterCompletedAttempts?: number | null;
   orchestratorOptions?: OrchestratorOptions;
 }): Promise<DriveRunResult> {
   const workspacePaths = resolveWorkspacePaths(input.workspaceRoot);
+  const repositoryRoot = input.repositoryRoot ?? process.cwd();
+  const runtimeLayout =
+    input.orchestratorOptions?.runtimeLayout ??
+    resolveRuntimeLayout({
+      repositoryRoot,
+      env: process.env
+    });
+  const runWorkspaceScopePolicy =
+    input.orchestratorOptions?.runWorkspaceScopePolicy ??
+    (await createRunWorkspaceScopePolicy({
+      runtimeRoot: runtimeLayout.runtimeRepoRoot,
+      allowedRoots: buildRuntimeWorkspaceScopeRoots(runtimeLayout),
+      envValue: process.env.AISA_ALLOWED_WORKSPACE_ROOTS,
+      managedWorkspaceRoot: runtimeLayout.managedWorkspaceRoot
+    }));
   const orchestrator = new Orchestrator(
     workspacePaths,
     input.adapter as never,
     undefined,
     input.pollIntervalMs ?? 1500,
-    input.orchestratorOptions
+    {
+      ...input.orchestratorOptions,
+      runtimeLayout,
+      runWorkspaceScopePolicy
+    }
   );
 
   let latestSnapshot = await readRunSnapshot(workspacePaths, input.runId);
@@ -270,6 +295,7 @@ async function main(): Promise<void> {
     workspaceRoot: options.workspaceRoot ?? process.cwd(),
     runId: options.runId,
     adapter: new CodexCliWorkerAdapter(adapterConfig),
+    repositoryRoot: process.cwd(),
     pollIntervalMs: options.pollIntervalMs,
     maxPolls: options.maxPolls,
     stopAfterCompletedAttempts: options.stopAfterCompletedAttempts

@@ -438,6 +438,27 @@ async function createDetachedRuntimeLayout(
   });
 }
 
+async function createPromotableRuntimeLayout(
+  title: string,
+  devRepoRoot: string,
+  runtimeDataRoot: string
+): Promise<RuntimeLayout> {
+  const runtimeRepoRoot = await mkdtemp(join(tmpdir(), `aisa-autonomy-runtime-promote-${title}-`));
+  await runCommand(runtimeDataRoot, [
+    "git",
+    "clone",
+    "--quiet",
+    devRepoRoot,
+    runtimeRepoRoot
+  ]);
+  return resolveRuntimeLayout({
+    repositoryRoot: runtimeRepoRoot,
+    devRepoRoot,
+    runtimeRepoRoot,
+    runtimeDataRoot
+  });
+}
+
 async function initializeGitRepo(rootDir: string): Promise<void> {
   await writeFile(
     join(rootDir, ".gitignore"),
@@ -1352,8 +1373,8 @@ async function verifyRateLimitedExecutionRetriesQuickly(): Promise<void> {
     workspacePaths,
     runId: run.id,
     predicate: (runStatus) => runStatus === "completed",
-    timeoutMs: 15_000,
-    delayMs: 120
+    timeoutMs: 25_000,
+    delayMs: 80
   });
 
   const current = await getCurrentDecision(workspacePaths, run.id);
@@ -1927,6 +1948,11 @@ async function verifyRuntimeSourceDriftBlocksAutoResume(): Promise<void> {
   );
   await writeExecutionWorkspacePackage(rootDir);
   await initializeGitRepo(rootDir);
+  const promotableRuntimeLayout = await createPromotableRuntimeLayout(
+    "runtime-source-drift-blocks-auto-resume",
+    rootDir,
+    rootDir
+  );
 
   const orchestrator = new Orchestrator(
     workspacePaths,
@@ -1934,6 +1960,7 @@ async function verifyRuntimeSourceDriftBlocksAutoResume(): Promise<void> {
     undefined,
     60_000,
     {
+      runtimeLayout: promotableRuntimeLayout,
       waitingHumanAutoResumeMs: 30,
       runtimeSourceDriftAutoResumeMs: 30,
       maxAutomaticResumeCycles: 2
@@ -2037,6 +2064,11 @@ async function verifyRuntimeSourceDriftAutoResumesAfterRestart(): Promise<void> 
   );
   await writeExecutionWorkspacePackage(rootDir);
   await initializeGitRepo(rootDir);
+  const promotableRuntimeLayout = await createPromotableRuntimeLayout(
+    "runtime-source-drift-auto-resumes-after-restart",
+    rootDir,
+    rootDir
+  );
 
   const completedExecution = updateAttempt(
     createAttempt({
@@ -2109,6 +2141,7 @@ async function verifyRuntimeSourceDriftAutoResumesAfterRestart(): Promise<void> 
     undefined,
     60_000,
     {
+      runtimeLayout: promotableRuntimeLayout,
       requestRuntimeRestart: (request) => {
         restartRequests.push(request);
       },
