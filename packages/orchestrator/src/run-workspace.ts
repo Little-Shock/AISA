@@ -101,6 +101,11 @@ export async function ensureRunManagedWorkspace(input: {
         }
       );
     }
+    await synchronizeManagedWorkspaceWithSource({
+      sourceRepoRoot,
+      managedRepoRoot,
+      managedWorkspaceRoot: validatedManagedWorkspaceRoot
+    });
     await provisionManagedWorkspaceToolchain({
       sourceRepoRoot,
       managedRepoRoot
@@ -163,6 +168,78 @@ export async function ensureRunManagedWorkspace(input: {
     workspace_root: sourceWorkspaceRoot,
     managed_workspace_root: validatedManagedWorkspaceRoot
   });
+}
+
+async function synchronizeManagedWorkspaceWithSource(input: {
+  sourceRepoRoot: string;
+  managedRepoRoot: string;
+  managedWorkspaceRoot: string;
+}): Promise<void> {
+  const [sourceHead, managedHead] = await Promise.all([
+    readGitHead(input.sourceRepoRoot),
+    readGitHead(input.managedRepoRoot)
+  ]);
+
+  if (!sourceHead || !managedHead || sourceHead === managedHead) {
+    return;
+  }
+
+  const [managedIsBehindSource, sourceIsBehindManaged] = await Promise.all([
+    isAncestorCommit(input.managedRepoRoot, managedHead, sourceHead),
+    isAncestorCommit(input.managedRepoRoot, sourceHead, managedHead)
+  ]);
+
+  if (managedIsBehindSource) {
+    const managedStatus = await readGitStatus(input.managedRepoRoot);
+    if (managedStatus.length > 0) {
+      throw new RunWorkspaceScopeError(
+        "managed_workspace_stale_from_source",
+        `运行的隔离工作区落后于当前源仓库 HEAD，且含有未提交变更，不能自动同步：${input.managedWorkspaceRoot}`,
+        {
+          managed_workspace_root: input.managedWorkspaceRoot,
+          source_repo_root: input.sourceRepoRoot,
+          source_head: sourceHead,
+          managed_head: managedHead,
+          managed_status: managedStatus
+        }
+      );
+    }
+
+    const fastForwardResult = await runGit(input.managedRepoRoot, [
+      "merge",
+      "--ff-only",
+      sourceHead
+    ]);
+    if (fastForwardResult.exitCode !== 0) {
+      throw new RunWorkspaceScopeError(
+        "managed_workspace_stale_from_source",
+        `运行的隔离工作区落后于当前源仓库 HEAD，但无法自动快进：${extractGitError(fastForwardResult.stderr)}`,
+        {
+          managed_workspace_root: input.managedWorkspaceRoot,
+          source_repo_root: input.sourceRepoRoot,
+          source_head: sourceHead,
+          managed_head: managedHead
+        }
+      );
+    }
+
+    return;
+  }
+
+  if (sourceIsBehindManaged) {
+    return;
+  }
+
+  throw new RunWorkspaceScopeError(
+    "managed_workspace_stale_from_source",
+    `运行的隔离工作区已经偏离当前源仓库 HEAD，不能自动同步：${input.managedWorkspaceRoot}`,
+    {
+      managed_workspace_root: input.managedWorkspaceRoot,
+      source_repo_root: input.sourceRepoRoot,
+      source_head: sourceHead,
+      managed_head: managedHead
+    }
+  );
 }
 
 async function createManagedWorkspace(input: {
@@ -456,6 +533,25 @@ async function readGitStatus(repoRoot: string): Promise<string[]> {
     .split("\n")
     .map((line) => line.trimEnd())
     .filter((line) => line.length > 0);
+}
+
+async function readGitHead(repoRoot: string): Promise<string | null> {
+  const result = await runGit(repoRoot, ["rev-parse", "HEAD"]);
+  return result.exitCode === 0 ? result.stdout.trim() : null;
+}
+
+async function isAncestorCommit(
+  repoRoot: string,
+  ancestorSha: string,
+  descendantSha: string
+): Promise<boolean> {
+  const result = await runGit(repoRoot, [
+    "merge-base",
+    "--is-ancestor",
+    ancestorSha,
+    descendantSha
+  ]);
+  return result.exitCode === 0;
 }
 
 async function runGit(

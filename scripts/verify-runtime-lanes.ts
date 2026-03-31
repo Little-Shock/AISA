@@ -25,9 +25,11 @@ import {
   maybePromoteVerifiedCheckpoint,
   resolveRuntimeLayout,
   syncRuntimeLayoutHint,
+  RunWorkspaceScopeError,
   type RuntimeRestartRequest
 } from "../packages/orchestrator/src/index.ts";
 import { buildServer } from "../apps/control-api/src/index.ts";
+import { ensureRunManagedWorkspace } from "../packages/orchestrator/src/run-workspace.ts";
 import {
   ensureWorkspace,
   getRun,
@@ -169,6 +171,8 @@ async function main(): Promise<void> {
   try {
     await verifyPersistedRuntimeLayoutHintRestoresSplitLaneWithoutEnv();
     await verifyCorruptRuntimeLayoutHintFailsClosed();
+    await verifyManagedWorkspaceFastForwardsToCurrentDevHead();
+    await verifyManagedWorkspaceRejectsDirtyStaleBaseline();
     await verifyControlApiUsesSeparateRuntimeLayout();
     const promotion = await verifyCheckpointPromotionUpdatesRuntimeRepo();
     const dirtyBlock = await verifyDirtyRuntimeRepoBlocksPromotion();
@@ -227,6 +231,98 @@ async function verifyCorruptRuntimeLayoutHintFailsClosed(): Promise<void> {
         env: {}
       }),
     /Runtime layout hint .* missing runtime_repo_root/
+  );
+}
+
+async function verifyManagedWorkspaceFastForwardsToCurrentDevHead(): Promise<void> {
+  const layout = await createRuntimeLaneFixture("aisa-runtime-managed-sync-");
+  const policy = await createRunWorkspaceScopePolicy({
+    runtimeRoot: layout.runtimeRepoRoot,
+    allowedRoots: buildRuntimeWorkspaceScopeRoots(layout.runtimeLayout),
+    managedWorkspaceRoot: layout.runtimeLayout.managedWorkspaceRoot
+  });
+  const run = createRun({
+    title: "Managed workspace follows dev head",
+    description:
+      "Ensure a clean managed workspace rebases itself onto the latest dev head before the next execution attempt.",
+    success_criteria: ["managed workspace head should match the latest dev head"],
+    constraints: [],
+    owner_id: "test-owner",
+    workspace_root: layout.devRepoRoot
+  });
+
+  const initialRun = await ensureRunManagedWorkspace({ run, policy });
+  assert.ok(initialRun.managed_workspace_root, "managed workspace should be provisioned");
+  const initialManagedHead = await readGitHead(initialRun.managed_workspace_root!);
+  const initialDevHead = await readGitHead(layout.devRepoRoot);
+  assert.equal(initialManagedHead, initialDevHead);
+
+  await writeFile(join(layout.devRepoRoot, "README.md"), "# runtime lane seed\n\nadvance dev\n", "utf8");
+  await runCommand(layout.devRepoRoot, ["git", "add", "README.md"]);
+  await runCommand(layout.devRepoRoot, ["git", "commit", "-m", "test: advance dev head"]);
+  const advancedDevHead = await readGitHead(layout.devRepoRoot);
+  assert.notEqual(advancedDevHead, initialDevHead);
+
+  const resyncedRun = await ensureRunManagedWorkspace({
+    run: initialRun,
+    policy
+  });
+  const managedHeadAfterSync = await readGitHead(resyncedRun.managed_workspace_root!);
+  const managedStatusAfterSync = await readGitStatus(resyncedRun.managed_workspace_root!);
+
+  assert.equal(
+    managedHeadAfterSync,
+    advancedDevHead,
+    "clean managed workspace should fast-forward to the latest dev head"
+  );
+  assert.deepEqual(
+    managedStatusAfterSync,
+    [],
+    "managed workspace should stay clean after fast-forwarding to dev"
+  );
+}
+
+async function verifyManagedWorkspaceRejectsDirtyStaleBaseline(): Promise<void> {
+  const layout = await createRuntimeLaneFixture("aisa-runtime-managed-stale-dirty-");
+  const policy = await createRunWorkspaceScopePolicy({
+    runtimeRoot: layout.runtimeRepoRoot,
+    allowedRoots: buildRuntimeWorkspaceScopeRoots(layout.runtimeLayout),
+    managedWorkspaceRoot: layout.runtimeLayout.managedWorkspaceRoot
+  });
+  const run = createRun({
+    title: "Managed workspace blocks dirty stale baseline",
+    description:
+      "Ensure a dirty managed workspace that fell behind dev fails closed instead of silently continuing from the wrong base.",
+    success_criteria: ["stale dirty managed workspace should be rejected"],
+    constraints: [],
+    owner_id: "test-owner",
+    workspace_root: layout.devRepoRoot
+  });
+
+  const initialRun = await ensureRunManagedWorkspace({ run, policy });
+  assert.ok(initialRun.managed_workspace_root, "managed workspace should be provisioned");
+
+  await writeFile(
+    join(initialRun.managed_workspace_root!, "README.md"),
+    "# runtime lane seed\n\ndirty local progress\n",
+    "utf8"
+  );
+
+  await writeFile(join(layout.devRepoRoot, "README.md"), "# runtime lane seed\n\nadvance dev\n", "utf8");
+  await runCommand(layout.devRepoRoot, ["git", "add", "README.md"]);
+  await runCommand(layout.devRepoRoot, ["git", "commit", "-m", "test: advance dev head"]);
+
+  await assert.rejects(
+    () =>
+      ensureRunManagedWorkspace({
+        run: initialRun,
+        policy
+      }),
+    (error: unknown) =>
+      error instanceof RunWorkspaceScopeError &&
+      error.code === "managed_workspace_stale_from_source" &&
+      error.message.includes("落后于当前源仓库 HEAD"),
+    "dirty stale managed workspace should fail closed with an explicit workspace error"
   );
 }
 
