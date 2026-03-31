@@ -13,6 +13,7 @@ import type {
   AttemptContract,
   AttemptHeartbeat,
   AttemptEvaluationSynthesisRecord,
+  AttemptPreflightEvaluation,
   AttemptRuntimeEvent,
   AttemptRuntimeState,
   AttemptEvaluation,
@@ -42,6 +43,7 @@ import {
   AttemptContractSchema,
   AttemptHeartbeatSchema,
   AttemptEvaluationSynthesisRecordSchema,
+  AttemptPreflightEvaluationSchema,
   AttemptRuntimeEventSchema,
   AttemptRuntimeStateSchema,
   AttemptEvaluationSchema,
@@ -118,6 +120,7 @@ export interface AttemptPaths {
   reviewInputPacketFile: string;
   reviewPacketFile: string;
   reviewOpinionsDir: string;
+  preflightEvaluationFile: string;
   runtimeVerificationFile: string;
   heartbeatFile: string;
   runtimeStateFile: string;
@@ -178,6 +181,7 @@ export function resolveAttemptPaths(
     reviewInputPacketFile: join(attemptDir, "review_input_packet.json"),
     reviewPacketFile: join(attemptDir, "review_packet.json"),
     reviewOpinionsDir: join(attemptDir, "review_opinions"),
+    preflightEvaluationFile: join(attemptDir, "artifacts", "preflight-evaluation.json"),
     runtimeVerificationFile: join(attemptDir, "artifacts", "runtime-verification.json"),
     heartbeatFile: join(attemptDir, "artifacts", "heartbeat.json"),
     runtimeStateFile: join(attemptDir, "artifacts", "runtime-state.json"),
@@ -751,6 +755,18 @@ export async function saveAttemptReviewOpinion(
   await writeJsonFile(join(attemptPaths.reviewOpinionsDir, `${opinion.opinion_id}.json`), opinion);
 }
 
+export async function saveAttemptPreflightEvaluation(
+  paths: WorkspacePaths,
+  evaluation: AttemptPreflightEvaluation
+): Promise<void> {
+  const attemptPaths = await ensureAttemptDirectories(
+    paths,
+    evaluation.run_id,
+    evaluation.attempt_id
+  );
+  await writeJsonFile(attemptPaths.preflightEvaluationFile, evaluation);
+}
+
 export async function saveAttemptRuntimeVerification(
   paths: WorkspacePaths,
   verification: AttemptRuntimeVerification
@@ -834,6 +850,21 @@ export async function listAttemptReviewOpinions(
   );
 
   return opinions.sort((left, right) => left.created_at.localeCompare(right.created_at));
+}
+
+export async function getAttemptPreflightEvaluation(
+  paths: WorkspacePaths,
+  runId: string,
+  attemptId: string
+): Promise<AttemptPreflightEvaluation | null> {
+  try {
+    const evaluation = await readJsonFile<AttemptPreflightEvaluation>(
+      resolveAttemptPaths(paths, runId, attemptId).preflightEvaluationFile
+    );
+    return AttemptPreflightEvaluationSchema.parse(evaluation);
+  } catch {
+    return null;
+  }
 }
 
 export async function getAttemptRuntimeVerification(

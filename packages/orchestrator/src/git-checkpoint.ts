@@ -1,16 +1,15 @@
 import { spawn } from "node:child_process";
 import { join, relative, resolve } from "node:path";
-import type { Attempt, AttemptEvaluation, Run } from "@autoresearch/domain";
+import type {
+  Attempt,
+  AttemptCheckpointPreflight,
+  AttemptEvaluation,
+  Run
+} from "@autoresearch/domain";
 import type { AttemptPaths } from "@autoresearch/state-store";
 import { writeJsonFile } from "@autoresearch/state-store";
 
-export interface GitCheckpointPreflight {
-  status: "ready" | "not_git_repo";
-  repo_root: string | null;
-  head_before: string | null;
-  status_before: string[];
-  created_at: string;
-}
+export type GitCheckpointPreflight = AttemptCheckpointPreflight;
 
 export type AttemptCheckpointOutcome =
   | {

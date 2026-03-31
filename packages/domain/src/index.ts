@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { z } from "zod";
+import { z } from "../../../scripts/local-zod.mjs";
 
 export const GoalStatusSchema = z.enum([
   "draft",
@@ -338,11 +338,23 @@ export const ExecutionVerificationPlanSchema = z.object({
   commands: z.array(VerificationCommandSchema).min(1)
 });
 
+export const AttemptDoneRubricItemSchema = z.object({
+  code: z.string().min(1),
+  description: z.string().min(1)
+});
+
+export const AttemptFailureModeSchema = z.object({
+  code: z.string().min(1),
+  description: z.string().min(1)
+});
+
 export const AttemptContractDraftSchema = z.object({
   attempt_type: AttemptTypeSchema,
   objective: z.string().min(1).optional(),
   success_criteria: z.array(z.string().min(1)).min(1).optional(),
   required_evidence: z.array(z.string().min(1)).min(1),
+  done_rubric: z.array(AttemptDoneRubricItemSchema).default([]),
+  failure_modes: z.array(AttemptFailureModeSchema).default([]),
   forbidden_shortcuts: z.array(z.string().min(1)).default([]),
   expected_artifacts: z.array(z.string().min(1)).default([]),
   verification_plan: ExecutionVerificationPlanSchema.optional()
@@ -355,9 +367,70 @@ export const AttemptContractSchema = z.object({
   objective: z.string().min(1),
   success_criteria: z.array(z.string().min(1)).min(1),
   required_evidence: z.array(z.string().min(1)).min(1),
+  done_rubric: z.array(AttemptDoneRubricItemSchema).default([]),
+  failure_modes: z.array(AttemptFailureModeSchema).default([]),
   forbidden_shortcuts: z.array(z.string().min(1)).default([]),
   expected_artifacts: z.array(z.string().min(1)).default([]),
   verification_plan: ExecutionVerificationPlanSchema.optional(),
+  created_at: z.string().datetime()
+});
+
+export const AttemptCheckpointPreflightSchema = z.object({
+  status: z.enum(["ready", "not_git_repo"]),
+  repo_root: z.string().nullable(),
+  head_before: z.string().nullable(),
+  status_before: z.array(z.string().min(1)).default([]),
+  created_at: z.string().datetime()
+});
+
+export const ExecutionVerificationToolchainAssessmentSchema = z.object({
+  has_package_json: z.boolean(),
+  has_local_node_modules: z.boolean(),
+  inferred_pnpm_commands: z.array(z.string().min(1)).default([]),
+  blocked_pnpm_commands: z.array(z.string().min(1)).default([])
+});
+
+export const AttemptContractPreflightSummarySchema = z.object({
+  has_required_evidence: z.boolean(),
+  has_done_rubric: z.boolean(),
+  has_failure_modes: z.boolean(),
+  has_verification_plan: z.boolean(),
+  done_rubric_codes: z.array(z.string().min(1)).default([]),
+  failure_mode_codes: z.array(z.string().min(1)).default([]),
+  verification_commands: z.array(z.string().min(1)).default([])
+});
+
+export const AttemptPreflightCheckStatusSchema = z.enum([
+  "passed",
+  "failed",
+  "not_applicable"
+]);
+
+export const AttemptPreflightCheckSchema = z.object({
+  code: z.string().min(1),
+  status: AttemptPreflightCheckStatusSchema,
+  message: z.string().min(1)
+});
+
+export const AttemptPreflightFailureCodeSchema = z.enum([
+  "missing_attempt_contract",
+  "missing_done_rubric",
+  "missing_failure_modes",
+  "missing_contract_verification_plan",
+  "blocked_pnpm_verification_plan"
+]);
+
+export const AttemptPreflightEvaluationSchema = z.object({
+  run_id: z.string(),
+  attempt_id: z.string(),
+  attempt_type: AttemptTypeSchema,
+  status: z.enum(["passed", "failed", "not_applicable"]),
+  failure_code: AttemptPreflightFailureCodeSchema.nullable().default(null),
+  failure_reason: z.string().min(1).nullable().default(null),
+  contract: AttemptContractPreflightSummarySchema.nullable().default(null),
+  toolchain_assessment: ExecutionVerificationToolchainAssessmentSchema.nullable().default(null),
+  checkpoint_preflight: AttemptCheckpointPreflightSchema.nullable().default(null),
+  checks: z.array(AttemptPreflightCheckSchema).default([]),
   created_at: z.string().datetime()
 });
 
@@ -674,8 +747,23 @@ export type BranchSpec = z.infer<typeof BranchSpecSchema>;
 export type EvalSpec = z.infer<typeof EvalSpecSchema>;
 export type VerificationCommand = z.infer<typeof VerificationCommandSchema>;
 export type ExecutionVerificationPlan = z.infer<typeof ExecutionVerificationPlanSchema>;
+export type AttemptDoneRubricItem = z.infer<typeof AttemptDoneRubricItemSchema>;
+export type AttemptFailureMode = z.infer<typeof AttemptFailureModeSchema>;
 export type AttemptContractDraft = z.infer<typeof AttemptContractDraftSchema>;
 export type AttemptContract = z.infer<typeof AttemptContractSchema>;
+export type AttemptCheckpointPreflight = z.infer<typeof AttemptCheckpointPreflightSchema>;
+export type ExecutionVerificationToolchainAssessment = z.infer<
+  typeof ExecutionVerificationToolchainAssessmentSchema
+>;
+export type AttemptContractPreflightSummary = z.infer<
+  typeof AttemptContractPreflightSummarySchema
+>;
+export type AttemptPreflightCheckStatus = z.infer<typeof AttemptPreflightCheckStatusSchema>;
+export type AttemptPreflightCheck = z.infer<typeof AttemptPreflightCheckSchema>;
+export type AttemptPreflightFailureCode = z.infer<
+  typeof AttemptPreflightFailureCodeSchema
+>;
+export type AttemptPreflightEvaluation = z.infer<typeof AttemptPreflightEvaluationSchema>;
 export type RuntimeVerificationFailureCode = z.infer<
   typeof RuntimeVerificationFailureCodeSchema
 >;
@@ -708,6 +796,40 @@ export type ContextBoard = z.infer<typeof ContextBoardSchema>;
 
 export function createEntityId(prefix: string): string {
   return `${prefix}_${randomUUID().slice(0, 8)}`;
+}
+
+function buildDefaultExecutionDoneRubric(): AttemptDoneRubricItem[] {
+  return [
+    {
+      code: "git_change_recorded",
+      description: "Leave a git-visible workspace change tied to the execution objective."
+    },
+    {
+      code: "artifact_recorded",
+      description: "Leave machine-readable artifacts that point at what changed."
+    },
+    {
+      code: "verification_replay_passed",
+      description: "Pass the replayable verification commands locked into this contract."
+    }
+  ];
+}
+
+function buildDefaultExecutionFailureModes(): AttemptFailureMode[] {
+  return [
+    {
+      code: "missing_replayable_verification_plan",
+      description: "Do not dispatch when attempt_contract.json has no replayable verification commands."
+    },
+    {
+      code: "missing_local_verifier_toolchain",
+      description: "Do not dispatch when pnpm replay depends on local node_modules that are missing."
+    },
+    {
+      code: "unchanged_workspace_state",
+      description: "Do not treat unchanged workspace state as a completed execution step."
+    }
+  ];
 }
 
 export function createGoal(input: CreateGoalInput): Goal {
@@ -860,10 +982,17 @@ export function createAttemptContract(input: {
   objective: string;
   success_criteria: string[];
   required_evidence: string[];
+  done_rubric?: AttemptDoneRubricItem[];
+  failure_modes?: AttemptFailureMode[];
   forbidden_shortcuts?: string[];
   expected_artifacts?: string[];
   verification_plan?: ExecutionVerificationPlan;
 }): AttemptContract {
+  const defaultDoneRubric =
+    input.attempt_type === "execution" ? buildDefaultExecutionDoneRubric() : [];
+  const defaultFailureModes =
+    input.attempt_type === "execution" ? buildDefaultExecutionFailureModes() : [];
+
   return AttemptContractSchema.parse({
     attempt_id: input.attempt_id,
     run_id: input.run_id,
@@ -871,9 +1000,38 @@ export function createAttemptContract(input: {
     objective: input.objective,
     success_criteria: input.success_criteria,
     required_evidence: input.required_evidence,
+    done_rubric: input.done_rubric ?? defaultDoneRubric,
+    failure_modes: input.failure_modes ?? defaultFailureModes,
     forbidden_shortcuts: input.forbidden_shortcuts ?? [],
     expected_artifacts: input.expected_artifacts ?? [],
     verification_plan: input.verification_plan,
+    created_at: new Date().toISOString()
+  });
+}
+
+export function createAttemptPreflightEvaluation(input: {
+  run_id: string;
+  attempt_id: string;
+  attempt_type: AttemptType;
+  status: "passed" | "failed" | "not_applicable";
+  failure_code?: AttemptPreflightFailureCode | null;
+  failure_reason?: string | null;
+  contract?: AttemptContractPreflightSummary | null;
+  toolchain_assessment?: ExecutionVerificationToolchainAssessment | null;
+  checkpoint_preflight?: AttemptCheckpointPreflight | null;
+  checks?: AttemptPreflightCheck[];
+}): AttemptPreflightEvaluation {
+  return AttemptPreflightEvaluationSchema.parse({
+    run_id: input.run_id,
+    attempt_id: input.attempt_id,
+    attempt_type: input.attempt_type,
+    status: input.status,
+    failure_code: input.failure_code ?? null,
+    failure_reason: input.failure_reason ?? null,
+    contract: input.contract ?? null,
+    toolchain_assessment: input.toolchain_assessment ?? null,
+    checkpoint_preflight: input.checkpoint_preflight ?? null,
+    checks: input.checks ?? [],
     created_at: new Date().toISOString()
   });
 }
@@ -1027,7 +1185,9 @@ export function isExecutionContractDraftReady(
   return (
     contract?.attempt_type === "execution" &&
     (contract.verification_plan?.commands.length ?? 0) > 0 &&
-    contract.required_evidence.length > 0
+    contract.required_evidence.length > 0 &&
+    contract.done_rubric.length > 0 &&
+    contract.failure_modes.length > 0
   );
 }
 
@@ -1037,7 +1197,9 @@ export function isExecutionAttemptContractReady(
   return (
     contract?.attempt_type === "execution" &&
     (contract.verification_plan?.commands.length ?? 0) > 0 &&
-    contract.required_evidence.length > 0
+    contract.required_evidence.length > 0 &&
+    contract.done_rubric.length > 0 &&
+    contract.failure_modes.length > 0
   );
 }
 

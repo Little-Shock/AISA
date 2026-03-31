@@ -31,6 +31,7 @@ import {
   getAttemptContext,
   getAttemptEvaluation,
   getAttemptEvaluationSynthesisRecord,
+  getAttemptPreflightEvaluation,
   getAttemptReviewInputPacket,
   getAttemptReviewPacket,
   getCurrentDecision,
@@ -112,7 +113,9 @@ type ScenarioObservation = {
   blocking_reason: string | null;
   review_packets: Array<{
     attempt_id: string;
+    attempt_type: string;
     attempt_status: string;
+    attempt_started_at: string | null;
     path: string;
     has_packet: boolean;
     matches_schema: boolean;
@@ -153,8 +156,16 @@ type ScenarioObservation = {
     runtime_verification_preexisting_git_status: string[];
     runtime_verification_new_git_status: string[];
     runtime_verification_changed_files: string[];
+    attempt_contract_done_rubric_codes: string[];
+    attempt_contract_failure_mode_codes: string[];
     attempt_contract_has_verification_plan: boolean;
     attempt_contract_verification_commands: string[];
+    has_preflight_artifact: boolean;
+    preflight_artifact_exists: boolean;
+    has_preflight_evaluation: boolean;
+    preflight_evaluation_status: string | null;
+    preflight_evaluation_failure_code: string | null;
+    preflight_evaluation_failure_reason: string | null;
     restart_required_message: string | null;
     restart_required_affected_files: string[];
   }>;
@@ -535,6 +546,26 @@ class ScenarioAdapter {
           required_evidence: [
             "git-visible workspace changes",
             "a replayable verification command that checks the execution change"
+          ],
+          done_rubric: [
+            {
+              code: "git_change_recorded",
+              description: "Leave a git-visible workspace change."
+            },
+            {
+              code: "verification_replay_passed",
+              description: "Pass the locked replay command."
+            }
+          ],
+          failure_modes: [
+            {
+              code: "missing_replayable_verification_plan",
+              description: "Do not dispatch without replayable verification."
+            },
+            {
+              code: "missing_local_verifier_toolchain",
+              description: "Do not dispatch pnpm replay without local node_modules."
+            }
           ],
           forbidden_shortcuts: [
             "do not claim success without replayable verification"
@@ -3026,8 +3057,9 @@ async function collectObservation(
       .filter((attempt) => ["completed", "failed", "stopped"].includes(attempt.status))
       .map(async (attempt) => {
         const reviewPacketPath = resolveAttemptPaths(workspacePaths, runId, attempt.id).reviewPacketFile;
-        const [reviewPacket, reviewPacketSchemaValidation] = await Promise.all([
+        const [reviewPacket, preflightEvaluation, reviewPacketSchemaValidation] = await Promise.all([
           getAttemptReviewPacket(workspacePaths, runId, attempt.id),
+          getAttemptPreflightEvaluation(workspacePaths, runId, attempt.id),
           validatePersistedReviewPacket({
             reviewPacketFile: reviewPacketPath
           })
@@ -3039,6 +3071,7 @@ async function collectObservation(
         const metaArtifact = artifactByKind.get("attempt_meta") ?? null;
         const contractArtifact = artifactByKind.get("attempt_contract") ?? null;
         const contextArtifact = artifactByKind.get("attempt_context") ?? null;
+        const preflightArtifact = artifactByKind.get("preflight_evaluation") ?? null;
         const resultArtifact = artifactByKind.get("attempt_result") ?? null;
         const evaluationArtifact = artifactByKind.get("attempt_evaluation") ?? null;
         const runtimeVerificationArtifact = artifactByKind.get("runtime_verification") ?? null;
@@ -3064,7 +3097,9 @@ async function collectObservation(
 
         return {
           attempt_id: attempt.id,
+          attempt_type: attempt.attempt_type,
           attempt_status: attempt.status,
+          attempt_started_at: attempt.started_at,
           path: reviewPacketPath,
           has_packet: reviewPacket !== null,
           matches_schema: reviewPacketSchemaValidation.matchesSchema,
@@ -3117,9 +3152,19 @@ async function collectObservation(
             reviewPacket?.runtime_verification?.new_git_status ?? [],
           runtime_verification_changed_files:
             reviewPacket?.runtime_verification?.changed_files ?? [],
+          attempt_contract_done_rubric_codes:
+            reviewPacket?.attempt_contract?.done_rubric.map((item) => item.code) ?? [],
+          attempt_contract_failure_mode_codes:
+            reviewPacket?.attempt_contract?.failure_modes.map((item) => item.code) ?? [],
           attempt_contract_has_verification_plan:
             reviewPacket?.attempt_contract?.verification_plan !== undefined,
           attempt_contract_verification_commands: attemptContractVerificationCommands,
+          has_preflight_artifact: preflightArtifact !== null,
+          preflight_artifact_exists: preflightArtifact?.exists ?? false,
+          has_preflight_evaluation: preflightEvaluation !== null,
+          preflight_evaluation_status: preflightEvaluation?.status ?? null,
+          preflight_evaluation_failure_code: preflightEvaluation?.failure_code ?? null,
+          preflight_evaluation_failure_reason: preflightEvaluation?.failure_reason ?? null,
           restart_required_message:
             typeof restartRequiredPayload?.message === "string"
               ? restartRequiredPayload.message
@@ -3459,6 +3504,48 @@ function assertCase(scenario: ScenarioCase, observation: ScenarioObservation): v
       executionPacket.has_runtime_verification,
       false,
       `${scenario.id}: execution should be blocked before runtime verification`
+    );
+    assert.equal(
+      executionPacket.has_preflight_artifact,
+      true,
+      `${scenario.id}: failed preflight should persist a preflight artifact`
+    );
+    assert.equal(
+      executionPacket.preflight_artifact_exists,
+      true,
+      `${scenario.id}: persisted preflight artifact should exist`
+    );
+    assert.equal(
+      executionPacket.has_preflight_evaluation,
+      true,
+      `${scenario.id}: failed preflight should persist a machine-readable evaluation`
+    );
+    assert.equal(
+      executionPacket.attempt_started_at,
+      null,
+      `${scenario.id}: failed preflight should not stamp started_at`
+    );
+    assert.equal(
+      executionPacket.preflight_evaluation_status,
+      "failed",
+      `${scenario.id}: execution preflight should fail closed`
+    );
+    assert.equal(
+      executionPacket.preflight_evaluation_failure_code,
+      "missing_contract_verification_plan",
+      `${scenario.id}: missing local toolchain case should fail on missing replayable verification`
+    );
+    assert.ok(
+      executionPacket.preflight_evaluation_failure_reason?.includes("no local node_modules"),
+      `${scenario.id}: preflight failure reason should surface the missing local toolchain`
+    );
+    assert.ok(
+      executionPacket.attempt_contract_done_rubric_codes.length > 0,
+      `${scenario.id}: execution contract should carry done_rubric`
+    );
+    assert.ok(
+      executionPacket.attempt_contract_failure_mode_codes.length > 0,
+      `${scenario.id}: execution contract should carry failure_modes`
     );
     assert.equal(
       executionPacket.attempt_contract_has_verification_plan,

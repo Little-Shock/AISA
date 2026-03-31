@@ -1,8 +1,8 @@
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import cors from "@fastify/cors";
-import { config as loadEnv } from "dotenv";
-import Fastify from "fastify";
+import cors from "../../../scripts/local-fastify-cors.mjs";
+import { config as loadEnv } from "../../../scripts/local-dotenv.mjs";
+import Fastify from "../../../scripts/local-fastify.mjs";
 import {
   CreateRunInputSchema,
   CreateGoalInputSchema,

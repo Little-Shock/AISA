@@ -5,14 +5,13 @@ import {
   createAttemptRuntimeState,
   createAttempt,
   createAttemptContract,
+  createAttemptPreflightEvaluation,
   createCurrentDecision,
   createEvent,
   createRunGovernanceState,
   createRunJournalEntry,
   createWorkerRun,
   finishWorkerRun,
-  isExecutionAttemptContractReady,
-  isExecutionContractDraftReady,
   updateAttempt,
   updateAttemptRuntimeState,
   updateBranch,
@@ -26,6 +25,8 @@ import {
   type AttemptContractDraft,
   type AttemptEvaluation,
   type AttemptEvaluationSynthesisRecord,
+  type AttemptPreflightCheck,
+  type AttemptPreflightFailureCode,
   type AttemptReviewInputPacket,
   type AttemptReviewInputRef,
   type AttemptReviewPacket,
@@ -94,6 +95,7 @@ import {
   saveAttemptContext,
   saveAttemptEvaluation,
   saveAttemptEvaluationSynthesisRecord,
+  saveAttemptPreflightEvaluation,
   saveAttemptHeartbeat,
   saveAttemptReviewInputPacket,
   saveAttemptReviewOpinion,
@@ -118,6 +120,7 @@ import { CodexCliWorkerAdapter } from "@autoresearch/worker-adapters";
 import {
   captureAttemptCheckpointPreflight,
   maybeCreateVerifiedExecutionCheckpoint,
+  type GitCheckpointPreflight,
   type AttemptCheckpointOutcome
 } from "./git-checkpoint.js";
 import {
@@ -212,6 +215,11 @@ export type ExecutionVerificationToolchainAssessment = {
   blocked_pnpm_commands: string[];
 };
 
+type AttemptDispatchPreflightOutcome = {
+  dispatchableAttemptContract: AttemptContract;
+  checkpointPreflight: GitCheckpointPreflight | null;
+};
+
 async function readWorkspacePackageScripts(
   workspaceRoot: string
 ): Promise<Record<string, string> | null> {
@@ -289,6 +297,46 @@ export async function assessExecutionVerificationToolchain(input: {
 
 function formatVerificationCommands(commands: string[]): string {
   return commands.join(", ");
+}
+
+function buildDefaultExecutionDoneRubric(): AttemptContract["done_rubric"] {
+  return [
+    {
+      code: "git_change_recorded",
+      description: "Leave a git-visible workspace change tied to the execution objective."
+    },
+    {
+      code: "artifact_recorded",
+      description: "Leave machine-readable artifacts that point at what changed."
+    },
+    {
+      code: "verification_replay_passed",
+      description: "Pass the replayable verification commands locked into this contract."
+    }
+  ];
+}
+
+function buildDefaultExecutionFailureModes(): AttemptContract["failure_modes"] {
+  return [
+    {
+      code: "missing_replayable_verification_plan",
+      description: "Do not dispatch when attempt_contract.json has no replayable verification commands."
+    },
+    {
+      code: "missing_local_verifier_toolchain",
+      description: "Do not dispatch when pnpm replay depends on local node_modules that are missing."
+    },
+    {
+      code: "unchanged_workspace_state",
+      description: "Do not treat unchanged workspace state as a completed execution step."
+    }
+  ];
+}
+
+function isExecutionContractDraft(
+  contract: AttemptContractDraft | null | undefined
+): contract is AttemptContractDraft {
+  return contract?.attempt_type === "execution";
 }
 
 export class Orchestrator {
@@ -904,7 +952,7 @@ export class Orchestrator {
     const latestResult = latestAttempt
       ? await getAttemptResult(this.workspacePaths, run.id, latestAttempt.id)
       : null;
-    let nextExecutionDraft = isExecutionContractDraftReady(
+    let nextExecutionDraft = isExecutionContractDraft(
       latestResult?.next_attempt_contract
     )
       ? latestResult.next_attempt_contract
@@ -1048,6 +1096,7 @@ export class Orchestrator {
     let heartbeatTimer: NodeJS.Timeout | null = null;
     let heartbeatStarted = false;
     let runtimeRestartRequest: RuntimeRestartRequest | null = null;
+    let checkpointPreflight: GitCheckpointPreflight | null = null;
     const startLease = await this.tryAcquireRunDispatchLease(
       runId,
       `start_attempt:${attemptId}`
@@ -1137,6 +1186,18 @@ export class Orchestrator {
       };
 
       await this.assertAttemptWorkspaceScope(run, attempt);
+      await saveAttemptContext(this.workspacePaths, runId, attempt.id, context);
+      attempt = updateAttempt(attempt, {
+        input_context_ref: this.buildAttemptContextRef(runId, attempt.id)
+      });
+      await saveAttempt(this.workspacePaths, attempt);
+      const preflightOutcome = await this.runAttemptDispatchPreflight({
+        runId,
+        attempt,
+        attemptContract,
+        attemptPaths
+      });
+      checkpointPreflight = preflightOutcome.checkpointPreflight;
       attempt = updateAttempt(attempt, {
         status: "running",
         started_at: new Date().toISOString()
@@ -1154,11 +1215,6 @@ export class Orchestrator {
           waiting_for_human: false
         })
       );
-      await saveAttemptContext(this.workspacePaths, runId, attempt.id, context);
-      attempt = updateAttempt(attempt, {
-        input_context_ref: this.buildAttemptContextRef(runId, attempt.id)
-      });
-      await saveAttempt(this.workspacePaths, attempt);
       await this.writeAttemptHeartbeat({
         runId,
         attemptId: attempt.id,
@@ -1175,10 +1231,6 @@ export class Orchestrator {
         });
       }, this.attemptHeartbeatIntervalMs);
       heartbeatTimer.unref?.();
-      const checkpointPreflight = await captureAttemptCheckpointPreflight({
-        attempt,
-        attemptPaths
-      });
       await appendRunJournal(
         this.workspacePaths,
         createRunJournalEntry({
@@ -1193,14 +1245,10 @@ export class Orchestrator {
       await startLease.release();
       startLeaseReleased = true;
 
-      const dispatchableAttemptContract = await this.requireDispatchableAttemptContract(
-        attempt,
-        attemptContract
-      );
       const execution = await this.adapter.runAttemptTask({
         run,
         attempt,
-        attemptContract: dispatchableAttemptContract,
+        attemptContract: preflightOutcome.dispatchableAttemptContract,
         context,
         workspacePaths: this.workspacePaths
       });
@@ -1221,7 +1269,7 @@ export class Orchestrator {
       const runtimeVerification = await runAttemptRuntimeVerification({
         run,
         attempt,
-        attemptContract: dispatchableAttemptContract,
+        attemptContract: preflightOutcome.dispatchableAttemptContract,
         result: execution.writeback,
         attemptPaths
       });
@@ -2123,6 +2171,7 @@ export class Orchestrator {
     addPath("attempt_meta", input.attemptPaths.metaFile);
     addPath("attempt_contract", input.attemptPaths.contractFile);
     addPath("attempt_context", input.attemptPaths.contextFile);
+    addPath("preflight_evaluation", input.attemptPaths.preflightEvaluationFile);
     addPath("attempt_result", input.attemptPaths.resultFile);
     addPath("attempt_evaluation", input.attemptPaths.evaluationFile);
     addPath("review_input_packet", input.reviewInputPacketFile);
@@ -2754,7 +2803,7 @@ export class Orchestrator {
 
     for (const attempt of orderedAttempts) {
       const result = await getAttemptResult(this.workspacePaths, runId, attempt.id);
-      if (isExecutionContractDraftReady(result?.next_attempt_contract)) {
+      if (isExecutionContractDraft(result?.next_attempt_contract)) {
         return result.next_attempt_contract;
       }
     }
@@ -2777,7 +2826,7 @@ export class Orchestrator {
         )
           ? await getAttemptContract(this.workspacePaths, run.id, latestAttempt.id)
           : null;
-      const draft = isExecutionContractDraftReady(nextExecutionDraft)
+      const draft = isExecutionContractDraft(nextExecutionDraft)
         ? nextExecutionDraft
         : null;
       const inferredVerificationPlan =
@@ -2796,6 +2845,18 @@ export class Orchestrator {
             "Leave artifacts that show what changed.",
             "Pass the replayable verification commands locked into this contract."
           ],
+        done_rubric:
+          draft && draft.done_rubric.length > 0
+            ? draft.done_rubric
+            : reusableExecutionContract && reusableExecutionContract.done_rubric.length > 0
+              ? reusableExecutionContract.done_rubric
+              : buildDefaultExecutionDoneRubric(),
+        failure_modes:
+          draft && draft.failure_modes.length > 0
+            ? draft.failure_modes
+            : reusableExecutionContract && reusableExecutionContract.failure_modes.length > 0
+              ? reusableExecutionContract.failure_modes
+              : buildDefaultExecutionFailureModes(),
         forbidden_shortcuts:
           draft?.forbidden_shortcuts ??
           reusableExecutionContract?.forbidden_shortcuts ?? [
@@ -2884,41 +2945,194 @@ export class Orchestrator {
     return null;
   }
 
-  private async requireDispatchableAttemptContract(
-    attempt: Attempt,
+  private buildAttemptPreflightEvaluationRef(runId: string, attemptId: string): string {
+    return `runs/${runId}/attempts/${attemptId}/artifacts/preflight-evaluation.json`;
+  }
+
+  private buildAttemptContractPreflightSummary(
     attemptContract: AttemptContract | null
-  ): Promise<AttemptContract> {
+  ): NonNullable<
+    Parameters<typeof createAttemptPreflightEvaluation>[0]["contract"]
+  > | null {
     if (!attemptContract) {
-      throw new Error(
-        `Attempt ${attempt.id} is missing attempt_contract.json. Dispatch is blocked until the contract is recreated.`
+      return null;
+    }
+
+    return {
+      has_required_evidence: attemptContract.required_evidence.length > 0,
+      has_done_rubric: attemptContract.done_rubric.length > 0,
+      has_failure_modes: attemptContract.failure_modes.length > 0,
+      has_verification_plan: (attemptContract.verification_plan?.commands.length ?? 0) > 0,
+      done_rubric_codes: attemptContract.done_rubric.map((item) => item.code),
+      failure_mode_codes: attemptContract.failure_modes.map((item) => item.code),
+      verification_commands:
+        attemptContract.verification_plan?.commands.map((item) => item.command) ?? []
+    };
+  }
+
+  private async runAttemptDispatchPreflight(input: {
+    runId: string;
+    attempt: Attempt;
+    attemptContract: AttemptContract | null;
+    attemptPaths: ReturnType<typeof resolveAttemptPaths>;
+  }): Promise<AttemptDispatchPreflightOutcome> {
+    if (input.attempt.attempt_type !== "execution") {
+      if (!input.attemptContract) {
+        throw new Error(
+          `Attempt ${input.attempt.id} is missing attempt_contract.json. Dispatch is blocked until the contract is recreated.`
+        );
+      }
+      return {
+        dispatchableAttemptContract: input.attemptContract,
+        checkpointPreflight: null
+      };
+    }
+
+    const checkpointPreflight = await captureAttemptCheckpointPreflight({
+      attempt: input.attempt,
+      attemptPaths: input.attemptPaths
+    });
+    const assessment = await assessExecutionVerificationToolchain({
+      workspaceRoot: input.attempt.workspace_root,
+      verificationPlan: input.attemptContract.verification_plan ?? null
+    });
+    const contractSummary = this.buildAttemptContractPreflightSummary(input.attemptContract);
+    const checks: AttemptPreflightCheck[] = [];
+    const addCheck = (
+      code: string,
+      status: AttemptPreflightCheck["status"],
+      message: string
+    ): void => {
+      checks.push({
+        code,
+        status,
+        message
+      });
+    };
+
+    let failureCode: AttemptPreflightFailureCode | null = null;
+    let failureReason: string | null = null;
+
+    if (input.attemptContract) {
+      addCheck("attempt_contract_present", "passed", "attempt_contract.json is present.");
+    } else {
+      failureCode = "missing_attempt_contract";
+      failureReason = `Attempt ${input.attempt.id} is missing attempt_contract.json. Dispatch is blocked until the contract is recreated.`;
+      addCheck("attempt_contract_present", "failed", failureReason);
+    }
+
+    if (contractSummary?.has_done_rubric) {
+      addCheck("done_rubric_present", "passed", "Execution contract includes done_rubric.");
+    } else if (!failureReason) {
+      failureCode = "missing_done_rubric";
+      failureReason = `Execution attempt ${input.attempt.id} is blocked before dispatch because attempt_contract.json is missing done_rubric.`;
+      addCheck("done_rubric_present", "failed", failureReason);
+    } else {
+      addCheck(
+        "done_rubric_present",
+        "not_applicable",
+        "done_rubric check was skipped after an earlier preflight failure."
       );
     }
 
-    if (attempt.attempt_type !== "execution") {
-      return attemptContract;
+    if (contractSummary?.has_failure_modes) {
+      addCheck("failure_modes_present", "passed", "Execution contract includes failure_modes.");
+    } else if (!failureReason) {
+      failureCode = "missing_failure_modes";
+      failureReason = `Execution attempt ${input.attempt.id} is blocked before dispatch because attempt_contract.json is missing failure_modes.`;
+      addCheck("failure_modes_present", "failed", failureReason);
+    } else {
+      addCheck(
+        "failure_modes_present",
+        "not_applicable",
+        "failure_modes check was skipped after an earlier preflight failure."
+      );
     }
 
-    const assessment = await assessExecutionVerificationToolchain({
-      workspaceRoot: attempt.workspace_root,
-      verificationPlan: attemptContract.verification_plan ?? null
-    });
-
-    if (!isExecutionAttemptContractReady(attemptContract)) {
-      throw new Error(
-        this.buildMissingVerificationToolchainMessage(attempt, assessment) ??
-          `Execution attempt ${attempt.id} is missing replayable verification commands in attempt_contract.json.`
+    const missingVerificationPlanMessage =
+      this.buildMissingVerificationToolchainMessage(input.attempt, assessment) ??
+      `Execution attempt ${input.attempt.id} is missing replayable verification commands in attempt_contract.json.`;
+    if (contractSummary?.has_verification_plan) {
+      addCheck(
+        "verification_plan_present",
+        "passed",
+        "Execution contract includes replayable verification commands."
+      );
+    } else if (!failureReason) {
+      failureCode = "missing_contract_verification_plan";
+      failureReason = missingVerificationPlanMessage;
+      addCheck("verification_plan_present", "failed", failureReason);
+    } else {
+      addCheck(
+        "verification_plan_present",
+        "not_applicable",
+        "verification_plan check was skipped after an earlier preflight failure."
       );
     }
 
     const blockedPnpmMessage = this.buildBlockedPnpmVerificationMessage(
-      attempt,
+      input.attempt,
       assessment
     );
-    if (blockedPnpmMessage) {
-      throw new Error(blockedPnpmMessage);
+    if (failureReason) {
+      addCheck(
+        "pnpm_replay_commands_locally_available",
+        "not_applicable",
+        "pnpm replay check was skipped after an earlier preflight failure."
+      );
+    } else if (blockedPnpmMessage === null) {
+      addCheck(
+        "pnpm_replay_commands_locally_available",
+        "passed",
+        "Replay commands are locally runnable in this workspace."
+      );
+    } else {
+      failureCode = "blocked_pnpm_verification_plan";
+      failureReason = blockedPnpmMessage;
+      addCheck("pnpm_replay_commands_locally_available", "failed", failureReason);
     }
 
-    return attemptContract;
+    const evaluation = createAttemptPreflightEvaluation({
+      run_id: input.runId,
+      attempt_id: input.attempt.id,
+      attempt_type: input.attempt.attempt_type,
+      status: failureReason ? "failed" : "passed",
+      failure_code: failureCode,
+      failure_reason: failureReason,
+      contract: contractSummary,
+      toolchain_assessment: assessment,
+      checkpoint_preflight: checkpointPreflight,
+      checks
+    });
+    await saveAttemptPreflightEvaluation(this.workspacePaths, evaluation);
+
+    const artifactPath = this.buildAttemptPreflightEvaluationRef(
+      input.runId,
+      input.attempt.id
+    );
+    await appendRunJournal(
+      this.workspacePaths,
+      createRunJournalEntry({
+        run_id: input.runId,
+        attempt_id: input.attempt.id,
+        type: failureReason ? "attempt.preflight.failed" : "attempt.preflight.passed",
+        payload: {
+          status: evaluation.status,
+          failure_code: evaluation.failure_code,
+          message: evaluation.failure_reason,
+          artifact_path: artifactPath
+        }
+      })
+    );
+
+    if (failureReason) {
+      throw new Error(failureReason);
+    }
+
+    return {
+      dispatchableAttemptContract: input.attemptContract!,
+      checkpointPreflight
+    };
   }
 
   private getActiveAttemptKey(runId: string, attemptId: string): string {

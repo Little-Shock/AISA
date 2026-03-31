@@ -2113,6 +2113,7 @@ async function verifyCheckpointedRestartResetsAutoResumeBudget(): Promise<void> 
     timeoutMs: 20_000,
     delayMs: 120
   });
+  await wait(50);
 
   const current = await getCurrentDecision(workspacePaths, run.id);
   const journal = await listRunJournal(workspacePaths, run.id);

@@ -62,6 +62,17 @@ type GovernanceReport = {
   }>;
 };
 
+type RunLoopReport = {
+  suite: string;
+  passed: number;
+  failed: number;
+  results: Array<{
+    id: string;
+    status: "pass" | "fail";
+    error?: string;
+  }>;
+};
+
 type ScriptResult = {
   exitCode: number | null;
   stdout: string;
@@ -119,13 +130,29 @@ function formatScriptFailure(label: string, result: ScriptResult): string {
   ].join("\n\n");
 }
 
-async function assertRunLoopReplay(): Promise<void> {
+async function assertRunLoopReplay(): Promise<RunLoopReport> {
   const result = await runTsxScript("scripts/verify-run-loop.ts");
   assert.equal(
     result.exitCode,
     0,
     formatScriptFailure("scripts/verify-run-loop.ts", result)
   );
+
+  const report = JSON.parse(result.stdout) as RunLoopReport;
+  const preflightFailClosedCase = report.results.find(
+    (entry) => entry.id === "execution-missing-local-toolchain-blocks-dispatch"
+  );
+  assert.ok(
+    preflightFailClosedCase,
+    "run-loop 回归必须包含 execution-missing-local-toolchain-blocks-dispatch。"
+  );
+  assert.equal(
+    preflightFailClosedCase.status,
+    "pass",
+    "execution preflight fail-closed smoke 必须通过。"
+  );
+
+  return report;
 }
 
 async function assertControlApiSupervisorReplay(): Promise<void> {

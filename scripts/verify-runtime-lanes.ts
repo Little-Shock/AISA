@@ -92,6 +92,26 @@ class RuntimeLaneAdapter {
               "Leave git-visible changes in the managed workspace.",
               "Pass a replayable command that proves the marker file was updated."
             ],
+            done_rubric: [
+              {
+                code: "git_change_recorded",
+                description: "Leave a git-visible managed-workspace change."
+              },
+              {
+                code: "verification_replay_passed",
+                description: "Pass the locked replay command."
+              }
+            ],
+            failure_modes: [
+              {
+                code: "missing_replayable_verification_plan",
+                description: "Do not dispatch without replayable verification."
+              },
+              {
+                code: "missing_local_verifier_toolchain",
+                description: "Do not dispatch pnpm replay without local node_modules."
+              }
+            ],
             forbidden_shortcuts: [
               "Do not claim success without replaying the locked verification command."
             ],
@@ -173,7 +193,8 @@ async function verifyControlApiUsesSeparateRuntimeLayout(): Promise<void> {
     startOrchestrator: false,
     runtimeRepoRoot: layout.runtimeRepoRoot,
     devRepoRoot: layout.devRepoRoot,
-    runtimeDataRoot: layout.runtimeDataRoot
+    runtimeDataRoot: layout.runtimeDataRoot,
+    managedWorkspaceRoot: layout.runtimeLayout.managedWorkspaceRoot
   });
 
   try {
@@ -289,7 +310,19 @@ async function verifyCheckpointPromotionUpdatesRuntimeRepo(): Promise<{
 
   const attempts = await listAttempts(workspacePaths, run.id);
   const executionAttempt = attempts.find((attempt) => attempt.attempt_type === "execution");
-  assert.ok(executionAttempt, "execution attempt should be persisted");
+  assert.ok(
+    executionAttempt,
+    `execution attempt should be persisted.\n\n${JSON.stringify(
+      {
+        stop_reason: driveResult.stopReason,
+        completed_attempt_count: driveResult.completedAttemptCount,
+        current: driveResult.current,
+        attempts
+      },
+      null,
+      2
+    )}`
+  );
   assert.equal(executionAttempt?.status, "completed");
   assert.equal(driveResult.completedAttemptCount, 2);
   await sleep(20);
@@ -421,17 +454,20 @@ async function createRuntimeLaneFixture(prefix: string): Promise<{
   const runtimeRepoRoot = join(baseDir, "runtime-repo");
   const runtimeDataRoot = join(baseDir, "runtime-data");
   const attemptWorktreeRoot = join(baseDir, "attempt-worktree");
+  const managedWorkspaceRoot = join(baseDir, ".aisa-run-worktrees");
 
   await createSeedRepo(seedRepoRoot);
   await cloneRepo(seedRepoRoot, devRepoRoot);
   await cloneRepo(seedRepoRoot, runtimeRepoRoot);
   await mkdir(runtimeDataRoot, { recursive: true });
+  await mkdir(managedWorkspaceRoot, { recursive: true });
   await runCommand(devRepoRoot, ["git", "worktree", "add", "--detach", attemptWorktreeRoot, "HEAD"]);
   const runtimeLayout = resolveRuntimeLayout({
     repositoryRoot: devRepoRoot,
     devRepoRoot,
     runtimeRepoRoot,
-    runtimeDataRoot
+    runtimeDataRoot,
+    managedWorkspaceRoot
   });
 
   return {

@@ -182,6 +182,26 @@ class ProgressingAdapter {
                 "Leave git-visible workspace changes tied to the objective.",
                 "Pass a replayable verification command that proves execution-note.md was written."
               ],
+              done_rubric: [
+                {
+                  code: "git_change_recorded",
+                  description: "Leave a git-visible workspace change."
+                },
+                {
+                  code: "verification_replay_passed",
+                  description: "Pass the locked replay command."
+                }
+              ],
+              failure_modes: [
+                {
+                  code: "missing_replayable_verification_plan",
+                  description: "Do not dispatch without replayable verification."
+                },
+                {
+                  code: "missing_local_verifier_toolchain",
+                  description: "Do not dispatch pnpm replay without local node_modules."
+                }
+              ],
               forbidden_shortcuts: [
                 "Do not claim execution success without replaying the locked verification command."
               ],
