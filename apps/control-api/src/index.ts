@@ -1,4 +1,5 @@
-import { dirname, join } from "node:path";
+import { mkdir, writeFile } from "node:fs/promises";
+import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import cors from "@fastify/cors";
 import { config as loadEnv } from "dotenv";
@@ -9,8 +10,9 @@ import {
   createBranch,
   createCurrentDecision,
   createEvent,
-  createGoal,
-  createRun,
+    createGoal,
+    createRunAutomationControl,
+    createRun,
   createRunJournalEntry,
   createRunSteer,
   createSteer,
@@ -25,10 +27,12 @@ import {
   buildRuntimeWorkspaceScopeRoots,
   createRunWorkspaceScopePolicy,
   lockRunWorkspaceRoot,
+  loadSelfBootstrapNextTaskActiveEntry,
   Orchestrator,
   repairRunManagedWorkspace,
   ensureRunManagedWorkspace,
   resolveRuntimeLayout,
+  SELF_BOOTSTRAP_NEXT_TASK_ACTIVE_ENTRY_SNAPSHOT_FILE_NAME,
   syncRuntimeLayoutHint,
   RunWorkspaceScopeError
 } from "@autoresearch/orchestrator";
@@ -52,8 +56,9 @@ import {
   getPlanArtifacts,
   getReport,
   getRun,
-  getRunGovernanceState,
-  getRunReport,
+    getRunGovernanceState,
+    getRunAutomationControl,
+    getRunReport,
   getWriteback,
   listAttemptRuntimeEvents,
   listAttempts,
@@ -64,13 +69,15 @@ import {
   listRunSteers,
   listSteers,
   listWorkerRuns,
+  resolveRunPaths,
   resolveWorkspacePaths,
   saveCurrentDecision,
   saveBranch,
   saveGoal,
   savePlanArtifacts,
-  saveRun,
-  saveRunSteer,
+    saveRun,
+    saveRunAutomationControl,
+    saveRunSteer,
   saveSteer
 } from "@autoresearch/state-store";
 import { CodexCliWorkerAdapter, loadCodexCliConfig } from "@autoresearch/worker-adapters";
@@ -202,8 +209,37 @@ export async function buildServer(
   orchestrator = new Orchestrator(workspacePaths, adapter, undefined, undefined, {
     runWorkspaceScopePolicy,
     requestRuntimeRestart,
-    runtimeLayout
+    runtimeLayout,
+    maxConcurrentAttempts: readPositiveIntegerEnv("AISA_MAX_CONCURRENT_ATTEMPTS", 3)
   });
+
+  const activateRunAutomation = async (runId: string, imposedBy: string) => {
+    await saveRunAutomationControl(
+      workspacePaths,
+      createRunAutomationControl({
+        run_id: runId,
+        mode: "active",
+        imposed_by: imposedBy
+      })
+    );
+  };
+
+  const setManualOnlyRunAutomation = async (input: {
+    runId: string;
+    reason: string;
+    imposedBy: string;
+  }) => {
+    await saveRunAutomationControl(
+      workspacePaths,
+      createRunAutomationControl({
+        run_id: input.runId,
+        mode: "manual_only",
+        reason_code: "manual_recovery",
+        reason: input.reason,
+        imposed_by: input.imposedBy
+      })
+    );
+  };
 
   await ensureWorkspace(workspacePaths);
   await app.register(cors, {
@@ -277,9 +313,10 @@ export async function buildServer(
   };
 
   const buildRunDetailPayload = async (runId: string) => {
-    const [run, current, governance, attempts, steers, journal, report] = await Promise.all([
+    const [run, current, automation, governance, attempts, steers, journal, report] = await Promise.all([
       getRun(workspacePaths, runId),
       getCurrentDecision(workspacePaths, runId),
+      getRunAutomationControl(workspacePaths, runId),
       getRunGovernanceState(workspacePaths, runId),
       listAttempts(workspacePaths, runId),
       listRunSteers(workspacePaths, runId),
@@ -313,6 +350,7 @@ export async function buildServer(
     return {
       run,
       current,
+      automation,
       governance,
       run_health: runHealth,
       worker_effort: workerEffort,
@@ -325,8 +363,9 @@ export async function buildServer(
   };
 
   const buildRunSummaryItem = async (run: Awaited<ReturnType<typeof listRuns>>[number]) => {
-    const [current, governance, attempts] = await Promise.all([
+    const [current, automation, governance, attempts] = await Promise.all([
       getCurrentDecision(workspacePaths, run.id),
+      getRunAutomationControl(workspacePaths, run.id),
       getRunGovernanceState(workspacePaths, run.id),
       listAttempts(workspacePaths, run.id)
     ]);
@@ -349,6 +388,7 @@ export async function buildServer(
     return {
       run,
       current,
+      automation,
       governance,
       worker_effort: orchestrator.describeRunWorkerEffort(run),
       run_health: assessRunHealth({
@@ -556,10 +596,25 @@ export async function buildServer(
       launch: true,
       seed_steer: true
     };
+    let activeNextTask;
+    try {
+      activeNextTask = await loadSelfBootstrapNextTaskActiveEntry(
+        runtimeLayout.devRepoRoot
+      );
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : String(error);
+      return reply.code(400).send({ message });
+    }
+
     const template = buildSelfBootstrapRunTemplate({
       workspaceRoot: runtimeLayout.devRepoRoot,
       ownerId: body.owner_id,
-      focus: body.focus
+      focus: body.focus,
+      activeNextTask: {
+        path: activeNextTask.path,
+        ...activeNextTask.entry
+      }
     });
     let run;
     try {
@@ -592,6 +647,34 @@ export async function buildServer(
           title: run.title,
           owner_id: run.owner_id,
           template: "self-bootstrap"
+        }
+      })
+    );
+    const runPaths = resolveRunPaths(workspacePaths, run.id);
+    const activeNextTaskSnapshotPath = join(
+      runPaths.artifactsDir,
+      SELF_BOOTSTRAP_NEXT_TASK_ACTIVE_ENTRY_SNAPSHOT_FILE_NAME
+    );
+    await mkdir(runPaths.artifactsDir, { recursive: true });
+    await writeFile(
+      activeNextTaskSnapshotPath,
+      `${JSON.stringify(activeNextTask.entry, null, 2)}\n`,
+      "utf8"
+    );
+    const activeNextTaskSnapshotRef = relative(
+      workspacePaths.rootDir,
+      activeNextTaskSnapshotPath
+    );
+    await appendRunJournal(
+      workspacePaths,
+      createRunJournalEntry({
+        run_id: run.id,
+        type: "run.self_bootstrap.active_next_task.captured",
+        payload: {
+          published_path: activeNextTask.path,
+          snapshot_path: activeNextTaskSnapshotRef,
+          title: activeNextTask.entry.title,
+          source_anchor: activeNextTask.entry.source_anchor
         }
       })
     );
@@ -636,13 +719,16 @@ export async function buildServer(
           }
         })
       );
+      await activateRunAutomation(run.id, "control-api");
     }
 
     return reply.code(201).send({
       run,
       current,
       steer: runSteer,
-      template: "self-bootstrap"
+      template: "self-bootstrap",
+      active_next_task: activeNextTask.path,
+      active_next_task_snapshot: activeNextTaskSnapshotRef
     });
   });
 
@@ -681,6 +767,7 @@ export async function buildServer(
       });
 
       await saveCurrentDecision(workspacePaths, nextCurrent);
+      await activateRunAutomation(runId, "control-api");
       await appendRunJournal(
         workspacePaths,
         createRunJournalEntry({
@@ -732,6 +819,11 @@ export async function buildServer(
           summary
         });
         await saveCurrentDecision(workspacePaths, nextCurrent);
+        await setManualOnlyRunAutomation({
+          runId,
+          reason: summary,
+          imposedBy: "control-api"
+        });
         await appendRunJournal(
           workspacePaths,
           createRunJournalEntry({
@@ -781,6 +873,11 @@ export async function buildServer(
           summary
         });
         await saveCurrentDecision(workspacePaths, nextCurrent);
+        await setManualOnlyRunAutomation({
+          runId,
+          reason: summary,
+          imposedBy: "control-api"
+        });
         await appendRunJournal(
           workspacePaths,
           createRunJournalEntry({
@@ -855,6 +952,7 @@ export async function buildServer(
         summary: "Steer queued. Loop will use it in the next attempt."
       });
       await saveCurrentDecision(workspacePaths, nextCurrent);
+      await activateRunAutomation(runId, "control-api");
 
       await appendRunJournal(
         workspacePaths,

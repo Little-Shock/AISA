@@ -6,6 +6,7 @@ import { join } from "node:path";
 import {
   createAttempt,
   createAttemptContract,
+  createRunAutomationControl,
   createCurrentDecision,
   createRun,
   createRunJournalEntry,
@@ -23,9 +24,10 @@ import {
 import {
   appendRunJournal,
   ensureWorkspace,
-  getAttemptHandoffBundle,
-  getAttemptReviewPacket,
-  getCurrentDecision,
+    getAttemptHandoffBundle,
+    getAttemptReviewPacket,
+    getRunAutomationControl,
+    getCurrentDecision,
   listAttempts,
   listRunJournal,
   resolveAttemptPaths,
@@ -33,10 +35,11 @@ import {
   saveAttempt,
   saveAttemptContract,
   saveAttemptResult,
-  saveAttemptRuntimeVerification,
-  saveCurrentDecision,
-  saveRun
-} from "../packages/state-store/src/index.js";
+    saveAttemptRuntimeVerification,
+    saveCurrentDecision,
+    saveRun,
+    saveRunAutomationControl
+  } from "../packages/state-store/src/index.js";
 
 type CaseResult = {
   id: string;
@@ -308,6 +311,18 @@ class FastRetryExecutionAdapter {
   }
 }
 
+class NeverDispatchAdapter {
+  readonly type = "fake-codex";
+
+  async runAttemptTask(): Promise<{
+    writeback: WorkerWriteback;
+    reportMarkdown: string;
+    exitCode: number;
+  }> {
+    throw new Error("Superseded self-bootstrap run should not auto resume or dispatch.");
+  }
+}
+
 async function wait(ms: number): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -384,7 +399,7 @@ async function settleUntilSnapshot(
   throw new Error(`Timed out while waiting for run ${input.runId} to reach the expected snapshot.`);
 }
 
-async function bootstrapRun(title: string): Promise<{
+async function bootstrapRun(title: string, runTitle?: string): Promise<{
   run: Run;
   workspacePaths: ReturnType<typeof resolveWorkspacePaths>;
   rootDir: string;
@@ -396,7 +411,7 @@ async function bootstrapRun(title: string): Promise<{
   const detachedRuntimeLayout = await createDetachedRuntimeLayout(title, rootDir);
 
   const run = createRun({
-    title,
+    title: runTitle ?? title,
     description: "Verify autonomous resume behavior",
     success_criteria: ["Produce the next valid move without defaulting to human wait."],
     constraints: [],
@@ -1741,6 +1756,121 @@ async function verifyWorkerStalledResearchRetriesQuickly(): Promise<void> {
   );
 }
 
+async function verifySupersededSelfBootstrapRunDoesNotAutoResume(): Promise<void> {
+  const { run, workspacePaths, detachedRuntimeLayout } = await bootstrapRun(
+    "superseded-self-bootstrap-does-not-auto-resume",
+    "AISA 自举下一步规划"
+  );
+
+  const failedResearch = updateAttempt(
+    createAttempt({
+      run_id: run.id,
+      attempt_type: "research",
+      worker: "fake-codex",
+      objective: "Do not revive superseded self-bootstrap runs.",
+      success_criteria: run.success_criteria,
+      workspace_root: run.workspace_root
+    }),
+    {
+      status: "failed",
+      started_at: new Date().toISOString(),
+      ended_at: new Date().toISOString()
+    }
+  );
+
+  const stallMessage = [
+    "Codex CLI stalled for worker pid 5454.",
+    "No runtime stdout activity arrived for 190000ms (stall window 180000ms).",
+    "No live child command remained and no final output was written."
+  ].join(" ");
+
+  await saveAttempt(workspacePaths, failedResearch);
+  await saveCurrentDecision(
+    workspacePaths,
+    createCurrentDecision({
+      run_id: run.id,
+      run_status: "running",
+      latest_attempt_id: failedResearch.id,
+      recommended_next_action: "retry_attempt",
+      recommended_attempt_type: "research",
+      summary: "Superseded self-bootstrap run was accidentally revived.",
+      blocking_reason: `Current run was superseded by active self-bootstrap run run_active123. ${stallMessage}`,
+      waiting_for_human: false
+    })
+  );
+  await saveRunAutomationControl(
+    workspacePaths,
+    createRunAutomationControl({
+      run_id: run.id,
+      mode: "manual_only",
+      reason_code: "superseded_self_bootstrap_run",
+      reason: `Current run was superseded by active self-bootstrap run run_active123. ${stallMessage}`,
+      imposed_by: "self-bootstrap-supervisor",
+      active_run_id: "run_active123"
+    })
+  );
+  await appendRunJournal(
+    workspacePaths,
+    createRunJournalEntry({
+      run_id: run.id,
+      attempt_id: failedResearch.id,
+      type: "attempt.failed",
+      payload: {
+        message: stallMessage
+      }
+    })
+  );
+  await appendRunJournal(
+    workspacePaths,
+    createRunJournalEntry({
+      run_id: run.id,
+      type: "run.self_bootstrap.superseded",
+      payload: {
+        active_run_id: "run_active123",
+        stopped_attempt_ids: [],
+        pending_attempt_ids: []
+      }
+    })
+  );
+
+  const orchestrator = new Orchestrator(
+    workspacePaths,
+    new NeverDispatchAdapter() as never,
+    undefined,
+    60_000,
+    {
+      runtimeLayout: detachedRuntimeLayout,
+      waitingHumanAutoResumeMs: 30,
+      workerStallAutoResumeMs: 30,
+      maxAutomaticResumeCycles: 2
+    }
+  );
+
+  await settle(orchestrator, 6, 40);
+
+  const [current, attempts, journal, automation] = await Promise.all([
+    getCurrentDecision(workspacePaths, run.id),
+    listAttempts(workspacePaths, run.id),
+    listRunJournal(workspacePaths, run.id),
+    getRunAutomationControl(workspacePaths, run.id)
+  ]);
+
+  assert.ok(current, "current decision must exist");
+  assert.equal(current.run_status, "waiting_steer");
+  assert.equal(current.recommended_next_action, "wait_for_human");
+  assert.equal(current.waiting_for_human, true);
+  assert.equal(
+    automation?.mode,
+    "manual_only",
+    "superseded self-bootstrap run should persist a manual-only automation gate"
+  );
+  assert.equal(attempts.length, 1, "superseded run should not create a retry attempt");
+  assert.ok(
+    !journal.some((entry) => entry.type === "run.auto_resume.scheduled"),
+    "superseded self-bootstrap run should not auto resume"
+  );
+}
+
 async function verifyRateLimitedResearchRetriesQuickly(): Promise<void> {
   const { run, workspacePaths, detachedRuntimeLayout } = await bootstrapRun(
     "rate-limited-research-retry"
@@ -2494,6 +2624,10 @@ async function main(): Promise<void> {
     {
       id: "worker_stalled_research_retries_quickly",
       run: verifyWorkerStalledResearchRetriesQuickly
+    },
+    {
+      id: "superseded_self_bootstrap_does_not_auto_resume",
+      run: verifySupersededSelfBootstrapRunDoesNotAutoResume
     },
     {
       id: "rate_limited_research_retries_quickly",

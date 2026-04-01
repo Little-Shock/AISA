@@ -215,6 +215,26 @@ export const CurrentDecisionSchema = z.object({
   updated_at: z.string().datetime()
 });
 
+export const RunAutomationModeSchema = z.enum(["active", "manual_only"]);
+
+export const RunAutomationReasonCodeSchema = z.enum([
+  "superseded_self_bootstrap_run",
+  "automatic_resume_blocked",
+  "automatic_resume_exhausted",
+  "manual_recovery"
+]);
+
+export const RunAutomationControlSchema = z.object({
+  run_id: z.string(),
+  mode: RunAutomationModeSchema,
+  reason_code: RunAutomationReasonCodeSchema.nullable().default(null),
+  reason: z.string().nullable().default(null),
+  imposed_by: z.string().nullable().default(null),
+  active_run_id: z.string().nullable().default(null),
+  failure_code: z.string().nullable().default(null),
+  updated_at: z.string().datetime()
+});
+
 export const RunGovernanceStatusSchema = z.enum([
   "active",
   "blocked",
@@ -788,6 +808,9 @@ export type Branch = z.infer<typeof BranchSchema>;
 export type WorkerRun = z.infer<typeof WorkerRunSchema>;
 export type Attempt = z.infer<typeof AttemptSchema>;
 export type CurrentDecision = z.infer<typeof CurrentDecisionSchema>;
+export type RunAutomationMode = z.infer<typeof RunAutomationModeSchema>;
+export type RunAutomationReasonCode = z.infer<typeof RunAutomationReasonCodeSchema>;
+export type RunAutomationControl = z.infer<typeof RunAutomationControlSchema>;
 export type RunGovernanceStatus = z.infer<typeof RunGovernanceStatusSchema>;
 export type RunGovernanceExcludedPlan = z.infer<typeof RunGovernanceExcludedPlanSchema>;
 export type RunGovernanceContextSummary = z.infer<typeof RunGovernanceContextSummarySchema>;
@@ -1246,6 +1269,27 @@ export function createCurrentDecision(input: {
   });
 }
 
+export function createRunAutomationControl(input: {
+  run_id: string;
+  mode?: RunAutomationMode;
+  reason_code?: RunAutomationReasonCode | null;
+  reason?: string | null;
+  imposed_by?: string | null;
+  active_run_id?: string | null;
+  failure_code?: string | null;
+}): RunAutomationControl {
+  return RunAutomationControlSchema.parse({
+    run_id: input.run_id,
+    mode: input.mode ?? "active",
+    reason_code: input.reason_code ?? null,
+    reason: input.reason ?? null,
+    imposed_by: input.imposed_by ?? null,
+    active_run_id: input.active_run_id ?? null,
+    failure_code: input.failure_code ?? null,
+    updated_at: new Date().toISOString()
+  });
+}
+
 export function createRunGovernanceState(input: {
   run_id: string;
   status?: RunGovernanceStatus;
@@ -1319,6 +1363,17 @@ export function updateCurrentDecision(
 ): CurrentDecision {
   return CurrentDecisionSchema.parse({
     ...currentDecision,
+    ...patch,
+    updated_at: new Date().toISOString()
+  });
+}
+
+export function updateRunAutomationControl(
+  automationControl: RunAutomationControl,
+  patch: Partial<RunAutomationControl>
+): RunAutomationControl {
+  return RunAutomationControlSchema.parse({
+    ...automationControl,
     ...patch,
     updated_at: new Date().toISOString()
   });

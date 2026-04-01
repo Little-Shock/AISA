@@ -7,6 +7,9 @@ import { fileURLToPath } from "node:url";
 import {
   createCurrentDecision,
   createAttempt,
+  createAttemptRuntimeState,
+  createRunGovernanceState,
+  createRunJournalEntry,
   createRun,
   updateAttempt,
   type Attempt,
@@ -19,19 +22,29 @@ import {
   SELF_BOOTSTRAP_NEXT_TASK_ACTIVE_ENTRY_RELATIVE_PATH,
   SELF_BOOTSTRAP_NEXT_TASK_ACTIVE_ENTRY_SNAPSHOT_FILE_NAME
 } from "../packages/orchestrator/src/index.ts";
+import { buildServer } from "../apps/control-api/src/index.ts";
 import {
-  ensureWorkspace,
-  getAttemptContract,
-  getAttemptContext,
-  getCurrentDecision,
+  appendRunJournal,
+    ensureWorkspace,
+    getAttemptContract,
+    getAttemptContext,
+    getAttemptHeartbeat,
+    getAttemptRuntimeState,
+    getRunAutomationControl,
+    getCurrentDecision,
   getRun,
   getRunRuntimeHealthSnapshot,
   listAttempts,
+  listRuns,
   listRunJournal,
   listRunSteers,
+  resolveAttemptPaths,
   resolveWorkspacePaths,
   saveAttempt,
+  saveAttemptHeartbeat,
+  saveAttemptRuntimeState,
   saveCurrentDecision,
+  saveRunGovernanceState,
   saveRun,
 } from "../packages/state-store/src/index.ts";
 
@@ -437,6 +450,556 @@ async function assertMissingActiveSnapshotBlocksRunInsteadOfCrashing(): Promise<
   };
 }
 
+async function assertSupervisorRepairsWorkerOutputSchemaBlocker(sourceRoot: string): Promise<{
+  repair_steer_id: string | null;
+  repair_state_action: string | null;
+}> {
+  const baseDir = await mkdtemp(join(tmpdir(), "aisa-self-bootstrap-supervisor-"));
+  const repoRoot = join(baseDir, "repo");
+  const runtimeDataRoot = join(baseDir, "runtime-data");
+  const managedWorkspaceRoot = join(baseDir, ".aisa-run-worktrees");
+  await createGitWorkspace(repoRoot);
+  await mkdir(managedWorkspaceRoot, { recursive: true });
+
+  const workspacePaths = resolveWorkspacePaths(runtimeDataRoot);
+  await ensureWorkspace(workspacePaths);
+  const run = createRun({
+    title: "AISA 自举下一步规划",
+    description: "Repair malformed worker output before asking for human help.",
+    success_criteria: ["Queue a repair steer for worker output schema blockers."],
+    constraints: [],
+    owner_id: "test-owner",
+    workspace_root: repoRoot
+  });
+  const failedAttempt = updateAttempt(
+    createAttempt({
+      run_id: run.id,
+      attempt_type: "research",
+      worker: "fake-codex",
+      objective: "Study the next runtime task.",
+      success_criteria: run.success_criteria,
+      workspace_root: repoRoot
+    }),
+    {
+      status: "failed",
+      ended_at: new Date().toISOString()
+    }
+  );
+  const rawOutputFile = `runs/${run.id}/attempts/${failedAttempt.id}/codex-output.json`;
+  const attemptPaths = resolveAttemptPaths(workspacePaths, run.id, failedAttempt.id);
+  await mkdir(attemptPaths.attemptDir, { recursive: true });
+  await writeFile(
+    join(attemptPaths.attemptDir, "codex-output.json"),
+    JSON.stringify(
+      {
+        summary: "Keep the existing handoff-first conclusion.",
+        findings: [],
+        questions: [],
+        recommended_next_steps: ["Implement the handoff-first run detail path."],
+        confidence: 0.8,
+        artifacts: [
+          "scripts/verify-run-detail-api.ts",
+          "apps/control-api/src/index.ts"
+        ]
+      },
+      null,
+      2
+    ) + "\n",
+    "utf8"
+  );
+  await saveRun(workspacePaths, run);
+  await saveAttempt(workspacePaths, failedAttempt);
+  await saveCurrentDecision(
+    workspacePaths,
+    createCurrentDecision({
+      run_id: run.id,
+      run_status: "waiting_steer",
+      latest_attempt_id: failedAttempt.id,
+      recommended_next_action: "wait_for_human",
+      recommended_attempt_type: "research",
+      summary: "治理层拦下了下一轮派发。",
+      blocking_reason:
+        "治理层拦下了下一轮派发。 原始原因：Expected object, received string at artifacts[0]",
+      waiting_for_human: true
+    })
+  );
+  await saveRunGovernanceState(
+    workspacePaths,
+    createRunGovernanceState({
+      run_id: run.id,
+      status: "blocked",
+      blocker_repeat_count: 2,
+      active_problem_signature: "worker_output_schema_invalid:artifacts[0]",
+      active_problem_summary: "治理层拦下了下一轮派发。 原始原因：Expected object, received string at artifacts[0]",
+      next_allowed_actions: ["wait_for_human", "apply_steer"],
+      context_summary: {
+        headline: "治理层拦下了下一轮派发。",
+        blocker_summary:
+          "治理层拦下了下一轮派发。 原始原因：Expected object, received string at artifacts[0]"
+      }
+    })
+  );
+  await appendRunJournal(
+    workspacePaths,
+    createRunJournalEntry({
+      run_id: run.id,
+      attempt_id: failedAttempt.id,
+      type: "attempt.failed",
+      payload: {
+        message:
+          'Worker writeback schema invalid at artifacts[0]: Expected object, received string artifacts 必须是对象数组，元素形如 {"type":"report","path":"relative/path"}；如果只是引用文件路径，就不要放进 artifacts。',
+        code: "worker_output_schema_invalid",
+        field_path: "artifacts[0]",
+        repair_hint:
+          'artifacts 必须是对象数组，元素形如 {"type":"report","path":"relative/path"}；如果只是引用文件路径，就不要放进 artifacts。',
+        raw_output_file: rawOutputFile
+      }
+    })
+  );
+
+  const app = await buildServer({
+    runtimeRepoRoot: sourceRoot,
+    devRepoRoot: repoRoot,
+    runtimeDataRoot,
+    managedWorkspaceRoot,
+    startOrchestrator: false
+  });
+  const apiBaseUrl = await app.listen({
+    host: "127.0.0.1",
+    port: 0
+  });
+  const supervisorStateFile = join(runtimeDataRoot, "artifacts", "self-bootstrap-supervisor-state.json");
+
+  try {
+    const supervisorResult = await runTsxScript({
+      cwd: sourceRoot,
+      sourceRoot,
+      scriptPath: join(sourceRoot, "scripts", "supervise-self-bootstrap.ts"),
+      args: [
+        "--once",
+        "--api-base-url",
+        apiBaseUrl,
+        "--run-id",
+        run.id,
+        "--state-file",
+        supervisorStateFile
+      ],
+      extraEnv: {
+        AISA_RUNTIME_REPO_ROOT: sourceRoot,
+        AISA_DEV_REPO_ROOT: repoRoot,
+        AISA_RUNTIME_DATA_ROOT: runtimeDataRoot,
+        AISA_MANAGED_WORKSPACE_ROOT: managedWorkspaceRoot
+      }
+    });
+    assert.equal(
+      supervisorResult.exitCode,
+      0,
+      formatScriptFailure("scripts/supervise-self-bootstrap.ts", supervisorResult)
+    );
+  } finally {
+    await app.close();
+  }
+
+  const [current, steers, state] = await Promise.all([
+    getCurrentDecision(workspacePaths, run.id),
+    listRunSteers(workspacePaths, run.id),
+    readFile(supervisorStateFile, "utf8").then((content) =>
+      JSON.parse(content) as {
+        repair_log?: Array<{
+          action?: string;
+          detail?: string;
+        }>;
+      }
+    )
+  ]);
+
+  assert.equal(steers.length, 1, "schema repair should queue exactly one steer");
+  assert.equal(current?.run_status, "running");
+  assert.equal(current?.recommended_next_action, "apply_steer");
+  assert.equal(current?.waiting_for_human, false);
+  assert.ok(
+    steers[0]?.content.includes(rawOutputFile),
+    "repair steer should point the next attempt to the raw invalid worker output"
+  );
+  assert.ok(
+    steers[0]?.content.includes("artifacts[0]"),
+    "repair steer should name the broken field path"
+  );
+  assert.ok(
+    steers[0]?.content.includes("不要再返回字符串 artifacts"),
+    "repair steer should explicitly forbid string artifacts"
+  );
+  assert.ok(
+    state.repair_log?.some(
+      (entry) =>
+        entry.action === "queue_worker_output_schema_repair" &&
+        entry.detail === "worker_output_schema_invalid:artifacts[0]"
+    ),
+    "supervisor state should record the schema repair action"
+  );
+
+  return {
+    repair_steer_id: steers[0]?.id ?? null,
+    repair_state_action:
+      state.repair_log?.find(
+        (entry) => entry.action === "queue_worker_output_schema_repair"
+      )?.action ?? null
+  };
+}
+
+async function assertSupervisorDoesNotKeepRotatingPinnedRun(sourceRoot: string): Promise<{
+  first_rotated_run_id: string | null;
+  second_cycle_active_run_id: string | null;
+}> {
+  const baseDir = await mkdtemp(join(tmpdir(), "aisa-self-bootstrap-rotate-pin-"));
+  const repoRoot = join(baseDir, "repo");
+  const runtimeDataRoot = join(baseDir, "runtime-data");
+  const managedWorkspaceRoot = join(baseDir, ".aisa-run-worktrees");
+  await createGitWorkspace(repoRoot);
+  await mkdir(managedWorkspaceRoot, { recursive: true });
+
+  const publishedActiveTask = await loadPublishedActiveTaskFixture(sourceRoot);
+  await seedSelfBootstrapActiveTask(repoRoot, publishedActiveTask.content);
+
+  const workspacePaths = resolveWorkspacePaths(runtimeDataRoot);
+  await ensureWorkspace(workspacePaths);
+  const blockedRun = createRun({
+    title: "AISA 自举下一步规划",
+    description: "Rotate once, then stay on the new active run.",
+    success_criteria: ["Do not keep rotating the same pinned run forever."],
+    constraints: [],
+    owner_id: "test-owner",
+    workspace_root: repoRoot
+  });
+  await saveRun(workspacePaths, blockedRun);
+  await saveCurrentDecision(
+    workspacePaths,
+    createCurrentDecision({
+      run_id: blockedRun.id,
+      run_status: "waiting_steer",
+      recommended_next_action: "wait_for_human",
+      recommended_attempt_type: "research",
+      summary: "Old run is exhausted.",
+      blocking_reason: "治理层拦下了下一轮派发。",
+      waiting_for_human: true
+    })
+  );
+  await appendRunJournal(
+    workspacePaths,
+    createRunJournalEntry({
+      run_id: blockedRun.id,
+      type: "run.auto_resume.exhausted",
+      payload: {
+        reason: "verification fixture exhausted the old run"
+      }
+    })
+  );
+
+  const app = await buildServer({
+    runtimeRepoRoot: sourceRoot,
+    devRepoRoot: repoRoot,
+    runtimeDataRoot,
+    managedWorkspaceRoot,
+    startOrchestrator: false
+  });
+  const apiBaseUrl = await app.listen({
+    host: "127.0.0.1",
+    port: 0
+  });
+  const supervisorStateFile = join(runtimeDataRoot, "artifacts", "self-bootstrap-supervisor-state.json");
+
+  try {
+    const runSupervisorOnce = async (): Promise<void> => {
+      const supervisorResult = await runTsxScript({
+        cwd: sourceRoot,
+        sourceRoot,
+        scriptPath: join(sourceRoot, "scripts", "supervise-self-bootstrap.ts"),
+        args: [
+          "--once",
+          "--api-base-url",
+          apiBaseUrl,
+          "--run-id",
+          blockedRun.id,
+          "--state-file",
+          supervisorStateFile
+        ],
+        extraEnv: {
+          AISA_RUNTIME_REPO_ROOT: sourceRoot,
+          AISA_DEV_REPO_ROOT: repoRoot,
+          AISA_RUNTIME_DATA_ROOT: runtimeDataRoot,
+          AISA_MANAGED_WORKSPACE_ROOT: managedWorkspaceRoot
+        }
+      });
+      assert.equal(
+        supervisorResult.exitCode,
+        0,
+        formatScriptFailure("scripts/supervise-self-bootstrap.ts", supervisorResult)
+      );
+    };
+
+    await runSupervisorOnce();
+    const firstState = JSON.parse(
+      await readFile(supervisorStateFile, "utf8")
+    ) as {
+      active_run_id?: string | null;
+    };
+    const firstRotatedRunId = firstState.active_run_id ?? null;
+    assert.ok(
+      firstRotatedRunId && firstRotatedRunId !== blockedRun.id,
+      "first cycle should rotate to a replacement self-bootstrap run"
+    );
+    assert.equal(
+      (await listRuns(workspacePaths)).length,
+      2,
+      "first cycle should create exactly one replacement run"
+    );
+
+    await runSupervisorOnce();
+    const secondState = JSON.parse(
+      await readFile(supervisorStateFile, "utf8")
+    ) as {
+      active_run_id?: string | null;
+    };
+    const runsAfterSecondCycle = await listRuns(workspacePaths);
+
+    assert.equal(
+      runsAfterSecondCycle.length,
+      2,
+      "second cycle should keep supervising the rotated run instead of creating another one"
+    );
+    assert.equal(
+      secondState.active_run_id,
+      firstRotatedRunId,
+      "second cycle should stay on the already-rotated run"
+    );
+
+    return {
+      first_rotated_run_id: firstRotatedRunId,
+      second_cycle_active_run_id: secondState.active_run_id ?? null
+    };
+  } finally {
+    await app.close();
+  }
+}
+
+async function assertSupervisorSuspendsSupersededSelfBootstrapRuns(sourceRoot: string): Promise<{
+  suspended_run_id: string;
+  active_run_id: string;
+  stopped_attempt_id: string;
+}> {
+  const baseDir = await mkdtemp(join(tmpdir(), "aisa-self-bootstrap-suspend-stale-"));
+  const repoRoot = join(baseDir, "repo");
+  const runtimeDataRoot = join(baseDir, "runtime-data");
+  const managedWorkspaceRoot = join(baseDir, ".aisa-run-worktrees");
+  await createGitWorkspace(repoRoot);
+  await mkdir(managedWorkspaceRoot, { recursive: true });
+
+  const publishedActiveTask = await loadPublishedActiveTaskFixture(sourceRoot);
+  await seedSelfBootstrapActiveTask(repoRoot, publishedActiveTask.content);
+
+  const workspacePaths = resolveWorkspacePaths(runtimeDataRoot);
+  await ensureWorkspace(workspacePaths);
+
+  const activeRun = createRun({
+    title: "AISA 自举下一步规划",
+    description: "Keep this self-bootstrap run active.",
+    success_criteria: ["Stay active."],
+    constraints: [],
+    owner_id: "test-owner",
+    workspace_root: repoRoot
+  });
+  const staleRun = createRun({
+    title: "AISA 自举下一步规划",
+    description: "This stale self-bootstrap run should be suspended.",
+    success_criteria: ["Stop consuming scheduler slots."],
+    constraints: [],
+    owner_id: "test-owner",
+    workspace_root: repoRoot
+  });
+  const staleAttempt = createAttempt({
+    run_id: staleRun.id,
+    attempt_type: "research",
+    worker: "fake-codex",
+    objective: "Old self-bootstrap research should stop.",
+    success_criteria: staleRun.success_criteria,
+    workspace_root: repoRoot
+  });
+
+  await saveRun(workspacePaths, activeRun);
+  await saveCurrentDecision(
+    workspacePaths,
+    createCurrentDecision({
+      run_id: activeRun.id,
+      run_status: "running",
+      recommended_next_action: "start_first_attempt",
+      recommended_attempt_type: "research",
+      summary: "Active self-bootstrap run."
+    })
+  );
+
+  await saveRun(workspacePaths, staleRun);
+  await saveAttempt(
+    workspacePaths,
+    updateAttempt(staleAttempt, {
+      status: "running",
+      started_at: "2026-04-01T10:00:00.000Z"
+    })
+  );
+  await saveAttemptHeartbeat(workspacePaths, {
+    run_id: staleRun.id,
+    attempt_id: staleAttempt.id,
+    owner_id: "orch_test",
+    status: "active",
+    started_at: "2026-04-01T10:00:00.000Z",
+    heartbeat_at: "2026-04-01T10:00:05.000Z",
+    released_at: null
+  });
+  await saveAttemptRuntimeState(
+    workspacePaths,
+    createAttemptRuntimeState({
+      run_id: staleRun.id,
+      attempt_id: staleAttempt.id,
+      running: true,
+      phase: "tool",
+      active_since: "2026-04-01T10:00:00.000Z",
+      last_event_at: "2026-04-01T10:00:05.000Z",
+      progress_text: "Still running old work."
+    })
+  );
+  await saveCurrentDecision(
+    workspacePaths,
+    createCurrentDecision({
+      run_id: staleRun.id,
+      run_status: "running",
+      latest_attempt_id: staleAttempt.id,
+      recommended_next_action: "continue_research",
+      recommended_attempt_type: "research",
+      summary: "Old self-bootstrap run is still marked running."
+    })
+  );
+
+  const app = await buildServer({
+    runtimeRepoRoot: sourceRoot,
+    devRepoRoot: repoRoot,
+    runtimeDataRoot,
+    managedWorkspaceRoot,
+    startOrchestrator: false
+  });
+  const apiBaseUrl = await app.listen({
+    host: "127.0.0.1",
+    port: 0
+  });
+  const supervisorStateFile = join(runtimeDataRoot, "artifacts", "self-bootstrap-supervisor-state.json");
+
+  try {
+    const statePayload = {
+      version: 1,
+      started_at: "2026-04-01T10:00:00.000Z",
+      updated_at: "2026-04-01T10:00:00.000Z",
+      active_run_id: activeRun.id,
+      supervised_run_ids: [activeRun.id, staleRun.id],
+      completed_attempt_keys: [],
+      control_api: {
+        base_url: apiBaseUrl,
+        status: "reachable",
+        last_ok_at: "2026-04-01T10:00:00.000Z",
+        last_error: null,
+        last_launch_requested_at: null,
+        last_launch_pid: null
+      },
+      repair_log: []
+    };
+    await writeFile(supervisorStateFile, `${JSON.stringify(statePayload, null, 2)}\n`, "utf8");
+
+    const supervisorResult = await runTsxScript({
+      cwd: sourceRoot,
+      sourceRoot,
+      scriptPath: join(sourceRoot, "scripts", "supervise-self-bootstrap.ts"),
+      args: [
+        "--once",
+        "--api-base-url",
+        apiBaseUrl,
+        "--run-id",
+        activeRun.id,
+        "--state-file",
+        supervisorStateFile
+      ],
+      extraEnv: {
+        AISA_RUNTIME_REPO_ROOT: sourceRoot,
+        AISA_DEV_REPO_ROOT: repoRoot,
+        AISA_RUNTIME_DATA_ROOT: runtimeDataRoot,
+        AISA_MANAGED_WORKSPACE_ROOT: managedWorkspaceRoot
+      }
+    });
+    assert.equal(
+      supervisorResult.exitCode,
+      0,
+      formatScriptFailure("scripts/supervise-self-bootstrap.ts", supervisorResult)
+    );
+  } finally {
+    await app.close();
+  }
+
+  const [staleCurrent, staleAttempts, staleJournal, staleHeartbeat, staleRuntimeState, automation, state] =
+    await Promise.all([
+      getCurrentDecision(workspacePaths, staleRun.id),
+      listAttempts(workspacePaths, staleRun.id),
+      listRunJournal(workspacePaths, staleRun.id),
+      getAttemptHeartbeat(workspacePaths, staleRun.id, staleAttempt.id),
+      getAttemptRuntimeState(workspacePaths, staleRun.id, staleAttempt.id),
+      getRunAutomationControl(workspacePaths, staleRun.id),
+      readFile(supervisorStateFile, "utf8").then((content) => JSON.parse(content) as {
+        active_run_id?: string | null;
+        repair_log?: Array<{ action?: string; detail?: string }>;
+      })
+    ]);
+
+  assert.equal(staleCurrent?.run_status, "waiting_steer");
+  assert.equal(staleCurrent?.waiting_for_human, true);
+  assert.match(
+    staleCurrent?.blocking_reason ?? "",
+    new RegExp(activeRun.id),
+    "stale run should explain which active self-bootstrap run superseded it"
+  );
+  assert.equal(staleAttempts[0]?.status, "stopped");
+  assert.equal(staleHeartbeat?.status, "released");
+  assert.equal(staleRuntimeState?.running, false);
+  assert.equal(staleRuntimeState?.phase, "stopped");
+  assert.equal(
+    automation?.mode,
+    "manual_only",
+    "superseded self-bootstrap run should persist a manual-only automation gate"
+  );
+  assert.equal(
+    automation?.reason_code,
+    "superseded_self_bootstrap_run",
+    "superseded self-bootstrap run should record why automation was disabled"
+  );
+  assert.ok(
+    staleJournal.some((entry) => entry.type === "attempt.stopped"),
+    "stale running attempt should be explicitly stopped"
+  );
+  assert.ok(
+    staleJournal.some((entry) => entry.type === "run.self_bootstrap.superseded"),
+    "stale run should record the superseded transition"
+  );
+  assert.equal(state.active_run_id, activeRun.id);
+  assert.ok(
+    state.repair_log?.some(
+      (entry) =>
+        entry.action === "suspend_superseded_self_bootstrap_run" &&
+        entry.detail === `active=${activeRun.id}`
+    ),
+    "supervisor state should record the superseded-run cleanup"
+  );
+
+  return {
+    suspended_run_id: staleRun.id,
+    active_run_id: activeRun.id,
+    stopped_attempt_id: staleAttempt.id
+  };
+}
+
 async function main(): Promise<void> {
   await assertRootEntrypointsUseNodeImportTsx();
 
@@ -740,6 +1303,12 @@ async function main(): Promise<void> {
 
   const missingExecutionSnapshotBlock =
     await assertMissingActiveSnapshotBlocksRunInsteadOfCrashing();
+  const supervisorSchemaRepair =
+    await assertSupervisorRepairsWorkerOutputSchemaBlocker(sourceRoot);
+  const pinnedRunRotation =
+    await assertSupervisorDoesNotKeepRotatingPinnedRun(sourceRoot);
+  const supersededRunCleanup =
+    await assertSupervisorSuspendsSupersededSelfBootstrapRuns(sourceRoot);
 
   console.log(
     JSON.stringify(
@@ -754,7 +1323,14 @@ async function main(): Promise<void> {
         missing_active_next_task_exit_code: missingActiveTaskResult.exitCode,
         invalid_active_next_task_exit_code: invalidActiveTaskResult.exitCode,
         missing_execution_snapshot_blocked_message:
-          missingExecutionSnapshotBlock.blocked_message
+          missingExecutionSnapshotBlock.blocked_message,
+        repair_steer_id: supervisorSchemaRepair.repair_steer_id,
+        repair_state_action: supervisorSchemaRepair.repair_state_action,
+        first_rotated_run_id: pinnedRunRotation.first_rotated_run_id,
+        second_cycle_active_run_id: pinnedRunRotation.second_cycle_active_run_id,
+        suspended_run_id: supersededRunCleanup.suspended_run_id,
+        suspended_attempt_id: supersededRunCleanup.stopped_attempt_id,
+        cleanup_active_run_id: supersededRunCleanup.active_run_id
       },
       null,
       2

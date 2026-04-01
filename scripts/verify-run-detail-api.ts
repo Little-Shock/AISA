@@ -5,6 +5,7 @@ import { join } from "node:path";
 import {
   createAttempt,
   createAttemptContract,
+  createRunAutomationControl,
   createCurrentDecision,
   createAttemptRuntimeEvent,
   createAttemptRuntimeState,
@@ -14,9 +15,10 @@ import {
 } from "../packages/domain/src/index.ts";
 import {
   appendRunJournal,
-  appendAttemptRuntimeEvent,
-  ensureWorkspace,
-  listAttempts,
+    appendAttemptRuntimeEvent,
+    ensureWorkspace,
+    getRunAutomationControl,
+    listAttempts,
   resolveAttemptPaths,
   resolveWorkspacePaths,
   saveAttempt,
@@ -27,14 +29,17 @@ import {
   saveAttemptReviewPacket,
   saveAttemptResult,
   saveAttemptRuntimeState,
-  saveAttemptRuntimeVerification,
-  saveCurrentDecision,
-  saveRun
-} from "../packages/state-store/src/index.ts";
+    saveAttemptRuntimeVerification,
+    saveCurrentDecision,
+    saveRun,
+    saveRunAutomationControl
+  } from "../packages/state-store/src/index.ts";
 import { buildServer } from "../apps/control-api/src/index.ts";
 import {
   createRunWorkspaceScopePolicy,
-  Orchestrator
+  Orchestrator,
+  SELF_BOOTSTRAP_NEXT_TASK_ACTIVE_ENTRY_RELATIVE_PATH,
+  SELF_BOOTSTRAP_NEXT_TASK_ACTIVE_ENTRY_SNAPSHOT_FILE_NAME
 } from "../packages/orchestrator/src/index.ts";
 import { CODEX_CLI_EXECUTION_EFFORT_APPLIED_DETAIL } from "../packages/worker-adapters/src/index.ts";
 
@@ -42,10 +47,67 @@ async function main(): Promise<void> {
   const rootDir = await mkdtemp(join(tmpdir(), "aisa-run-detail-api-"));
   const projectScopeDir = await mkdtemp(join(tmpdir(), "aisa-run-scope-"));
   const projectRoot = join(projectScopeDir, "project-a");
+  const selfBootstrapSourceAssetPath = join(
+    rootDir,
+    "Codex",
+    "fixture-self-bootstrap-next-task.json"
+  );
+  const selfBootstrapActiveEntryPath = join(
+    rootDir,
+    SELF_BOOTSTRAP_NEXT_TASK_ACTIVE_ENTRY_RELATIVE_PATH
+  );
   await mkdir(projectRoot, { recursive: true });
+  await mkdir(join(rootDir, "Codex"), { recursive: true });
   const resolvedRootDir = await realpath(rootDir);
   const workspacePaths = resolveWorkspacePaths(rootDir);
   await ensureWorkspace(workspacePaths);
+  await Promise.all([
+    writeFile(
+      selfBootstrapSourceAssetPath,
+      `${JSON.stringify(
+        {
+          recommended_next_attempt: {
+            attempt_type: "execution",
+            objective: "Fixture self-bootstrap execution contract.",
+            success_criteria: ["Persist a runnable self-bootstrap execution contract."],
+            required_evidence: ["Leave replayable validation evidence."],
+            expected_artifacts: ["scripts/verify-run-detail-api.ts"],
+            verification_plan: {
+              commands: [
+                {
+                  purpose: "prove fixture self-bootstrap contract is replayable",
+                  command: "pnpm verify:run-api"
+                }
+              ]
+            }
+          }
+        },
+        null,
+        2
+      )}\n`,
+      "utf8"
+    ),
+    writeFile(
+      selfBootstrapActiveEntryPath,
+      `${JSON.stringify(
+        {
+          entry_type: "self_bootstrap_next_runtime_task_active",
+          updated_at: "2026-04-01T00:00:00.000Z",
+          source_anchor: {
+            asset_path: "Codex/fixture-self-bootstrap-next-task.json",
+            source_attempt_id: "fixture_attempt",
+            payload_sha256: "fixture_payload_sha256",
+            promoted_at: "2026-04-01T00:00:00.000Z"
+          },
+          title: "Fixture self-bootstrap next task",
+          summary: "Keep the run detail API fixture aligned with real self-bootstrap semantics."
+        },
+        null,
+        2
+      )}\n`,
+      "utf8"
+    )
+  ]);
 
   const run = createRun({
     title: "Run detail API verification",
@@ -493,11 +555,22 @@ async function main(): Promise<void> {
           };
         };
       };
+      active_next_task: string;
+      active_next_task_snapshot: string;
     };
     assert.equal(selfBootstrap.run.workspace_root, resolvedRootDir);
     assert.equal(selfBootstrap.run.harness_profile.execution.effort, "high");
     assert.equal(selfBootstrap.run.harness_profile.reviewer.effort, "medium");
     assert.equal(selfBootstrap.run.harness_profile.synthesizer.effort, "medium");
+    assert.equal(
+      selfBootstrap.active_next_task,
+      SELF_BOOTSTRAP_NEXT_TASK_ACTIVE_ENTRY_RELATIVE_PATH
+    );
+    assert.ok(
+      selfBootstrap.active_next_task_snapshot.endsWith(
+        SELF_BOOTSTRAP_NEXT_TASK_ACTIVE_ENTRY_SNAPSHOT_FILE_NAME
+      )
+    );
 
     const blockedRun = createRun({
       title: "Blocked launch workspace",
@@ -581,6 +654,16 @@ async function main(): Promise<void> {
         waiting_for_human: true
       })
     );
+    await saveRunAutomationControl(
+      workspacePaths,
+      createRunAutomationControl({
+        run_id: resumableRun.id,
+        mode: "manual_only",
+        reason_code: "manual_recovery",
+        reason: "Operator must explicitly relaunch after reviewing the failed execution.",
+        imposed_by: "control-api"
+      })
+    );
     const resumeResponse = await app.inject({
       method: "POST",
       url: `/runs/${resumableRun.id}/launch`
@@ -602,6 +685,12 @@ async function main(): Promise<void> {
       "launch should turn wait_for_human into an actionable retry"
     );
     assert.equal(resumePayload.current.recommended_attempt_type, "execution");
+    const resumeAutomation = await getRunAutomationControl(workspacePaths, resumableRun.id);
+    assert.equal(
+      resumeAutomation?.mode,
+      "active",
+      "manual launch should clear manual-only automation gates"
+    );
 
     const launchRunWorkspaceScopePolicy = await createRunWorkspaceScopePolicy({
       runtimeRoot: rootDir,

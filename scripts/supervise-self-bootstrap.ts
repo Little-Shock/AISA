@@ -10,13 +10,24 @@ import {
 } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { Attempt, CurrentDecision, Run, RunJournalEntry } from "../packages/domain/src/index.js";
+import {
+  createRunAutomationControl,
+  createRunJournalEntry,
+  updateAttempt,
+  updateAttemptRuntimeState,
+  updateCurrentDecision,
+  type Attempt,
+  type CurrentDecision,
+  type Run,
+  type RunJournalEntry
+} from "../packages/domain/src/index.js";
 import {
   assessRunHealth,
   resolveRuntimeLayout,
   syncRuntimeLayoutHint
 } from "../packages/orchestrator/src/index.ts";
 import {
+  appendRunJournal,
   ensureWorkspace,
   getAttemptHeartbeat,
   getAttemptRuntimeState,
@@ -25,7 +36,12 @@ import {
   listAttempts,
   listRunJournal,
   listRuns,
-  resolveWorkspacePaths
+  resolveWorkspacePaths,
+  saveAttempt,
+  saveAttemptHeartbeat,
+  saveAttemptRuntimeState,
+  saveCurrentDecision,
+  saveRunAutomationControl
 } from "../packages/state-store/src/index.js";
 
 type CliOptions = {
@@ -74,6 +90,15 @@ type RunSnapshot = {
   latestAttempt: Attempt | null;
   latestHeartbeat: Awaited<ReturnType<typeof getAttemptHeartbeat>>;
   latestRuntimeState: Awaited<ReturnType<typeof getAttemptRuntimeState>>;
+};
+
+type WorkerOutputSchemaBlocker = {
+  attemptId: string | null;
+  message: string;
+  fieldPath: string | null;
+  repairHint: string | null;
+  rawOutputFile: string | null;
+  signature: string;
 };
 
 type JsonResponse<T> = T & {
@@ -539,6 +564,18 @@ async function launchRun(apiBaseUrl: string, runId: string): Promise<void> {
   await postJson(apiBaseUrl, `/runs/${runId}/launch`);
 }
 
+async function queueRunSteer(input: {
+  apiBaseUrl: string;
+  runId: string;
+  attemptId?: string | null;
+  content: string;
+}): Promise<void> {
+  await postJson(input.apiBaseUrl, `/runs/${input.runId}/steers`, {
+    content: input.content,
+    attempt_id: input.attemptId ?? null
+  });
+}
+
 async function resolveGitRepoRoot(workspaceRoot: string): Promise<string | null> {
   return await new Promise((resolve, reject) => {
     const child = spawn("git", ["-C", workspaceRoot, "rev-parse", "--show-toplevel"], {
@@ -703,6 +740,120 @@ function hasGovernanceDeadEndBlocker(snapshot: RunSnapshot): boolean {
   );
 }
 
+function getLatestAttemptFailureEntry(snapshot: RunSnapshot): RunJournalEntry | null {
+  const attemptId = snapshot.latestAttempt?.id ?? snapshot.current?.latest_attempt_id ?? null;
+  if (!attemptId) {
+    return null;
+  }
+
+  for (let index = snapshot.journal.length - 1; index >= 0; index -= 1) {
+    const entry = snapshot.journal[index];
+    if (!entry || entry.attempt_id !== attemptId || entry.type !== "attempt.failed") {
+      continue;
+    }
+
+    return entry;
+  }
+
+  return null;
+}
+
+function getJournalPayloadRecord(
+  entry: RunJournalEntry | null
+): Record<string, unknown> | null {
+  if (!entry?.payload || typeof entry.payload !== "object" || Array.isArray(entry.payload)) {
+    return null;
+  }
+
+  return entry.payload as Record<string, unknown>;
+}
+
+function buildSchemaRepairSignature(
+  code: string,
+  fieldPath: string | null,
+  message: string
+): string {
+  const normalizedMessage = message.replace(/\s+/g, " ").trim().toLowerCase();
+  return `${code}:${fieldPath ?? normalizedMessage}`;
+}
+
+function getWorkerOutputSchemaBlocker(snapshot: RunSnapshot): WorkerOutputSchemaBlocker | null {
+  if (snapshot.current?.run_status !== "waiting_steer") {
+    return null;
+  }
+
+  const failureEntry = getLatestAttemptFailureEntry(snapshot);
+  const payload = getJournalPayloadRecord(failureEntry);
+  const attemptId = snapshot.latestAttempt?.id ?? snapshot.current?.latest_attempt_id ?? null;
+  const message =
+    (typeof payload?.message === "string" && payload.message.length > 0
+      ? payload.message
+      : snapshot.current?.blocking_reason) ?? "";
+  const code =
+    typeof payload?.code === "string" && payload.code.length > 0
+      ? payload.code
+      : /Worker writeback schema invalid|Expected object, received string/i.test(message)
+        ? "worker_output_schema_invalid"
+        : null;
+
+  if (code !== "worker_output_schema_invalid") {
+    return null;
+  }
+
+  const fieldPath =
+    typeof payload?.field_path === "string" && payload.field_path.length > 0
+      ? payload.field_path
+      : message.match(/at\s+([A-Za-z0-9_.[\]]+)/)?.[1] ?? null;
+  const repairHint =
+    typeof payload?.repair_hint === "string" && payload.repair_hint.length > 0
+      ? payload.repair_hint
+      : 'artifacts 必须是对象数组，元素形如 {"type":"report","path":"relative/path"}；如果只是引用文件路径，就不要放进 artifacts。';
+  const rawOutputFile =
+    typeof payload?.raw_output_file === "string" && payload.raw_output_file.length > 0
+      ? payload.raw_output_file
+      : attemptId
+        ? `runs/${snapshot.run.id}/attempts/${attemptId}/codex-output.json`
+        : null;
+
+  return {
+    attemptId,
+    message,
+    fieldPath,
+    repairHint,
+    rawOutputFile,
+    signature: buildSchemaRepairSignature(code, fieldPath, message)
+  };
+}
+
+function hasRecordedRepair(
+  state: SupervisorState,
+  runId: string,
+  action: string,
+  detail: string
+): boolean {
+  return state.repair_log.some(
+    (entry) => entry.run_id === runId && entry.action === action && entry.detail === detail
+  );
+}
+
+function buildWorkerOutputSchemaRepairSteer(
+  blocker: WorkerOutputSchemaBlocker
+): string {
+  return [
+    "先修 worker 输出契约，再继续当前自举研究。",
+    blocker.attemptId ? `失败 attempt：${blocker.attemptId}` : null,
+    blocker.rawOutputFile ? `先读这份 raw output：${blocker.rawOutputFile}` : null,
+    blocker.message ? `机器报错：${blocker.message}` : null,
+    blocker.fieldPath ? `重点修这个字段：${blocker.fieldPath}` : null,
+    `修复要求：${blocker.repairHint}`,
+    "尽量保留 raw output 里已经成立的分析和 next_attempt_contract，不要从头换题。",
+    "如果只是引用文件路径或脚本名，把它们写进 findings.evidence、recommended_next_steps 或 next_attempt_contract.expected_artifacts，不要再返回字符串 artifacts。",
+    "最终只返回符合 WorkerWritebackSchema 的完整 JSON，不要只解释错误。"
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
 function shouldRelaunchWaitingRun(
   snapshot: RunSnapshot,
   options: Pick<CliOptions, "waitingRelaunchMs">
@@ -790,7 +941,7 @@ async function ensureActiveRunId(
   state: SupervisorState,
   options: Pick<CliOptions, "focus" | "ownerId" | "runId">
 ): Promise<string> {
-  const candidates = [options.runId, state.active_run_id].filter(
+  const candidates = [state.active_run_id, options.runId].filter(
     (value): value is string => typeof value === "string" && value.length > 0
   );
 
@@ -815,6 +966,130 @@ async function ensureActiveRunId(
   recordRepair(state, newRunId, "create_run", "创建新的 self-bootstrap run");
   logLine(`已创建新的 self-bootstrap run ${newRunId}`);
   return newRunId;
+}
+
+async function suspendSupersededSelfBootstrapRuns(input: {
+  runtimeDataRoot: string;
+  activeRunId: string;
+  state: SupervisorState;
+}): Promise<void> {
+  const workspacePaths = resolveWorkspacePaths(input.runtimeDataRoot);
+  const runs = await listRuns(workspacePaths);
+  const suspendedAt = nowIso();
+
+  for (const run of runs) {
+    if (!isSelfBootstrapRun(run) || run.id === input.activeRunId) {
+      continue;
+    }
+
+    const current = await getCurrentDecision(workspacePaths, run.id);
+    if (!current || current.run_status !== "running") {
+      continue;
+    }
+
+    const attempts = await listAttempts(workspacePaths, run.id);
+    const runningAttempts = attempts.filter((attempt) => attempt.status === "running");
+    const pendingAttemptIds = attempts
+      .filter((attempt) => attempt.status === "created" || attempt.status === "queued")
+      .map((attempt) => attempt.id);
+    const stoppedAttemptIds: string[] = [];
+
+    for (const attempt of runningAttempts) {
+      await saveAttempt(
+        workspacePaths,
+        updateAttempt(attempt, {
+          status: "stopped",
+          ended_at: suspendedAt
+        })
+      );
+      const [heartbeat, runtimeState] = await Promise.all([
+        getAttemptHeartbeat(workspacePaths, run.id, attempt.id),
+        getAttemptRuntimeState(workspacePaths, run.id, attempt.id)
+      ]);
+
+      if (heartbeat) {
+        await saveAttemptHeartbeat(workspacePaths, {
+          ...heartbeat,
+          status: "released",
+          heartbeat_at: suspendedAt,
+          released_at: suspendedAt
+        });
+      }
+
+      if (runtimeState) {
+        await saveAttemptRuntimeState(
+          workspacePaths,
+          updateAttemptRuntimeState(runtimeState, {
+            running: false,
+            phase: "stopped",
+            last_event_at: suspendedAt,
+            progress_text: `Suspended because active self-bootstrap run is ${input.activeRunId}.`,
+            error: `Superseded by active self-bootstrap run ${input.activeRunId}.`
+          })
+        );
+      }
+
+      await appendRunJournal(
+        workspacePaths,
+        createRunJournalEntry({
+          run_id: run.id,
+          attempt_id: attempt.id,
+          type: "attempt.stopped",
+          payload: {
+            reason: "superseded_by_active_self_bootstrap_run",
+            active_run_id: input.activeRunId
+          },
+          ts: suspendedAt
+        })
+      );
+      stoppedAttemptIds.push(attempt.id);
+    }
+
+    const summary =
+      `当前 run 已被新的 active self-bootstrap run ${input.activeRunId} 接管，` +
+      "旧 run 已暂停，避免继续占用调度槽位。";
+    await saveCurrentDecision(
+      workspacePaths,
+      updateCurrentDecision(current, {
+        run_status: "waiting_steer",
+        recommended_next_action: "wait_for_human",
+        summary,
+        blocking_reason: summary,
+        waiting_for_human: true
+      })
+    );
+    await saveRunAutomationControl(
+      workspacePaths,
+      createRunAutomationControl({
+        run_id: run.id,
+        mode: "manual_only",
+        reason_code: "superseded_self_bootstrap_run",
+        reason: summary,
+        imposed_by: "self-bootstrap-supervisor",
+        active_run_id: input.activeRunId
+      })
+    );
+    await appendRunJournal(
+      workspacePaths,
+      createRunJournalEntry({
+        run_id: run.id,
+        type: "run.self_bootstrap.superseded",
+        payload: {
+          active_run_id: input.activeRunId,
+          stopped_attempt_ids: stoppedAttemptIds,
+          pending_attempt_ids: pendingAttemptIds
+        },
+        ts: suspendedAt
+      })
+    );
+    recordRepair(
+      input.state,
+      run.id,
+      "suspend_superseded_self_bootstrap_run",
+      `active=${input.activeRunId}`
+    );
+    logLine(`${run.id} 已暂停，active self-bootstrap run 为 ${input.activeRunId}`);
+  }
 }
 
 async function runSupervisorCycle(input: {
@@ -843,6 +1118,11 @@ async function runSupervisorCycle(input: {
     input.state,
     input.options
   );
+  await suspendSupersededSelfBootstrapRuns({
+    runtimeDataRoot: input.runtimeDataRoot,
+    activeRunId: runId,
+    state: input.state
+  });
   const snapshot = await loadRunSnapshot(input.runtimeDataRoot, runId);
   trackRun(input.state, runId);
   const completedAttempts = trackCompletedAttempts(input.state, snapshot);
@@ -853,6 +1133,39 @@ async function runSupervisorCycle(input: {
       snapshot,
       completedAttempts,
       reachedTarget: true
+    };
+  }
+
+  const workerOutputSchemaBlocker = getWorkerOutputSchemaBlocker(snapshot);
+  if (workerOutputSchemaBlocker) {
+    const repairDetail = workerOutputSchemaBlocker.signature;
+    if (
+      !hasRecordedRepair(
+        input.state,
+        snapshot.run.id,
+        "queue_worker_output_schema_repair",
+        repairDetail
+      )
+    ) {
+      await queueRunSteer({
+        apiBaseUrl: input.apiBaseUrl,
+        runId: snapshot.run.id,
+        attemptId: workerOutputSchemaBlocker.attemptId,
+        content: buildWorkerOutputSchemaRepairSteer(workerOutputSchemaBlocker)
+      });
+      recordRepair(
+        input.state,
+        snapshot.run.id,
+        "queue_worker_output_schema_repair",
+        repairDetail
+      );
+      logLine(`${snapshot.run.id} 已注入 worker 输出契约修复 steer`);
+    }
+
+    return {
+      snapshot,
+      completedAttempts,
+      reachedTarget: false
     };
   }
 

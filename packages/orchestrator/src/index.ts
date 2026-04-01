@@ -8,6 +8,7 @@ import {
   createAttemptContract,
   createAttemptPreflightEvaluation,
   createCurrentDecision,
+  createRunAutomationControl,
   createEvent,
   createRunGovernanceState,
   createRunJournalEntry,
@@ -17,6 +18,7 @@ import {
   updateAttemptRuntimeState,
   updateBranch,
   updateCurrentDecision,
+  updateRunAutomationControl,
   updateGoal,
   updateRunGovernanceState,
   updateRunSteer,
@@ -38,6 +40,7 @@ import {
   type AttemptRuntimeVerification,
   type Branch,
   type CurrentDecision,
+  type RunAutomationControl,
   type ExecutionVerificationPlan,
   type EvalSpec,
   type Goal,
@@ -83,6 +86,7 @@ import {
   getGoal,
   getPlanArtifacts,
   getRun,
+  getRunAutomationControl,
   getRunGovernanceState,
   getRunRuntimeHealthSnapshot,
   listAttempts,
@@ -116,6 +120,7 @@ import {
   saveGoal,
   saveReport,
   saveRun,
+  saveRunAutomationControl,
   saveRunGovernanceState,
   saveRunReport,
   saveRunSteer,
@@ -126,6 +131,7 @@ import {
 import { ContextManager } from "@autoresearch/context-manager";
 import {
   CodexCliWorkerAdapter,
+  isWorkerWritebackParseError,
   resolveCodexCliWorkerEffort,
   type CodexCliWorkerEffortSetting
 } from "@autoresearch/worker-adapters";
@@ -173,6 +179,7 @@ import {
 export interface OrchestratorOptions {
   attemptHeartbeatIntervalMs?: number;
   attemptHeartbeatStaleMs?: number;
+  maxConcurrentAttempts?: number;
   waitingHumanAutoResumeMs?: number;
   maxAutomaticResumeCycles?: number;
   providerRateLimitAutoResumeMs?: number;
@@ -456,6 +463,7 @@ export class Orchestrator {
   private readonly instanceId = `orch_${randomUUID().slice(0, 8)}`;
   private readonly attemptHeartbeatIntervalMs: number;
   private readonly attemptHeartbeatStaleMs: number;
+  private readonly maxConcurrentAttempts: number;
   private readonly runDispatchLeaseStaleMs: number;
   private readonly waitingHumanAutoResumeMs: number;
   private readonly maxAutomaticResumeCycles: number;
@@ -481,6 +489,9 @@ export class Orchestrator {
   ) {
     this.attemptHeartbeatIntervalMs = options.attemptHeartbeatIntervalMs ?? 1000;
     this.attemptHeartbeatStaleMs = options.attemptHeartbeatStaleMs ?? 5000;
+    this.maxConcurrentAttempts =
+      options.maxConcurrentAttempts ??
+      readPositiveIntegerEnv("AISA_MAX_CONCURRENT_ATTEMPTS", 3);
     this.runDispatchLeaseStaleMs = readPositiveIntegerEnv(
       "AISA_RUN_DISPATCH_LEASE_STALE_MS",
       60_000
@@ -897,12 +908,73 @@ export class Orchestrator {
     return `${goalId}:${branchId}`;
   }
 
+  private async loadRunAutomationControl(runId: string): Promise<RunAutomationControl> {
+    return (
+      (await getRunAutomationControl(this.workspacePaths, runId)) ??
+      createRunAutomationControl({
+        run_id: runId
+      })
+    );
+  }
+
+  private async persistManualOnlyRunAutomation(input: {
+    runId: string;
+    reasonCode:
+      | "superseded_self_bootstrap_run"
+      | "automatic_resume_blocked"
+      | "automatic_resume_exhausted"
+      | "manual_recovery";
+    reason: string;
+    imposedBy: string;
+    activeRunId?: string | null;
+    failureCode?: string | null;
+  }): Promise<RunAutomationControl> {
+    const currentControl = await this.loadRunAutomationControl(input.runId);
+    const nextControl = updateRunAutomationControl(currentControl, {
+      mode: "manual_only",
+      reason_code: input.reasonCode,
+      reason: input.reason,
+      imposed_by: input.imposedBy,
+      active_run_id: input.activeRunId ?? null,
+      failure_code: input.failureCode ?? null
+    });
+    await saveRunAutomationControl(this.workspacePaths, nextControl);
+    return nextControl;
+  }
+
+  private async enforceManualOnlyRunGate(
+    runId: string,
+    current: CurrentDecision,
+    automation: RunAutomationControl
+  ): Promise<void> {
+    if (automation.mode !== "manual_only" || current.run_status !== "running") {
+      return;
+    }
+
+    const message =
+      automation.reason ??
+      "This run is in manual-only mode. Launch or queue steer before it can continue.";
+    await saveCurrentDecision(
+      this.workspacePaths,
+      updateCurrentDecision(current, {
+        run_status: "waiting_steer",
+        recommended_next_action: "wait_for_human",
+        summary: message,
+        blocking_reason: message,
+        waiting_for_human: true
+      })
+    );
+  }
+
   private async tickRuns(): Promise<void> {
     const runs = await listRuns(this.workspacePaths);
 
     for (const persistedRun of runs) {
       let run = persistedRun;
-      const current = await getCurrentDecision(this.workspacePaths, run.id);
+      const [current, automation] = await Promise.all([
+        getCurrentDecision(this.workspacePaths, run.id),
+        this.loadRunAutomationControl(run.id)
+      ]);
       const attempts = await listAttempts(this.workspacePaths, run.id);
       await this.ensureSettledAttemptReviewPackets(run.id, current, attempts);
 
@@ -931,6 +1003,11 @@ export class Orchestrator {
       const workspaceScopeError = await this.getRunWorkspaceScopeError(run);
       if (workspaceScopeError) {
         await this.persistRunWorkspaceScopeBlocked(run, current, workspaceScopeError);
+        continue;
+      }
+
+      if (automation.mode === "manual_only") {
+        await this.enforceManualOnlyRunGate(run.id, current, automation);
         continue;
       }
 
@@ -975,6 +1052,9 @@ export class Orchestrator {
       );
 
       if (pendingAttempt) {
+        if (this.activeAttempts.size >= this.maxConcurrentAttempts) {
+          continue;
+        }
         const alignedAttempt = await this.ensureAttemptUsesRunWorkspace(
           run,
           pendingAttempt
@@ -990,6 +1070,10 @@ export class Orchestrator {
       }
 
       if (this.hasActiveAttemptForRun(run.id)) {
+        continue;
+      }
+
+      if (this.activeAttempts.size >= this.maxConcurrentAttempts) {
         continue;
       }
 
@@ -1742,15 +1826,14 @@ export class Orchestrator {
           waiting_for_human: true
         }
       );
+      const failurePayload = this.buildAttemptFailurePayload(runId, attempt.id, error);
       await appendRunJournal(
         this.workspacePaths,
         createRunJournalEntry({
           run_id: runId,
           attempt_id: attempt.id,
           type: "attempt.failed",
-          payload: {
-            message: error instanceof Error ? error.message : String(error)
-          }
+          payload: failurePayload
         })
       );
       const governance = await this.buildSettledGovernanceState({
@@ -1948,6 +2031,10 @@ export class Orchestrator {
     return `runs/${runId}/attempts/${attemptId}/context.json`;
   }
 
+  private buildAttemptCodexOutputRef(runId: string, attemptId: string): string {
+    return `runs/${runId}/attempts/${attemptId}/codex-output.json`;
+  }
+
   private buildAttemptResultRef(runId: string, attemptId: string): string {
     return `runs/${runId}/attempts/${attemptId}/result.json`;
   }
@@ -1986,6 +2073,29 @@ export class Orchestrator {
 
   private buildCurrentDecisionRef(runId: string): string {
     return `runs/${runId}/current.json`;
+  }
+
+  private buildAttemptFailurePayload(
+    runId: string,
+    attemptId: string,
+    error: unknown
+  ): Record<string, unknown> {
+    const message = error instanceof Error ? error.message : String(error);
+
+    if (isWorkerWritebackParseError(error)) {
+      return {
+        message,
+        code: error.code,
+        field_path: error.fieldPath,
+        issue_code: error.issueCode,
+        repair_hint: error.repairHint,
+        raw_output_file: this.buildAttemptCodexOutputRef(runId, attemptId)
+      };
+    }
+
+    return {
+      message
+    };
   }
 
   private buildAttemptReviewInputPacketRef(runId: string, attemptId: string): string {
@@ -3622,9 +3732,10 @@ export class Orchestrator {
     _attempts: Attempt[]
   ): Promise<void> {
     await this.withRunDispatchLease(runId, "auto_resume_waiting_run", async () => {
-      const [current, attempts] = await Promise.all([
+      const [current, attempts, automation] = await Promise.all([
         getCurrentDecision(this.workspacePaths, runId),
-        listAttempts(this.workspacePaths, runId)
+        listAttempts(this.workspacePaths, runId),
+        this.loadRunAutomationControl(runId)
       ]);
       if (
         !current ||
@@ -3635,6 +3746,12 @@ export class Orchestrator {
       }
 
       const journal = await listRunJournal(this.workspacePaths, runId);
+      if (
+        automation.mode === "manual_only" ||
+        (!automation.reason_code && this.isAutomaticResumeSuppressed(journal))
+      ) {
+        return;
+      }
       const autoResumePolicy = await this.getAutomaticResumePolicy({
         current,
         attempts,
@@ -3719,6 +3836,27 @@ export class Orchestrator {
         })
       );
     });
+  }
+
+  private isAutomaticResumeSuppressed(
+    journal: Awaited<ReturnType<typeof listRunJournal>>
+  ): boolean {
+    for (let index = journal.length - 1; index >= 0; index -= 1) {
+      const entry = journal[index];
+      if (!entry) {
+        continue;
+      }
+
+      if (this.isAutoResumeResetBoundary(entry.type)) {
+        return false;
+      }
+
+      if (entry.type === "run.self_bootstrap.superseded") {
+        return true;
+      }
+    }
+
+    return false;
   }
 
   private async detectAutomaticResumeBlocker(input: {
@@ -4434,6 +4572,10 @@ export class Orchestrator {
       return;
     }
 
+    const message =
+      blocker?.message ??
+      current.blocking_reason ??
+      "当前阻塞涉及人工边界，系统未找到安全的自动续跑方案。";
     await appendRunJournal(
       this.workspacePaths,
       createRunJournalEntry({
@@ -4444,13 +4586,17 @@ export class Orchestrator {
           reason: blocker?.reason ?? "manual_only_blocker",
           failure_code: blocker?.failureCode ?? null,
           handoff_bundle_ref: blocker?.handoffBundleRef ?? null,
-          message:
-            blocker?.message ??
-            current.blocking_reason ??
-            "当前阻塞涉及人工边界，系统未找到安全的自动续跑方案。"
+          message
         }
       })
     );
+    await this.persistManualOnlyRunAutomation({
+      runId,
+      reasonCode: "automatic_resume_blocked",
+      reason: message,
+      imposedBy: "orchestrator",
+      failureCode: blocker?.failureCode ?? null
+    });
   }
 
   private async persistAutomaticResumeExhausted(
@@ -4486,6 +4632,12 @@ export class Orchestrator {
         }
       })
     );
+    await this.persistManualOnlyRunAutomation({
+      runId,
+      reasonCode: "automatic_resume_exhausted",
+      reason: message,
+      imposedBy: "orchestrator"
+    });
   }
 
   private hasAutoResumeTerminalEvent(

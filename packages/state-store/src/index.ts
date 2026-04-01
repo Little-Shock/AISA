@@ -31,6 +31,7 @@ import type {
   EvalSpec,
   Goal,
   RunGovernanceState,
+  RunAutomationControl,
   RuntimeHealthSnapshot,
   Run,
   RunJournalEntry,
@@ -59,6 +60,7 @@ import {
   CurrentDecisionSchema,
   EvalResultSchema,
   GoalSchema,
+  RunAutomationControlSchema,
   RunGovernanceStateSchema,
   RuntimeHealthSnapshotSchema,
   RunJournalEntrySchema,
@@ -105,6 +107,7 @@ export interface RunPaths {
   artifactsDir: string;
   contractFile: string;
   currentFile: string;
+  automationFile: string;
   governanceFile: string;
   reportFile: string;
   journalFile: string;
@@ -155,6 +158,7 @@ export function resolveRunPaths(paths: WorkspacePaths, runId: string): RunPaths 
     artifactsDir: join(runDir, "artifacts"),
     contractFile: join(runDir, "contract.json"),
     currentFile: join(runDir, "current.json"),
+    automationFile: join(runDir, "automation.json"),
     governanceFile: join(runDir, "governance.json"),
     reportFile: join(runDir, "report.md"),
     journalFile: join(runDir, "journal.ndjson"),
@@ -467,6 +471,28 @@ export async function getCurrentDecision(
       resolveRunPaths(paths, runId).currentFile
     );
     return CurrentDecisionSchema.parse(currentDecision);
+  } catch {
+    return null;
+  }
+}
+
+export async function saveRunAutomationControl(
+  paths: WorkspacePaths,
+  automationControl: RunAutomationControl
+): Promise<void> {
+  const runPaths = await ensureRunDirectories(paths, automationControl.run_id);
+  await writeJsonFile(runPaths.automationFile, automationControl);
+}
+
+export async function getRunAutomationControl(
+  paths: WorkspacePaths,
+  runId: string
+): Promise<RunAutomationControl | null> {
+  try {
+    const automationControl = await readJsonFile<RunAutomationControl>(
+      resolveRunPaths(paths, runId).automationFile
+    );
+    return RunAutomationControlSchema.parse(automationControl);
   } catch {
     return null;
   }
