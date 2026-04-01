@@ -24,6 +24,7 @@ import {
   createRunWorkspaceScopePolicy,
   maybePromoteVerifiedCheckpoint,
   resolveRuntimeLayout,
+  SELF_BOOTSTRAP_NEXT_TASK_ACTIVE_ENTRY_RELATIVE_PATH,
   syncRuntimeLayoutHint,
   RunWorkspaceScopeError,
   type RuntimeRestartRequest
@@ -776,6 +777,7 @@ async function createRuntimeLaneFixture(prefix: string): Promise<{
 
 async function createSeedRepo(rootDir: string): Promise<void> {
   await mkdir(join(rootDir, "packages", "orchestrator", "src"), { recursive: true });
+  await mkdir(join(rootDir, "Codex"), { recursive: true });
   await writeFile(
     join(rootDir, ".gitignore"),
     ["runs/", "state/", "events/", "artifacts/", "reports/", "plans/"].join("\n") + "\n",
@@ -785,6 +787,53 @@ async function createSeedRepo(rootDir: string): Promise<void> {
   await writeFile(
     join(rootDir, RUNTIME_MARKER_FILE),
     'export const runtimeLaneMarker = "seed";\n',
+    "utf8"
+  );
+  await writeFile(
+    join(rootDir, "Codex", "fixture-self-bootstrap-next-task.json"),
+    `${JSON.stringify(
+      {
+        recommended_next_attempt: {
+          attempt_type: "execution",
+          objective: "Keep runtime lane self-bootstrap fixtures aligned with the live control-api contract.",
+          success_criteria: [
+            "Persist a runnable self-bootstrap execution contract in the runtime lane fixture."
+          ],
+          required_evidence: ["Leave replayable runtime-lane verification evidence."],
+          expected_artifacts: [RUNTIME_MARKER_FILE],
+          verification_plan: {
+            commands: [
+              {
+                purpose: "prove runtime-lane self-bootstrap fixtures stay runnable",
+                command: "pnpm verify:runtime-lanes"
+              }
+            ]
+          }
+        }
+      },
+      null,
+      2
+    )}\n`,
+    "utf8"
+  );
+  await writeFile(
+    join(rootDir, SELF_BOOTSTRAP_NEXT_TASK_ACTIVE_ENTRY_RELATIVE_PATH),
+    `${JSON.stringify(
+      {
+        entry_type: "self_bootstrap_next_runtime_task_active",
+        updated_at: "2026-04-01T00:00:00.000Z",
+        source_anchor: {
+          asset_path: "Codex/fixture-self-bootstrap-next-task.json",
+          source_attempt_id: "fixture_runtime_lane_attempt",
+          payload_sha256: "fixture_runtime_lane_payload_sha256",
+          promoted_at: "2026-04-01T00:00:00.000Z"
+        },
+        title: "Runtime lane fixture self-bootstrap task",
+        summary: "Keep runtime lane fixtures compatible with the self-bootstrap entry contract."
+      },
+      null,
+      2
+    )}\n`,
     "utf8"
   );
   await runCommand(rootDir, ["git", "init"]);

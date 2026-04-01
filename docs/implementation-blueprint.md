@@ -1,5 +1,11 @@
 # AutoResearch Swarm Dashboard Implementation Blueprint
 
+> 说明
+>
+> 这份文档保留为 pre-harness 阶段的历史蓝图，主要用于代码考古和理解旧目录语言。
+>
+> 当前架构主线请以 `docs/aisa-harness-prd-v1.md`、`docs/aisa-harness-roadmap-v1.md` 和 `docs/decisions/` 为准。
+
 本文档把当前 PRD 收敛成一个可直接开工的工程实现蓝图，面向 `Milestone 0` 和 `Milestone 1 / MVP`。
 
 适用范围：

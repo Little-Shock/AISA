@@ -1,0 +1,462 @@
+import { join, relative } from "node:path";
+import {
+  createCurrentDecision,
+  createRunAutomationControl,
+  createRunGovernanceState,
+  createRunWorkingContext,
+  createRunWorkingContextDegradedState,
+  type Attempt,
+  type CurrentDecision,
+  type RunAutomationControl,
+  type RunGovernanceState,
+  type RunSteer,
+  type RunWorkingContext,
+  type RunWorkingContextDegradedState
+} from "@autoresearch/domain";
+import {
+  getAttemptContract,
+  getAttemptHandoffBundle,
+  getAttemptPreflightEvaluation,
+  getAttemptReviewPacket,
+  getAttemptRuntimeVerification,
+  getCurrentDecision,
+  getRun,
+  getRunAutomationControl,
+  getRunGovernanceState,
+  getRunWorkingContext,
+  listAttempts,
+  listRunSteers,
+  resolveAttemptPaths,
+  resolveRunPaths,
+  saveRunWorkingContext,
+  type WorkspacePaths
+} from "@autoresearch/state-store";
+
+export type RunWorkingContextView = {
+  working_context: RunWorkingContext | null;
+  working_context_ref: string | null;
+  working_context_degraded: RunWorkingContextDegradedState;
+};
+
+function toTimestamp(value: string | null | undefined): number {
+  if (!value) {
+    return 0;
+  }
+
+  const timestamp = new Date(value).getTime();
+  return Number.isFinite(timestamp) ? timestamp : 0;
+}
+
+function buildRelativeRef(paths: WorkspacePaths, absolutePath: string): string {
+  return relative(paths.rootDir, absolutePath);
+}
+
+function buildRunContractRef(paths: WorkspacePaths, runId: string): string {
+  return buildRelativeRef(paths, resolveRunPaths(paths, runId).contractFile);
+}
+
+function buildRunCurrentRef(paths: WorkspacePaths, runId: string): string {
+  return buildRelativeRef(paths, resolveRunPaths(paths, runId).currentFile);
+}
+
+function buildRunAutomationRef(paths: WorkspacePaths, runId: string): string {
+  return buildRelativeRef(paths, resolveRunPaths(paths, runId).automationFile);
+}
+
+function buildRunGovernanceRef(paths: WorkspacePaths, runId: string): string {
+  return buildRelativeRef(paths, resolveRunPaths(paths, runId).governanceFile);
+}
+
+function buildRunSteerRef(paths: WorkspacePaths, runId: string, steerId: string): string {
+  return buildRelativeRef(paths, join(resolveRunPaths(paths, runId).steersDir, `${steerId}.json`));
+}
+
+function buildAttemptContractRef(
+  paths: WorkspacePaths,
+  runId: string,
+  attemptId: string
+): string {
+  return buildRelativeRef(paths, resolveAttemptPaths(paths, runId, attemptId).contractFile);
+}
+
+function buildAttemptPreflightRef(
+  paths: WorkspacePaths,
+  runId: string,
+  attemptId: string
+): string {
+  return buildRelativeRef(
+    paths,
+    resolveAttemptPaths(paths, runId, attemptId).preflightEvaluationFile
+  );
+}
+
+function buildAttemptRuntimeVerificationRef(
+  paths: WorkspacePaths,
+  runId: string,
+  attemptId: string
+): string {
+  return buildRelativeRef(
+    paths,
+    resolveAttemptPaths(paths, runId, attemptId).runtimeVerificationFile
+  );
+}
+
+function buildAttemptReviewPacketRef(
+  paths: WorkspacePaths,
+  runId: string,
+  attemptId: string
+): string {
+  return buildRelativeRef(
+    paths,
+    resolveAttemptPaths(paths, runId, attemptId).reviewPacketFile
+  );
+}
+
+function buildAttemptHandoffBundleRef(
+  paths: WorkspacePaths,
+  runId: string,
+  attemptId: string
+): string {
+  return buildRelativeRef(
+    paths,
+    resolveAttemptPaths(paths, runId, attemptId).handoffBundleFile
+  );
+}
+
+function pickLatestAttempt(
+  attempts: Attempt[],
+  current: CurrentDecision | null
+): Attempt | null {
+  return (
+    attempts.find((attempt) => attempt.id === current?.latest_attempt_id) ??
+    attempts.at(-1) ??
+    null
+  );
+}
+
+function pickLatestSteer(steers: RunSteer[]): RunSteer | null {
+  return steers
+    .slice()
+    .sort((left, right) => toTimestamp(left.updated_at) - toTimestamp(right.updated_at))
+    .at(-1) ?? null;
+}
+
+function buildCurrentFocus(input: {
+  current: CurrentDecision | null;
+  latestAttempt: Attempt | null;
+  latestAttemptObjective: string | null;
+  queuedSteers: RunSteer[];
+  runDescription: string;
+}): string {
+  if (
+    input.current?.recommended_next_action === "apply_steer" &&
+    input.queuedSteers[0]?.content
+  ) {
+    return input.queuedSteers[0].content;
+  }
+
+  return (
+    input.latestAttemptObjective ??
+    input.latestAttempt?.objective ??
+    input.current?.summary ??
+    input.runDescription
+  );
+}
+
+function buildCurrentBlocker(input: {
+  paths: WorkspacePaths;
+  runId: string;
+  current: CurrentDecision | null;
+  automation: RunAutomationControl;
+  governance: RunGovernanceState;
+}): RunWorkingContext["current_blocker"] {
+  if (input.automation.mode === "manual_only") {
+    const summary =
+      input.automation.reason ??
+      input.current?.blocking_reason ??
+      input.current?.summary;
+    return summary
+      ? {
+          code: input.automation.reason_code,
+          summary,
+          ref: buildRunAutomationRef(input.paths, input.runId)
+        }
+      : null;
+  }
+
+  if (input.current?.blocking_reason) {
+    return {
+      code: input.governance.active_problem_signature,
+      summary: input.current.blocking_reason,
+      ref:
+        input.governance.status === "blocked"
+          ? buildRunGovernanceRef(input.paths, input.runId)
+          : buildRunCurrentRef(input.paths, input.runId)
+    };
+  }
+
+  if (
+    input.governance.status === "blocked" &&
+    input.governance.active_problem_summary
+  ) {
+    return {
+      code: input.governance.active_problem_signature,
+      summary: input.governance.active_problem_summary,
+      ref: buildRunGovernanceRef(input.paths, input.runId)
+    };
+  }
+
+  return null;
+}
+
+function buildNextOperatorAttention(input: {
+  current: CurrentDecision | null;
+  blocker: RunWorkingContext["current_blocker"];
+  queuedSteers: RunSteer[];
+  focus: string;
+}): string {
+  if (input.current?.waiting_for_human) {
+    return input.blocker?.summary ?? input.current.summary ?? input.focus;
+  }
+
+  if (
+    input.current?.recommended_next_action === "apply_steer" &&
+    input.queuedSteers[0]
+  ) {
+    return `优先应用 steer ${input.queuedSteers[0].id}。`;
+  }
+
+  if (input.current?.recommended_next_action) {
+    return `当前建议动作是 ${input.current.recommended_next_action}。`;
+  }
+
+  return input.current?.summary ?? input.focus;
+}
+
+function buildDegradedState(input: {
+  workingContext: RunWorkingContext | null;
+  current: CurrentDecision | null;
+  automation: RunAutomationControl | null;
+  governance: RunGovernanceState | null;
+  latestAttempt: Attempt | null;
+  latestSteer: RunSteer | null;
+}): RunWorkingContextDegradedState {
+  if (!input.workingContext) {
+    return createRunWorkingContextDegradedState({
+      is_degraded: true,
+      reason_code: "context_missing",
+      summary: "working context 还没有落盘。"
+    });
+  }
+
+  if (input.workingContext.degraded.is_degraded) {
+    return input.workingContext.degraded;
+  }
+
+  const workingContextUpdatedAt = toTimestamp(input.workingContext.updated_at);
+  const latestSourceUpdatedAt = Math.max(
+    toTimestamp(input.current?.updated_at),
+    toTimestamp(input.automation?.updated_at),
+    toTimestamp(input.governance?.updated_at),
+    toTimestamp(input.latestAttempt?.updated_at),
+    toTimestamp(input.latestSteer?.updated_at)
+  );
+  const attemptMismatch =
+    (input.latestAttempt?.id ?? null) !== input.workingContext.source_attempt_id;
+
+  if (attemptMismatch || latestSourceUpdatedAt > workingContextUpdatedAt) {
+    return createRunWorkingContextDegradedState({
+      is_degraded: true,
+      reason_code: "context_stale",
+      summary: "working context 落后于 current / attempt / steer 的最新现场。"
+    });
+  }
+
+  return createRunWorkingContextDegradedState();
+}
+
+export async function buildRunWorkingContext(
+  paths: WorkspacePaths,
+  runId: string
+): Promise<RunWorkingContext> {
+  const [run, current, automationControl, governanceState, attempts, steers] =
+    await Promise.all([
+      getRun(paths, runId),
+      getCurrentDecision(paths, runId),
+      getRunAutomationControl(paths, runId),
+      getRunGovernanceState(paths, runId),
+      listAttempts(paths, runId),
+      listRunSteers(paths, runId)
+    ]);
+  const currentSnapshot =
+    current ??
+    createCurrentDecision({
+      run_id: runId,
+      run_status: "draft",
+      summary: "Run created. Waiting for first attempt."
+    });
+  const automation =
+    automationControl ??
+    createRunAutomationControl({
+      run_id: runId
+    });
+  const governance =
+    governanceState ??
+    createRunGovernanceState({
+      run_id: runId
+    });
+  const latestAttempt = pickLatestAttempt(attempts, currentSnapshot);
+  const queuedSteers = steers
+    .filter((steer) => steer.status === "queued")
+    .sort((left, right) => toTimestamp(right.updated_at) - toTimestamp(left.updated_at));
+  const latestSteer = pickLatestSteer(steers);
+  const [latestContract, latestPreflight, latestRuntimeVerification, latestReviewPacket, latestHandoffBundle] =
+    latestAttempt
+      ? await Promise.all([
+          getAttemptContract(paths, runId, latestAttempt.id),
+          getAttemptPreflightEvaluation(paths, runId, latestAttempt.id),
+          getAttemptRuntimeVerification(paths, runId, latestAttempt.id),
+          getAttemptReviewPacket(paths, runId, latestAttempt.id),
+          getAttemptHandoffBundle(paths, runId, latestAttempt.id)
+        ])
+      : [null, null, null, null, null];
+
+  const activeTaskRefs: RunWorkingContext["active_task_refs"] = [];
+  if (latestAttempt) {
+    activeTaskRefs.push({
+      task_id: latestAttempt.id,
+      title: latestContract?.objective ?? latestAttempt.objective,
+      source_ref: latestContract
+        ? buildAttemptContractRef(paths, runId, latestAttempt.id)
+        : buildRelativeRef(paths, resolveAttemptPaths(paths, runId, latestAttempt.id).metaFile)
+    });
+  }
+  for (const steer of queuedSteers.slice(0, 2)) {
+    activeTaskRefs.push({
+      task_id: steer.id,
+      title: steer.content,
+      source_ref: buildRunSteerRef(paths, runId, steer.id)
+    });
+  }
+
+  const recentEvidenceRefs: RunWorkingContext["recent_evidence_refs"] = [];
+  if (latestAttempt && latestPreflight) {
+    recentEvidenceRefs.push({
+      kind: "preflight_evaluation",
+      ref: buildAttemptPreflightRef(paths, runId, latestAttempt.id),
+      note:
+        latestPreflight.failure_reason ??
+        `status=${latestPreflight.status}`
+    });
+  }
+  if (latestAttempt && latestRuntimeVerification) {
+    recentEvidenceRefs.push({
+      kind: "runtime_verification",
+      ref: buildAttemptRuntimeVerificationRef(paths, runId, latestAttempt.id),
+      note:
+        latestRuntimeVerification.failure_reason ??
+        `status=${latestRuntimeVerification.status}`
+    });
+  }
+  if (latestAttempt && latestReviewPacket) {
+    recentEvidenceRefs.push({
+      kind: "review_packet",
+      ref: buildAttemptReviewPacketRef(paths, runId, latestAttempt.id),
+      note:
+        latestReviewPacket.failure_context?.message ??
+        latestReviewPacket.evaluation?.rationale ??
+        "latest review packet"
+    });
+  }
+  if (latestAttempt && latestHandoffBundle) {
+    recentEvidenceRefs.push({
+      kind: "handoff_bundle",
+      ref: buildAttemptHandoffBundleRef(paths, runId, latestAttempt.id),
+      note:
+        latestHandoffBundle.summary ??
+        latestHandoffBundle.failure_context?.message ??
+        "latest handoff bundle"
+    });
+  }
+
+  const focus = buildCurrentFocus({
+    current: currentSnapshot,
+    latestAttempt,
+    latestAttemptObjective: latestContract?.objective ?? null,
+    queuedSteers,
+    runDescription: run.description
+  });
+  const blocker = buildCurrentBlocker({
+    paths,
+    runId,
+    current: currentSnapshot,
+    automation,
+    governance
+  });
+
+  return createRunWorkingContext({
+    run_id: runId,
+    plan_ref:
+      latestAttempt && latestContract
+        ? buildAttemptContractRef(paths, runId, latestAttempt.id)
+        : buildRunContractRef(paths, runId),
+    active_task_refs: activeTaskRefs,
+    recent_evidence_refs: recentEvidenceRefs,
+    current_focus: focus,
+    current_blocker: blocker,
+    next_operator_attention: buildNextOperatorAttention({
+      current: currentSnapshot,
+      blocker,
+      queuedSteers,
+      focus
+    }),
+    automation: {
+      mode: automation.mode,
+      reason_code: automation.reason_code
+    },
+    degraded: createRunWorkingContextDegradedState(),
+    source_attempt_id: latestAttempt?.id ?? null
+  });
+}
+
+export async function refreshRunWorkingContext(
+  paths: WorkspacePaths,
+  runId: string
+): Promise<RunWorkingContext> {
+  const workingContext = await buildRunWorkingContext(paths, runId);
+  await saveRunWorkingContext(paths, workingContext);
+  return workingContext;
+}
+
+export async function readRunWorkingContextView(
+  paths: WorkspacePaths,
+  runId: string
+): Promise<RunWorkingContextView> {
+  const [workingContext, current, automationControl, governanceState, attempts, steers] =
+    await Promise.all([
+      getRunWorkingContext(paths, runId),
+      getCurrentDecision(paths, runId),
+      getRunAutomationControl(paths, runId),
+      getRunGovernanceState(paths, runId),
+      listAttempts(paths, runId),
+      listRunSteers(paths, runId)
+    ]);
+  const latestAttempt = pickLatestAttempt(attempts, current);
+  const latestSteer = pickLatestSteer(steers);
+  const degraded = buildDegradedState({
+    workingContext,
+    current,
+    automation: automationControl,
+    governance: governanceState,
+    latestAttempt,
+    latestSteer
+  });
+
+  return {
+    working_context: workingContext,
+    working_context_ref: workingContext
+      ? buildRelativeRef(paths, resolveRunPaths(paths, runId).workingContextFile)
+      : null,
+    working_context_degraded: degraded
+  };
+}

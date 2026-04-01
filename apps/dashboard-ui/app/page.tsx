@@ -54,6 +54,10 @@ import {
   MasterConsole
 } from "./retro-console";
 import { InterventionQueuePanel, RunInboxPanel } from "./run-inbox";
+import {
+  defaultRunSteerAttemptId,
+  normalizeRunSteerAttemptId
+} from "./run-steer";
 
 const apiBaseUrl = "/api/control";
 const controlApiDisplay = "same-origin /api/control";
@@ -110,7 +114,9 @@ export default function Page() {
   });
   const [steerText, setSteerText] = useState("");
   const [runSteerText, setRunSteerText] = useState("");
-  const [runSteerAttemptId, setRunSteerAttemptId] = useState("");
+  const [runSteerAttemptId, setRunSteerAttemptId] = useState(
+    defaultRunSteerAttemptId(null)
+  );
   const refreshInFlightRef = useRef(false);
 
   useEffect(() => {
@@ -135,7 +141,7 @@ export default function Page() {
 
   useEffect(() => {
     setRunSteerText("");
-    setRunSteerAttemptId(runDetail?.current?.latest_attempt_id ?? "");
+    setRunSteerAttemptId(defaultRunSteerAttemptId(runDetail?.current?.latest_attempt_id));
   }, [runDetail?.run.id, runDetail?.current?.latest_attempt_id]);
 
   const selectedGoal = useMemo(
@@ -323,14 +329,21 @@ export default function Page() {
                     updated_at: nextDetail.current.updated_at
                   }
                 : null,
+              automation: nextDetail.automation,
               governance: nextDetail.governance,
+              working_context: nextDetail.working_context,
+              working_context_ref: nextDetail.working_context_ref,
+              working_context_degraded: nextDetail.working_context_degraded,
               run_health: nextDetail.run_health,
               attempt_count: nextDetail.attempts.length,
               latest_attempt: latestDetail?.attempt ?? null,
               latest_attempt_runtime_state: latestDetail?.runtime_state ?? null,
               latest_attempt_heartbeat: latestDetail?.heartbeat ?? null,
               task_focus:
-                latestDetail?.contract?.objective ?? latestDetail?.attempt.objective ?? item.task_focus,
+                nextDetail.working_context?.current_focus ??
+                latestDetail?.contract?.objective ??
+                latestDetail?.attempt.objective ??
+                item.task_focus,
               verification_command_count:
                 latestDetail?.contract?.verification_plan?.commands.length ??
                 item.verification_command_count
@@ -592,7 +605,7 @@ export default function Page() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           content: runSteerText.trim(),
-          attempt_id: runSteerAttemptId || null
+          attempt_id: normalizeRunSteerAttemptId(runSteerAttemptId)
         })
       });
 

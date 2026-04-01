@@ -773,6 +773,44 @@ class ContextCaptureAdapter {
   }
 }
 
+class BlockingAdapter {
+  readonly type = "fake-codex";
+  readonly startedAttemptIds: string[] = [];
+  private releaseResolver: (() => void) | null = null;
+  private readonly releasePromise = new Promise<void>((resolve) => {
+    this.releaseResolver = resolve;
+  });
+
+  release(): void {
+    this.releaseResolver?.();
+    this.releaseResolver = null;
+  }
+
+  async runAttemptTask(input: {
+    attempt: Attempt;
+  }): Promise<{
+    writeback: WorkerWriteback;
+    reportMarkdown: string;
+    exitCode: number;
+  }> {
+    this.startedAttemptIds.push(input.attempt.id);
+    await this.releasePromise;
+
+    return {
+      writeback: {
+        summary: `Released blocked attempt ${input.attempt.id}.`,
+        findings: [],
+        questions: [],
+        recommended_next_steps: [],
+        confidence: 0.5,
+        artifacts: []
+      },
+      reportMarkdown: "# blocking adapter",
+      exitCode: 0
+    };
+  }
+}
+
 async function createCodexArgCaptureScript(input: {
   rootDir: string;
   fileName: string;
@@ -3468,6 +3506,53 @@ async function assertConcurrentOrchestratorsStartPendingAttemptOnce(): Promise<v
   await assertRunDispatchLeaseReleased(rootDir, run.id);
 }
 
+async function assertGlobalAttemptConcurrencyLimitCapsParallelDispatch(): Promise<void> {
+  const rootDir = await mkdtemp(join(tmpdir(), "aisa-run-concurrency-limit-"));
+  const first = await bootstrapRun(rootDir, "run-concurrency-limit-a");
+  const second = await bootstrapRun(rootDir, "run-concurrency-limit-b");
+  const adapter = new BlockingAdapter();
+  const orchestrator = new Orchestrator(
+    first.workspacePaths,
+    adapter as never,
+    undefined,
+    60_000,
+    {
+      maxConcurrentAttempts: 1
+    }
+  );
+
+  await orchestrator.tick();
+  await orchestrator.tick();
+  await sleep(100);
+
+  const [firstAttempts, secondAttempts] = await Promise.all([
+    listAttempts(first.workspacePaths, first.run.id),
+    listAttempts(second.workspacePaths, second.run.id)
+  ]);
+
+  assert.equal(firstAttempts.length, 1, "first run should plan exactly one attempt");
+  assert.equal(secondAttempts.length, 1, "second run should plan exactly one attempt");
+  assert.equal(
+    adapter.startedAttemptIds.length,
+    1,
+    "global attempt concurrency limit should only dispatch one run at a time"
+  );
+  assert.equal(
+    firstAttempts[0]?.status,
+    "running",
+    "first run should occupy the only dispatch slot"
+  );
+  assert.ok(
+    ["created", "queued"].includes(secondAttempts[0]?.status ?? ""),
+    "second run should stay pending until the slot is released"
+  );
+
+  adapter.release();
+  await waitForRunningAttemptsToSettle(first.workspacePaths, first.run.id, 3_000);
+  await assertRunDispatchLeaseReleased(rootDir, first.run.id);
+  await assertRunDispatchLeaseReleased(rootDir, second.run.id);
+}
+
 async function waitForAttemptToLeavePendingState(
   workspacePaths: ReturnType<typeof resolveWorkspacePaths>,
   runId: string,
@@ -4552,6 +4637,20 @@ async function main(): Promise<void> {
   } catch (error) {
     results.push({
       id: "concurrent_orchestrators_start_pending_attempt_once",
+      status: "fail",
+      error: error instanceof Error ? error.message : String(error)
+    });
+  }
+
+  try {
+    await assertGlobalAttemptConcurrencyLimitCapsParallelDispatch();
+    results.push({
+      id: "global_attempt_concurrency_limit_caps_parallel_dispatch",
+      status: "pass"
+    });
+  } catch (error) {
+    results.push({
+      id: "global_attempt_concurrency_limit_caps_parallel_dispatch",
       status: "fail",
       error: error instanceof Error ? error.message : String(error)
     });

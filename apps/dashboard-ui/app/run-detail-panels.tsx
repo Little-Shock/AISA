@@ -25,9 +25,34 @@ import {
   SubPanel
 } from "./dashboard-primitives";
 import type { RunDetail, RunOperatorState, RunSummaryItem } from "./dashboard-types";
+import { createRunSteerTargetOptions } from "./run-steer";
 
 function runHealthLabel(status: string | null | undefined): string {
   return status ? statusLabel(status) : "未知";
+}
+
+function automationModeLabel(mode: string | null | undefined): string {
+  switch (mode) {
+    case "manual_only":
+      return "仅人工";
+    case "active":
+      return "自动推进";
+    default:
+      return "未知";
+  }
+}
+
+function workingContextDegradedReasonLabel(reasonCode: string | null | undefined): string {
+  switch (reasonCode) {
+    case "context_missing":
+      return "现场缺失";
+    case "context_stale":
+      return "现场过期";
+    case "context_write_failed":
+      return "现场写入失败";
+    default:
+      return "现场正常";
+  }
 }
 
 export function RunOverviewPanel({
@@ -65,6 +90,9 @@ export function RunOverviewPanel({
   const operatorChecklist = deriveRunOperatorChecklist(selectedRun, nowTs);
   const governance = runDetail.governance;
   const runHealth = runDetail.run_health;
+  const automation = runDetail.automation;
+  const workingContext = runDetail.working_context;
+  const workingContextDegraded = runDetail.working_context_degraded;
   const governanceStatus = governance ? statusLabel(governance.status) : "未建立";
   const healthStatus = runHealthLabel(runHealth?.status);
   const latestActivityLabel = runHealth?.latest_activity_at
@@ -127,6 +155,11 @@ export function RunOverviewPanel({
         />
         <InfoCard label="治理状态" value={governanceStatus} />
         <InfoCard label="运行健康" value={healthStatus} />
+        <InfoCard label="自动化模式" value={automationModeLabel(automation?.mode)} />
+        <InfoCard
+          label="现场状态"
+          value={workingContextDegradedReasonLabel(workingContextDegraded.reason_code)}
+        />
         <InfoCard label="最新尝试" value={runDetail.current?.latest_attempt_id ?? "暂无"} />
         <InfoCard label="尝试数量" value={String(runDetail.attempts.length)} />
         <InfoCard label="治理主线" value={governance?.mainline_attempt_id ?? "暂无"} />
@@ -175,11 +208,30 @@ export function RunOverviewPanel({
         </Callout>
       ) : null}
 
+      {automation?.mode === "manual_only" ? (
+        <Callout tone="rose" title="自动化已停">
+          {localizeUiText(
+            automation.reason ??
+              "当前 run 已切到 manual_only，后续只能由人工 launch 或 steer 继续。"
+          )}
+        </Callout>
+      ) : null}
+
+      {workingContextDegraded.is_degraded ? (
+        <Callout tone="amber" title="运行中现场降级">
+          {localizeUiText(
+            workingContextDegraded.summary ??
+              "working context 已落后或缺失，先修现场再继续长任务。"
+          )}
+        </Callout>
+      ) : null}
+
       <div className="dual-grid">
         <SubPanel title="当前分配任务" accent="emerald">
           <p className="body-copy">
             {localizeUiText(
-              selectedRunAttemptDetail?.contract?.objective ??
+              workingContext?.current_focus ??
+                selectedRunAttemptDetail?.contract?.objective ??
                 selectedRunAttemptDetail?.attempt.objective ??
                 runDetail.run.description
             )}
@@ -191,8 +243,33 @@ export function RunOverviewPanel({
               `尝试类型：${selectedRunAttemptDetail ? attemptTypeLabel(selectedRunAttemptDetail.attempt.attempt_type) : "暂无"}`,
               `执行器：${selectedRunAttemptDetail ? workerLabel(selectedRunAttemptDetail.attempt.worker) : "暂无"}`,
               `创建时间：${formatDateTime(selectedRunAttemptDetail?.attempt.created_at)}`,
-              `契约回放命令：${String(selectedRunAttemptDetail?.contract?.verification_plan?.commands.length ?? 0)}`
+              `契约回放命令：${String(selectedRunAttemptDetail?.contract?.verification_plan?.commands.length ?? 0)}`,
+              `working context：${runDetail.working_context_ref ?? "未落盘"}`,
+              `现场更新时间：${formatDateTime(workingContext?.updated_at)}`
             ]}
+          />
+          <SectionList
+            title="运行中现场"
+            items={[
+              `当前焦点：${localizeUiText(workingContext?.current_focus ?? "暂无")}`,
+              `计划锚点：${workingContext?.plan_ref ?? "暂无"}`,
+              `来源尝试：${workingContext?.source_attempt_id ?? "暂无"}`,
+              `下一注意点：${localizeUiText(workingContext?.next_operator_attention ?? "暂无")}`,
+              `自动化模式：${automationModeLabel(workingContext?.automation.mode ?? automation?.mode)}`
+            ]}
+          />
+          <SectionList
+            title="活跃任务引用"
+            items={workingContext?.active_task_refs.map((task) => `${task.task_id} · ${task.title} · ${task.source_ref}`) ?? []}
+          />
+          <SectionList
+            title="最近证据引用"
+            items={
+              workingContext?.recent_evidence_refs.map(
+                (item) =>
+                  `${item.kind} · ${item.ref}${item.note ? ` · ${localizeUiText(item.note)}` : ""}`
+              ) ?? []
+            }
           />
           <SectionList
             title="当前成功标准"
@@ -235,7 +312,11 @@ export function RunOverviewPanel({
 
         <SubPanel title="当前判断" accent="amber">
           <p className="body-copy">
-            {localizeUiText(runDetail.current?.summary ?? "还没有当前判断。")}
+            {localizeUiText(
+              workingContext?.next_operator_attention ??
+                runDetail.current?.summary ??
+                "还没有当前判断。"
+            )}
           </p>
           <SectionList title="Operator Checklist" items={operatorChecklist} />
           <SectionList
@@ -250,7 +331,16 @@ export function RunOverviewPanel({
               `事件总数：${String(selectedRunRuntimeState?.event_count ?? 0)}`,
               `介入等级：${selectedRunOperatorState?.label ?? "暂无"}`,
               `治理状态：${governanceStatus}`,
-              `运行健康：${healthStatus}`
+              `运行健康：${healthStatus}`,
+              `现场状态：${workingContextDegradedReasonLabel(workingContextDegraded.reason_code)}`
+            ]}
+          />
+          <SectionList
+            title="现场卡点"
+            items={[
+              `当前 blocker：${localizeUiText(workingContext?.current_blocker?.summary ?? runDetail.current?.blocking_reason ?? "暂无")}`,
+              `blocker 锚点：${workingContext?.current_blocker?.ref ?? "暂无"}`,
+              `blocker 代码：${workingContext?.current_blocker?.code ?? automation?.reason_code ?? "暂无"}`
             ]}
           />
           <SectionList
@@ -368,19 +458,7 @@ export function RunSteerPanel({
   onSubmit: () => void;
   busy: boolean;
 }) {
-  const steerTargetOptions = [
-    {
-      value: "",
-      label: "应用到下一次 pickup"
-    },
-    ...runDetail.attempts
-      .slice()
-      .reverse()
-      .map((attempt) => ({
-        value: attempt.id,
-        label: `${attempt.id} · ${attemptTypeLabel(attempt.attempt_type)} · ${statusLabel(attempt.status)}`
-      }))
-  ];
+  const steerTargetOptions = createRunSteerTargetOptions(runDetail.attempts);
 
   return (
     <Panel

@@ -59,6 +59,32 @@ export interface BranchExecutionResult {
   exitCode: number;
 }
 
+export class WorkerWritebackParseError extends Error {
+  readonly code = "worker_output_schema_invalid";
+  readonly fieldPath: string | null;
+  readonly issueCode: string | null;
+  readonly repairHint: string | null;
+
+  constructor(input: {
+    message: string;
+    fieldPath?: string | null;
+    issueCode?: string | null;
+    repairHint?: string | null;
+  }) {
+    super(input.message);
+    this.name = "WorkerWritebackParseError";
+    this.fieldPath = input.fieldPath ?? null;
+    this.issueCode = input.issueCode ?? null;
+    this.repairHint = input.repairHint ?? null;
+  }
+}
+
+export function isWorkerWritebackParseError(
+  error: unknown
+): error is WorkerWritebackParseError {
+  return error instanceof WorkerWritebackParseError;
+}
+
 export const CODEX_CLI_EXECUTION_EFFORT_CONFIG_KEY = "model_reasoning_effort";
 export const CODEX_CLI_EXECUTION_EFFORT_APPLIED_DETAIL =
   `当前 execution 入口会通过 Codex CLI 配置键 ${CODEX_CLI_EXECUTION_EFFORT_CONFIG_KEY} 原生透传 effort。`;
@@ -1713,18 +1739,11 @@ function buildCodexAttemptPrompt(
     attempt.attempt_type === "execution"
       ? "Do not replace the contract verification plan with a different one after execution starts."
       : null,
-    attempt.attempt_type === "execution"
-      ? `Allowed findings.type values: ${workerFindingTypes}. Do not invent values like "gap".`
-      : null,
-    attempt.attempt_type === "execution"
-      ? `artifacts must be an array of objects with stable keys. Allowed artifacts[].type values: ${workerArtifactTypes}.`
-      : null,
-    attempt.attempt_type === "execution"
-      ? `Copy this artifacts object shape when you have one: ${JSON.stringify(executionArtifactExample)}`
-      : null,
-    attempt.attempt_type === "execution"
-      ? 'Do not return artifacts as plain strings like "artifacts/diff.patch".'
-      : null,
+    `Allowed findings.type values: ${workerFindingTypes}. Do not invent values like "gap".`,
+    `artifacts must be an array of objects with stable keys. Allowed artifacts[].type values: ${workerArtifactTypes}.`,
+    `Copy this artifacts object shape when you have one: ${JSON.stringify(executionArtifactExample)}`,
+    'Do not return artifacts as plain strings like "scripts/verify-run-detail-api.ts".',
+    "If you only want to cite files or commands as evidence, put them in findings[].evidence, recommended_next_steps, or next_attempt_contract.expected_artifacts instead of artifacts[].",
     attempt.attempt_type === "research"
       ? "If you recommend execution next, include next_attempt_contract with replayable verification commands."
       : null,
@@ -1791,13 +1810,107 @@ function formatQuotedValues(values: readonly string[]): string {
   return values.map((value) => `"${value}"`).join(", ");
 }
 
+function formatIssuePath(path: Array<string | number>): string | null {
+  if (path.length === 0) {
+    return null;
+  }
+
+  let formatted = "";
+  for (const segment of path) {
+    if (typeof segment === "number") {
+      formatted += `[${segment}]`;
+      continue;
+    }
+
+    formatted += formatted.length === 0 ? segment : `.${segment}`;
+  }
+
+  return formatted || null;
+}
+
+function buildWritebackParseError(error: {
+  message: string;
+  issues: Array<{
+    path: Array<string | number>;
+    code?: string;
+    message: string;
+  }>;
+}): WorkerWritebackParseError {
+  const issue = error.issues[0];
+  const fieldPath = issue ? formatIssuePath(issue.path) : null;
+  const issueMessage =
+    typeof issue?.message === "string" && issue.message.length > 0
+      ? issue.message
+      : typeof error.message === "string" && error.message.length > 0
+        ? error.message
+        : "Worker writeback did not match the schema.";
+  const repairHint =
+    fieldPath?.startsWith("artifacts[") || fieldPath === "artifacts"
+      ? 'artifacts 必须是对象数组，元素形如 {"type":"report","path":"relative/path"}；如果只是引用文件路径，就把它写进 findings.evidence、recommended_next_steps 或 next_attempt_contract.expected_artifacts。'
+      : "返回的 JSON 必须严格符合 WorkerWritebackSchema。";
+  const baseMessage = fieldPath
+    ? `Worker writeback schema invalid at ${fieldPath}: ${issueMessage}`
+    : `Worker writeback schema invalid: ${issueMessage}`;
+
+  return new WorkerWritebackParseError({
+    message: `${baseMessage} ${repairHint}`.trim(),
+    fieldPath,
+    issueCode: issue?.code ?? null,
+    repairHint
+  });
+}
+
+function detectCommonWritebackContractError(
+  value: unknown
+): WorkerWritebackParseError | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+
+  const record = value as Record<string, unknown>;
+  if (Array.isArray(record.artifacts)) {
+    const invalidArtifactIndex = record.artifacts.findIndex(
+      (artifact) => !artifact || typeof artifact !== "object" || Array.isArray(artifact)
+    );
+    if (invalidArtifactIndex >= 0) {
+      const invalidArtifact = record.artifacts[invalidArtifactIndex];
+      const received =
+        invalidArtifact === null
+          ? "null"
+          : Array.isArray(invalidArtifact)
+            ? "array"
+            : typeof invalidArtifact;
+      const fieldPath = `artifacts[${invalidArtifactIndex}]`;
+      const repairHint =
+        'artifacts 必须是对象数组，元素形如 {"type":"report","path":"relative/path"}；如果只是引用文件路径，就把它写进 findings.evidence、recommended_next_steps 或 next_attempt_contract.expected_artifacts。';
+
+      return new WorkerWritebackParseError({
+        message: `Worker writeback schema invalid at ${fieldPath}: Expected object, received ${received} ${repairHint}`,
+        fieldPath,
+        repairHint
+      });
+    }
+  }
+
+  return null;
+}
+
 function parseWritebackFromText(text: string): WorkerWriteback {
   const trimmed = text.trim();
   const candidate = trimmed.startsWith("```")
     ? trimmed.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "")
     : trimmed;
+  const parsedJson = JSON.parse(candidate);
+  const commonContractError = detectCommonWritebackContractError(parsedJson);
+  if (commonContractError) {
+    throw commonContractError;
+  }
+  const parsed = WorkerWritebackSchema.safeParse(parsedJson);
+  if (!parsed.success) {
+    throw buildWritebackParseError(parsed.error);
+  }
 
-  return WorkerWritebackSchema.parse(JSON.parse(candidate));
+  return parsed.data;
 }
 
 async function resolveCommandPath(

@@ -38,6 +38,7 @@ import { buildServer } from "../apps/control-api/src/index.ts";
 import {
   createRunWorkspaceScopePolicy,
   Orchestrator,
+  refreshRunWorkingContext,
   SELF_BOOTSTRAP_NEXT_TASK_ACTIVE_ENTRY_RELATIVE_PATH,
   SELF_BOOTSTRAP_NEXT_TASK_ACTIVE_ENTRY_SNAPSHOT_FILE_NAME
 } from "../packages/orchestrator/src/index.ts";
@@ -469,6 +470,7 @@ async function main(): Promise<void> {
   for (const entry of [blockerCreatedEntry, blockerStartedEntry, blockerRecoveryEntry]) {
     await appendRunJournal(workspacePaths, entry);
   }
+  await refreshRunWorkingContext(workspacePaths, run.id);
 
   const attemptPaths = resolveAttemptPaths(workspacePaths, run.id, attempt.id);
   await Promise.all([
@@ -775,6 +777,39 @@ async function main(): Promise<void> {
       released_at: null
     });
 
+    const staleWorkingContextRun = createRun({
+      title: "Stale working context verification",
+      description: "Ensure control-api marks lagging working context explicitly.",
+      success_criteria: ["Expose working_context_degraded when current outruns the snapshot."],
+      constraints: [],
+      owner_id: "test-owner",
+      workspace_root: projectRoot
+    });
+    await saveRun(workspacePaths, staleWorkingContextRun);
+    await saveCurrentDecision(
+      workspacePaths,
+      createCurrentDecision({
+        run_id: staleWorkingContextRun.id,
+        run_status: "waiting_steer",
+        recommended_next_action: "wait_for_human",
+        summary: "Initial working context snapshot.",
+        blocking_reason: "Initial working context snapshot.",
+        waiting_for_human: true
+      })
+    );
+    await refreshRunWorkingContext(workspacePaths, staleWorkingContextRun.id);
+    await saveCurrentDecision(
+      workspacePaths,
+      createCurrentDecision({
+        run_id: staleWorkingContextRun.id,
+        run_status: "waiting_steer",
+        recommended_next_action: "wait_for_human",
+        summary: "Current decision moved after working context snapshot.",
+        blocking_reason: "Current decision moved after working context snapshot.",
+        waiting_for_human: true
+      })
+    );
+
     const response = await app.inject({
       method: "GET",
       url: `/runs/${run.id}`
@@ -783,9 +818,14 @@ async function main(): Promise<void> {
       method: "GET",
       url: `/runs/${staleRun.id}`
     });
+    const staleWorkingContextResponse = await app.inject({
+      method: "GET",
+      url: `/runs/${staleWorkingContextRun.id}`
+    });
 
     assert.equal(response.statusCode, 200);
     assert.equal(staleResponse.statusCode, 200);
+    assert.equal(staleWorkingContextResponse.statusCode, 200);
     const payload = response.json() as {
       run: {
         harness_profile: {
@@ -798,6 +838,29 @@ async function main(): Promise<void> {
         execution: { requested_effort: string; status: string };
         reviewer: { requested_effort: string; status: string };
         synthesizer: { requested_effort: string; status: string };
+      };
+      automation: {
+        mode: string;
+        reason_code: string | null;
+      } | null;
+      working_context: {
+        plan_ref: string | null;
+        current_focus: string | null;
+        current_blocker: {
+          code: string | null;
+          summary: string;
+          ref: string | null;
+        } | null;
+        recent_evidence_refs: Array<{
+          kind: string;
+          ref: string;
+        }>;
+        source_attempt_id: string | null;
+      } | null;
+      working_context_ref: string | null;
+      working_context_degraded: {
+        is_degraded: boolean;
+        reason_code: string | null;
       };
       run_health: {
         status: string;
@@ -841,6 +904,23 @@ async function main(): Promise<void> {
       run_health: {
         status: string;
         likely_zombie: boolean;
+      };
+      working_context: null;
+      working_context_ref: string | null;
+      working_context_degraded: {
+        is_degraded: boolean;
+        reason_code: string | null;
+      };
+    };
+    const staleWorkingContextPayload = staleWorkingContextResponse.json() as {
+      working_context: {
+        current_focus: string | null;
+      } | null;
+      working_context_ref: string | null;
+      working_context_degraded: {
+        is_degraded: boolean;
+        reason_code: string | null;
+        summary: string | null;
       };
     };
 
@@ -930,8 +1010,33 @@ async function main(): Promise<void> {
     assert.equal(payload.worker_effort.reviewer.status, "unsupported");
     assert.equal(payload.worker_effort.synthesizer.requested_effort, "medium");
     assert.equal(payload.worker_effort.synthesizer.status, "unsupported");
+    assert.equal(payload.automation?.mode, "active");
+    assert.equal(payload.working_context_degraded.is_degraded, false);
+    assert.equal(payload.working_context?.source_attempt_id, blockerAttempt.id);
+    assert.equal(payload.working_context?.current_focus, blockerAttempt.objective);
+    assert.equal(payload.working_context?.current_blocker?.summary, blockerFailureContext.message);
+    assert.equal(payload.working_context?.plan_ref, `runs/${run.id}/contract.json`);
+    assert.ok(payload.working_context_ref?.endsWith("working-context.json"));
+    assert.ok(
+      payload.working_context?.recent_evidence_refs.some(
+        (item) => item.kind === "review_packet" && item.ref.endsWith("review_packet.json")
+      )
+    );
     assert.equal(stalePayload.run_health.status, "stale_running_attempt");
     assert.equal(stalePayload.run_health.likely_zombie, true);
+    assert.equal(stalePayload.working_context, null);
+    assert.equal(stalePayload.working_context_ref, null);
+    assert.equal(stalePayload.working_context_degraded.is_degraded, true);
+    assert.equal(stalePayload.working_context_degraded.reason_code, "context_missing");
+    assert.equal(staleWorkingContextPayload.working_context_degraded.is_degraded, true);
+    assert.equal(
+      staleWorkingContextPayload.working_context_degraded.reason_code,
+      "context_stale"
+    );
+    assert.ok(
+      staleWorkingContextPayload.working_context_degraded.summary?.includes("working context")
+    );
+    assert.ok(staleWorkingContextPayload.working_context_ref?.endsWith("working-context.json"));
 
     const runsResponse = await app.inject({
       method: "GET",
@@ -948,6 +1053,12 @@ async function main(): Promise<void> {
           status: string;
           likely_zombie: boolean;
         };
+        working_context_ref: string | null;
+        working_context_degraded: {
+          is_degraded: boolean;
+          reason_code: string | null;
+        };
+        task_focus: string;
         latest_attempt_runtime_state: { session_id: string | null } | null;
       }>;
     };
@@ -956,6 +1067,9 @@ async function main(): Promise<void> {
     assert.equal(runSummary?.worker_effort.execution.status, "applied");
     assert.equal(runSummary?.latest_attempt_runtime_state, null);
     assert.equal(runSummary?.run_health.status, "waiting_steer");
+    assert.equal(runSummary?.working_context_degraded.is_degraded, false);
+    assert.ok(runSummary?.working_context_ref?.endsWith("working-context.json"));
+    assert.equal(runSummary?.task_focus, blockerAttempt.objective);
 
     const healthResponse = await app.inject({
       method: "GET",

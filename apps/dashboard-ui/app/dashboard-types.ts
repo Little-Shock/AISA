@@ -130,6 +130,57 @@ export type RunHealthAssessment = {
   heartbeat_age_ms: number | null;
 } | null;
 
+export type RunAutomationControlView = {
+  mode: string;
+  reason_code: string | null;
+  reason: string | null;
+  imposed_by: string | null;
+  active_run_id: string | null;
+  failure_code: string | null;
+  updated_at: string;
+} | null;
+
+export type RunWorkingContextTaskRef = {
+  task_id: string;
+  title: string;
+  source_ref: string;
+};
+
+export type RunWorkingContextEvidenceRef = {
+  kind: string;
+  ref: string;
+  note: string | null;
+};
+
+export type RunWorkingContextBlocker = {
+  code: string | null;
+  summary: string;
+  ref: string | null;
+} | null;
+
+export type RunWorkingContextDegraded = {
+  is_degraded: boolean;
+  reason_code: string | null;
+  summary: string | null;
+};
+
+export type RunWorkingContext = {
+  run_id: string;
+  plan_ref: string | null;
+  active_task_refs: RunWorkingContextTaskRef[];
+  recent_evidence_refs: RunWorkingContextEvidenceRef[];
+  current_focus: string | null;
+  current_blocker: RunWorkingContextBlocker;
+  next_operator_attention: string | null;
+  automation: {
+    mode: string;
+    reason_code: string | null;
+  };
+  degraded: RunWorkingContextDegraded;
+  source_attempt_id: string | null;
+  updated_at: string;
+} | null;
+
 export type RunSummaryItem = {
   run: {
     id: string;
@@ -148,7 +199,11 @@ export type RunSummaryItem = {
     waiting_for_human: boolean;
     updated_at: string;
   } | null;
+  automation: RunAutomationControlView;
   governance: RunGovernanceState;
+  working_context: RunWorkingContext;
+  working_context_ref: string | null;
+  working_context_degraded: RunWorkingContextDegraded;
   run_health: RunHealthAssessment;
   attempt_count: number;
   latest_attempt: {
@@ -190,7 +245,11 @@ export type RunDetail = {
     waiting_for_human: boolean;
     updated_at: string;
   } | null;
+  automation: RunAutomationControlView;
   governance: RunGovernanceState;
+  working_context: RunWorkingContext;
+  working_context_ref: string | null;
+  working_context_degraded: RunWorkingContextDegraded;
   run_health: RunHealthAssessment;
   attempts: Array<{
     id: string;

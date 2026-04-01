@@ -1,0 +1,83 @@
+{
+  "source_attempt_id": "manual_2026_04_01_handoff_first_adversarial_verification",
+  "title": "先做 handoff-first run detail，再把 adversarial-verification 接成自举硬步骤",
+  "summary": "AISA 现在已经会生成 preflight_evaluation、handoff_bundle 和 runtime verification，但这些信号还没有变成 run detail 与 dashboard 的首屏主视图，自举时也没有把 adversarial-verification 明确钉成 execution 的后置验证步骤。下一步最值的不是再补抽象 roadmap，而是把这三类信号直接抬到 run detail 顶层，再让 dashboard 先消费它们，同时把 adversarial-verification 做成 deterministic runtime verification 之后的明确验证工件、review packet 输入和完成门禁。",
+  "findings": [
+    {
+      "type": "fact",
+      "content": "orchestrator 已经会生成 preflight_evaluation 和 handoff_bundle，说明底层证据不是没有，而是还没有被 handoff-first 地暴露给上层接口和界面。",
+      "evidence": [
+        "packages/orchestrator/src/index.ts"
+      ]
+    },
+    {
+      "type": "fact",
+      "content": "当前 run detail API 主要返回 run、attempt、attempt_details 等全量结构，适合排障，但还不够像一个供 dashboard 首屏直接消费的 handoff surface。",
+      "evidence": [
+        "apps/control-api/src/index.ts",
+        "scripts/verify-run-detail-api.ts"
+      ]
+    },
+    {
+      "type": "fact",
+      "content": "dashboard 目前主要是 run inbox 和 run detail panels，还没有把 preflight_evaluation、handoff_bundle 摘要和 run_brief 当成首屏主信号。",
+      "evidence": [
+        "apps/dashboard-ui/app/run-inbox.tsx",
+        "apps/dashboard-ui/app/run-detail-panels.tsx"
+      ]
+    },
+    {
+      "type": "fact",
+      "content": "runtime verification 已经是 execution 的硬门，但它解决的是可回放和现场一致性，不等于主动折腾系统的对抗性验证。",
+      "evidence": [
+        "packages/orchestrator/src/runtime-verification.ts",
+        "scripts/verify-run-loop.ts"
+      ]
+    }
+  ],
+  "recommended_next_attempt": {
+    "attempt_type": "execution",
+    "objective": "把 run detail 做成 handoff-first surface。控制 API 顶层稳定返回 latest preflight_evaluation、latest handoff_bundle 的 ref 与 summary、run_brief；dashboard 首屏先消费这三项。与此同时，把 adversarial-verification 明确接成 execution 和 self-bootstrap 的后置验证步骤，要求非 trivial 改动在 deterministic runtime verification 通过后再产出机器可读的 adversarial verification 工件，并把该结论接进 review packet、handoff_bundle 和完成判定。",
+    "success_criteria": [
+      "run detail 顶层会稳定返回 latest preflight_evaluation、latest handoff_bundle 的 ref 与 summary、run_brief，不需要先展开 attempt_details 才能看见。",
+      "dashboard 首屏会直接消费这三类 handoff 信号，而不是继续把低层 attempt 细节当成唯一入口。",
+      "非 trivial execution 在 deterministic runtime verification 通过后，还会额外留下机器可读的 adversarial verification 工件，至少包含 checks、commands、outputs、verdict。",
+      "review packet、handoff_bundle 和完成判定都能读到 adversarial verification 的 ref 或摘要，不能只留在自由文本里。",
+      "新增或更新回归，覆盖 run detail handoff-first 暴露、自举链路对 adversarial verification 的要求，以及 deterministic verification 仍保持第一道硬门。"
+    ],
+    "required_evidence": [
+      "留下至少一份 run detail 顶层返回 handoff-first 字段的接口回放输出。",
+      "留下至少一份非 trivial execution 的 deterministic runtime verification 与 adversarial verification 双证据。",
+      "留下自举相关回归和 run detail 回归的通过结果。"
+    ],
+    "forbidden_shortcuts": [
+      "不要只在 dashboard 里重新拼字段，却不让 control-api 顶层正式暴露 handoff-first 信号。",
+      "不要用 adversarial-verification 取代 deterministic runtime verification，顺序必须是先 deterministic，后 adversarial。",
+      "不要只写文字总结说做过对抗性验证，却不落机器可读工件和明确 verdict。"
+    ],
+    "expected_artifacts": [
+      "apps/control-api/src/index.ts",
+      "apps/dashboard-ui/app/run-detail-panels.tsx",
+      "packages/orchestrator/src/index.ts",
+      "scripts/verify-run-detail-api.ts",
+      "scripts/verify-run-loop.ts",
+      "scripts/verify-self-bootstrap.ts"
+    ],
+    "verification_plan": {
+      "commands": [
+        {
+          "purpose": "验证 run detail 顶层 handoff-first 字段与控制 API 契约",
+          "command": "pnpm verify:run-api"
+        },
+        {
+          "purpose": "验证 run loop 仍保持 deterministic runtime verification 硬门，并接住 adversarial verification 证据",
+          "command": "pnpm verify:run-loop"
+        },
+        {
+          "purpose": "验证自举入口会带着新的 active next task 和验证要求正常启动",
+          "command": "pnpm verify:self-bootstrap"
+        }
+      ]
+    }
+  }
+}

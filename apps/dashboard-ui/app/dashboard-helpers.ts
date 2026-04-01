@@ -188,6 +188,7 @@ export function deriveRunOperatorState(
 ): RunOperatorState {
   const blockingReason = item.current?.blocking_reason?.trim() ?? "";
   const runtimeError = item.latest_attempt_runtime_state?.error?.trim() ?? "";
+  const workingContextDegraded = item.working_context_degraded?.is_degraded === true;
   const heartbeatAt = toTimestamp(item.latest_attempt_heartbeat?.heartbeat_at);
   const attemptStartedAt = toTimestamp(item.latest_attempt?.started_at);
   const waitingForHuman = item.current?.waiting_for_human === true;
@@ -213,13 +214,14 @@ export function deriveRunOperatorState(
     };
   }
 
-  if (hasRuntimeError || staleHeartbeat) {
+  if (hasRuntimeError || staleHeartbeat || workingContextDegraded) {
     return {
       kind: "at_risk",
       label: "需排查",
       tone: "amber",
       reason:
         runtimeError ||
+        item.working_context_degraded?.summary ||
         "运行还在继续，但心跳或实时信号已经偏陈旧，需要先确认 worker 是否卡住。",
       recovery_hint: inferRecoveryHint(item, staleHeartbeat),
       sort_order: 1
@@ -334,6 +336,14 @@ export function deriveRunSignalBadges(
     badges.push({ key: "runtime-error", label: "runtime 错误", tone: "rose" });
   }
 
+  if (item.working_context_degraded?.is_degraded) {
+    badges.push({
+      key: "working-context-degraded",
+      label: "现场降级",
+      tone: "amber"
+    });
+  }
+
   if (staleHeartbeat) {
     badges.push({ key: "stale-heartbeat", label: "心跳陈旧", tone: "amber" });
   }
@@ -427,6 +437,7 @@ export function deriveRunPriorityInfo(
   const operatorState = deriveRunOperatorState(item, nowTs);
   const staleHeartbeat = hasStaleRunHeartbeat(item, nowTs);
   const hasRuntimeError = Boolean(item.latest_attempt_runtime_state?.error);
+  const hasWorkingContextDegraded = item.working_context_degraded?.is_degraded === true;
   const waitingForHuman = item.current?.waiting_for_human === true;
   const hasBlockingReason = Boolean(item.current?.blocking_reason);
   const replayGap =
@@ -463,6 +474,15 @@ export function deriveRunPriorityInfo(
     score = 90;
     label = "P1 心跳异常";
     reason = "worker 心跳偏陈旧，需要优先确认运行是否假活。";
+    tone = "amber";
+  }
+
+  if (hasWorkingContextDegraded) {
+    score = 94;
+    label = "P1 现场降级";
+    reason =
+      item.working_context_degraded?.summary ??
+      "active run 的 working context 已缺失或过期，需要先修现场。";
     tone = "amber";
   }
 
@@ -519,6 +539,7 @@ export function deriveRunOperatorChecklist(
   const detail = [
     item.current?.blocking_reason,
     item.latest_attempt_runtime_state?.error,
+    item.working_context_degraded?.summary,
     item.current?.summary
   ]
     .filter(Boolean)
@@ -545,6 +566,10 @@ export function deriveRunOperatorChecklist(
 
   if (item.latest_attempt_runtime_state?.error) {
     checklist.push("打开当前错误、stderr 和 process content，先判断失败是否来自 runtime 或工具链。");
+  }
+
+  if (item.working_context_degraded?.is_degraded) {
+    checklist.push("先读 run detail 顶部的 working context 区块，确认现场是缺失、过期，还是写入失败。");
   }
 
   if (staleHeartbeat) {
@@ -584,6 +609,7 @@ function inferRecoveryHint(item: RunSummaryItem, staleHeartbeat: boolean): strin
   const detail = [
     item.current?.blocking_reason,
     item.latest_attempt_runtime_state?.error,
+    item.working_context_degraded?.summary,
     item.current?.summary
   ]
     .filter(Boolean)
@@ -609,6 +635,10 @@ function inferRecoveryHint(item: RunSummaryItem, staleHeartbeat: boolean): strin
 
   if (staleHeartbeat) {
     return "优先检查 worker 会话、stderr 和 heartbeat；如果尝试已经僵住，再决定是否手动恢复。";
+  }
+
+  if (item.working_context_degraded?.is_degraded) {
+    return "先修 working context 现场，再决定要不要继续长任务；不要在现场失真的情况下硬推下一轮。";
   }
 
   if (item.current?.waiting_for_human) {

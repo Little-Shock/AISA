@@ -175,6 +175,7 @@ import {
   parseSelfBootstrapNextTaskActiveEntry,
   type SelfBootstrapNextTaskActiveEntry
 } from "./self-bootstrap-next-task.js";
+import { refreshRunWorkingContext } from "./working-context.js";
 
 export interface OrchestratorOptions {
   attemptHeartbeatIntervalMs?: number;
@@ -964,6 +965,7 @@ export class Orchestrator {
         waiting_for_human: true
       })
     );
+    await refreshRunWorkingContext(this.workspacePaths, runId);
   }
 
   private async tickRuns(): Promise<void> {
@@ -1227,6 +1229,7 @@ export class Orchestrator {
         }
       })
     );
+    await refreshRunWorkingContext(this.workspacePaths, runId);
   }
 
   private async planNextAttempt(
@@ -1565,6 +1568,7 @@ export class Orchestrator {
           }
         })
       );
+      await refreshRunWorkingContext(this.workspacePaths, runId);
       await startLease.release();
       startLeaseReleased = true;
 
@@ -1959,6 +1963,7 @@ export class Orchestrator {
         runtimeVerification
       });
     await saveRunGovernanceState(this.workspacePaths, governanceSnapshot);
+    await refreshRunWorkingContext(this.workspacePaths, input.runId);
   }
 
   private async transitionAttemptRuntimeState(input: {
@@ -2287,6 +2292,7 @@ export class Orchestrator {
         }
       })
     );
+    await refreshRunWorkingContext(this.workspacePaths, input.runId);
   }
 
   private async runAttemptEvaluationSynthesis(input: {
@@ -3835,6 +3841,7 @@ export class Orchestrator {
           }
         })
       );
+      await refreshRunWorkingContext(this.workspacePaths, runId);
     });
   }
 
@@ -4597,6 +4604,7 @@ export class Orchestrator {
       imposedBy: "orchestrator",
       failureCode: blocker?.failureCode ?? null
     });
+    await refreshRunWorkingContext(this.workspacePaths, runId);
   }
 
   private async persistAutomaticResumeExhausted(
@@ -4638,6 +4646,7 @@ export class Orchestrator {
       reason: message,
       imposedBy: "orchestrator"
     });
+    await refreshRunWorkingContext(this.workspacePaths, runId);
   }
 
   private hasAutoResumeTerminalEvent(
@@ -4759,6 +4768,7 @@ export class Orchestrator {
     }
 
     await this.appendRunWorkspaceScopeBlockedEntry(run.id, current.latest_attempt_id, error);
+    await refreshRunWorkingContext(this.workspacePaths, run.id);
   }
 
   private async appendRunWorkspaceScopeBlockedEntry(
@@ -5082,3 +5092,10 @@ export {
   type SelfBootstrapNextTaskActiveEntry,
   type SelfBootstrapNextTaskSourceAnchor
 } from "./self-bootstrap-next-task.js";
+
+export {
+  buildRunWorkingContext,
+  readRunWorkingContextView,
+  refreshRunWorkingContext,
+  type RunWorkingContextView
+} from "./working-context.js";

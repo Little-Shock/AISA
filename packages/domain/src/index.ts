@@ -235,6 +235,55 @@ export const RunAutomationControlSchema = z.object({
   updated_at: z.string().datetime()
 });
 
+export const RunWorkingContextTaskRefSchema = z.object({
+  task_id: z.string().min(1),
+  title: z.string().min(1),
+  source_ref: z.string().min(1)
+});
+
+export const RunWorkingContextEvidenceRefSchema = z.object({
+  kind: z.string().min(1),
+  ref: z.string().min(1),
+  note: z.string().nullable().default(null)
+});
+
+export const RunWorkingContextBlockerSchema = z.object({
+  code: z.string().nullable().default(null),
+  summary: z.string().min(1),
+  ref: z.string().nullable().default(null)
+});
+
+export const RunWorkingContextDegradedReasonCodeSchema = z.enum([
+  "context_missing",
+  "context_stale",
+  "context_write_failed"
+]);
+
+export const RunWorkingContextDegradedStateSchema = z.object({
+  is_degraded: z.boolean(),
+  reason_code: RunWorkingContextDegradedReasonCodeSchema.nullable().default(null),
+  summary: z.string().nullable().default(null)
+});
+
+export const RunWorkingContextAutomationSchema = z.object({
+  mode: RunAutomationModeSchema,
+  reason_code: RunAutomationReasonCodeSchema.nullable().default(null)
+});
+
+export const RunWorkingContextSchema = z.object({
+  run_id: z.string(),
+  plan_ref: z.string().nullable().default(null),
+  active_task_refs: z.array(RunWorkingContextTaskRefSchema).default([]),
+  recent_evidence_refs: z.array(RunWorkingContextEvidenceRefSchema).default([]),
+  current_focus: z.string().nullable().default(null),
+  current_blocker: RunWorkingContextBlockerSchema.nullable().default(null),
+  next_operator_attention: z.string().nullable().default(null),
+  automation: RunWorkingContextAutomationSchema,
+  degraded: RunWorkingContextDegradedStateSchema,
+  source_attempt_id: z.string().nullable().default(null),
+  updated_at: z.string().datetime()
+});
+
 export const RunGovernanceStatusSchema = z.enum([
   "active",
   "blocked",
@@ -811,6 +860,23 @@ export type CurrentDecision = z.infer<typeof CurrentDecisionSchema>;
 export type RunAutomationMode = z.infer<typeof RunAutomationModeSchema>;
 export type RunAutomationReasonCode = z.infer<typeof RunAutomationReasonCodeSchema>;
 export type RunAutomationControl = z.infer<typeof RunAutomationControlSchema>;
+export type RunWorkingContextTaskRef = z.infer<typeof RunWorkingContextTaskRefSchema>;
+export type RunWorkingContextEvidenceRef = z.infer<
+  typeof RunWorkingContextEvidenceRefSchema
+>;
+export type RunWorkingContextBlocker = z.infer<
+  typeof RunWorkingContextBlockerSchema
+>;
+export type RunWorkingContextDegradedReasonCode = z.infer<
+  typeof RunWorkingContextDegradedReasonCodeSchema
+>;
+export type RunWorkingContextDegradedState = z.infer<
+  typeof RunWorkingContextDegradedStateSchema
+>;
+export type RunWorkingContextAutomation = z.infer<
+  typeof RunWorkingContextAutomationSchema
+>;
+export type RunWorkingContext = z.infer<typeof RunWorkingContextSchema>;
 export type RunGovernanceStatus = z.infer<typeof RunGovernanceStatusSchema>;
 export type RunGovernanceExcludedPlan = z.infer<typeof RunGovernanceExcludedPlanSchema>;
 export type RunGovernanceContextSummary = z.infer<typeof RunGovernanceContextSummarySchema>;
@@ -1286,6 +1352,48 @@ export function createRunAutomationControl(input: {
     imposed_by: input.imposed_by ?? null,
     active_run_id: input.active_run_id ?? null,
     failure_code: input.failure_code ?? null,
+    updated_at: new Date().toISOString()
+  });
+}
+
+export function createRunWorkingContextDegradedState(input?: {
+  is_degraded?: boolean;
+  reason_code?: RunWorkingContextDegradedReasonCode | null;
+  summary?: string | null;
+}): RunWorkingContextDegradedState {
+  return RunWorkingContextDegradedStateSchema.parse({
+    is_degraded: input?.is_degraded ?? false,
+    reason_code: input?.reason_code ?? null,
+    summary: input?.summary ?? null
+  });
+}
+
+export function createRunWorkingContext(input: {
+  run_id: string;
+  plan_ref?: string | null;
+  active_task_refs?: RunWorkingContextTaskRef[];
+  recent_evidence_refs?: RunWorkingContextEvidenceRef[];
+  current_focus?: string | null;
+  current_blocker?: RunWorkingContextBlocker | null;
+  next_operator_attention?: string | null;
+  automation?: Partial<RunWorkingContextAutomation>;
+  degraded?: Partial<RunWorkingContextDegradedState>;
+  source_attempt_id?: string | null;
+}): RunWorkingContext {
+  return RunWorkingContextSchema.parse({
+    run_id: input.run_id,
+    plan_ref: input.plan_ref ?? null,
+    active_task_refs: input.active_task_refs ?? [],
+    recent_evidence_refs: input.recent_evidence_refs ?? [],
+    current_focus: input.current_focus ?? null,
+    current_blocker: input.current_blocker ?? null,
+    next_operator_attention: input.next_operator_attention ?? null,
+    automation: {
+      mode: input.automation?.mode ?? "active",
+      reason_code: input.automation?.reason_code ?? null
+    },
+    degraded: createRunWorkingContextDegradedState(input.degraded),
+    source_attempt_id: input.source_attempt_id ?? null,
     updated_at: new Date().toISOString()
   });
 }

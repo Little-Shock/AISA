@@ -4,9 +4,12 @@
 
 当前文档：
 
-- `aisa-harness-prd-v1.md`
-- `aisa-harness-roadmap-v1.md`
-- `implementation-blueprint.md`
+- `aisa-harness-prd-v1.md` 当前 harness 主线 PRD
+- `aisa-harness-roadmap-v1.md` 当前唯一主 roadmap
+- `aisa-claude-code-absorption-roadmap.md` Claude Code 吸收顺序的配套路线图
+- `aisa-claude-code-next-learning-plan.md` postflight gate 和 operator surface 的专项实施计划
+- `claude-code-lessons-for-aisa-harness.md` Claude Code 对 AISA 的研究结论和判断
+- `implementation-blueprint.md` 仅保留为旧 swarm 方案的历史蓝图，不再代表当前 harness 主线
 - `remote-observability-cloudflare.md`
 - `decisions/0001-mvp-runtime.md`
 - `decisions/0002-runtime-source-drift-requires-restart.md`

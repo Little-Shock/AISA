@@ -29,8 +29,10 @@ import {
   lockRunWorkspaceRoot,
   loadSelfBootstrapNextTaskActiveEntry,
   Orchestrator,
+  readRunWorkingContextView,
   repairRunManagedWorkspace,
   ensureRunManagedWorkspace,
+  refreshRunWorkingContext,
   resolveRuntimeLayout,
   SELF_BOOTSTRAP_NEXT_TASK_ACTIVE_ENTRY_SNAPSHOT_FILE_NAME,
   syncRuntimeLayoutHint,
@@ -313,7 +315,7 @@ export async function buildServer(
   };
 
   const buildRunDetailPayload = async (runId: string) => {
-    const [run, current, automation, governance, attempts, steers, journal, report] = await Promise.all([
+    const [run, current, automation, governance, attempts, steers, journal, report, workingContextView] = await Promise.all([
       getRun(workspacePaths, runId),
       getCurrentDecision(workspacePaths, runId),
       getRunAutomationControl(workspacePaths, runId),
@@ -321,8 +323,14 @@ export async function buildServer(
       listAttempts(workspacePaths, runId),
       listRunSteers(workspacePaths, runId),
       listRunJournal(workspacePaths, runId),
-      getRunReport(workspacePaths, runId)
+      getRunReport(workspacePaths, runId),
+      readRunWorkingContextView(workspacePaths, runId)
     ]);
+    const automationView =
+      automation ??
+      createRunAutomationControl({
+        run_id: runId
+      });
     const attemptDetails = await Promise.all(
       attempts.map((attempt) =>
         buildAttemptDetail({
@@ -350,8 +358,11 @@ export async function buildServer(
     return {
       run,
       current,
-      automation,
+      automation: automationView,
       governance,
+      working_context: workingContextView.working_context,
+      working_context_ref: workingContextView.working_context_ref,
+      working_context_degraded: workingContextView.working_context_degraded,
       run_health: runHealth,
       worker_effort: workerEffort,
       attempts,
@@ -363,12 +374,18 @@ export async function buildServer(
   };
 
   const buildRunSummaryItem = async (run: Awaited<ReturnType<typeof listRuns>>[number]) => {
-    const [current, automation, governance, attempts] = await Promise.all([
+    const [current, automation, governance, attempts, workingContextView] = await Promise.all([
       getCurrentDecision(workspacePaths, run.id),
       getRunAutomationControl(workspacePaths, run.id),
       getRunGovernanceState(workspacePaths, run.id),
-      listAttempts(workspacePaths, run.id)
+      listAttempts(workspacePaths, run.id),
+      readRunWorkingContextView(workspacePaths, run.id)
     ]);
+    const automationView =
+      automation ??
+      createRunAutomationControl({
+        run_id: run.id
+      });
     const latestAttempt =
       attempts.find((attempt) => attempt.id === current?.latest_attempt_id) ??
       attempts.at(-1) ??
@@ -388,8 +405,11 @@ export async function buildServer(
     return {
       run,
       current,
-      automation,
+      automation: automationView,
       governance,
+      working_context: workingContextView.working_context,
+      working_context_ref: workingContextView.working_context_ref,
+      working_context_degraded: workingContextView.working_context_degraded,
       worker_effort: orchestrator.describeRunWorkerEffort(run),
       run_health: assessRunHealth({
         current,
@@ -413,7 +433,11 @@ export async function buildServer(
         : null,
       latest_attempt_runtime_state: latestRuntimeState,
       latest_attempt_heartbeat: latestHeartbeat,
-      task_focus: latestContract?.objective ?? latestAttempt?.objective ?? run.description,
+      task_focus:
+        workingContextView.working_context?.current_focus ??
+        latestContract?.objective ??
+        latestAttempt?.objective ??
+        run.description,
       verification_command_count:
         latestContract?.verification_plan?.commands.length ?? 0
     };
@@ -575,6 +599,7 @@ export async function buildServer(
           }
         })
       );
+      await refreshRunWorkingContext(workspacePaths, run.id);
 
       return reply.code(201).send({ run, current });
     } catch (error) {
@@ -721,6 +746,7 @@ export async function buildServer(
       );
       await activateRunAutomation(run.id, "control-api");
     }
+    await refreshRunWorkingContext(workspacePaths, run.id);
 
     return reply.code(201).send({
       run,
@@ -776,6 +802,7 @@ export async function buildServer(
           payload: {}
         })
       );
+      await refreshRunWorkingContext(workspacePaths, runId);
 
       return { current: nextCurrent };
     } catch (error) {
@@ -839,6 +866,7 @@ export async function buildServer(
             }
           })
         );
+        await refreshRunWorkingContext(workspacePaths, runId);
 
         return {
           run: ensuredRun,
@@ -907,6 +935,7 @@ export async function buildServer(
             }
           })
         );
+        await refreshRunWorkingContext(workspacePaths, runId);
 
         return {
           run: repair.run,
@@ -965,6 +994,7 @@ export async function buildServer(
           }
         })
       );
+      await refreshRunWorkingContext(workspacePaths, runId);
 
       return reply.code(201).send({ steer: runSteer, current: nextCurrent });
     } catch {

@@ -728,7 +728,9 @@ async function main(): Promise<void> {
       }),
     (error: unknown) => {
       const message = error instanceof Error ? error.message : String(error);
+      assert.match(message, /Worker writeback schema invalid at artifacts\[0\]/);
       assert.match(message, /Expected object, received string/);
+      assert.match(message, /artifacts 必须是对象数组/);
       return true;
     }
   );
@@ -754,7 +756,11 @@ async function main(): Promise<void> {
   );
   assert.match(
     executionPrompt,
-    /Do not return artifacts as plain strings like "artifacts\/diff\.patch"\./
+    /Do not return artifacts as plain strings like "scripts\/verify-run-detail-api\.ts"\./
+  );
+  assert.match(
+    executionPrompt,
+    /If you only want to cite files or commands as evidence, put them in findings\[\]\.evidence, recommended_next_steps, or next_attempt_contract\.expected_artifacts instead of artifacts\[\]\./
   );
 
   console.log(
