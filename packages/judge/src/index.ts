@@ -515,6 +515,7 @@ function buildHeuristicReviewerJudgment(
     goal_progress: evaluation.goal_progress,
     evidence_quality: evaluation.evidence_quality,
     verification_status: evaluation.verification_status,
+    adversarial_verification_status: evaluation.adversarial_verification_status,
     recommendation: evaluation.recommendation,
     suggested_attempt_type: evaluation.suggested_attempt_type,
     rationale: evaluation.rationale,
@@ -527,7 +528,9 @@ function buildDeterministicSynthesisJudgment(input: {
   opinions: AttemptReviewerOpinion[];
 }): AttemptReviewerJudgment {
   const judgments = input.opinions.map((opinion) => opinion.structured_judgment);
-  const verificationLocked = input.baseEvaluation.verification_status === "failed";
+  const verificationLocked =
+    input.baseEvaluation.verification_status === "failed" ||
+    input.baseEvaluation.adversarial_verification_status === "failed";
   const goalProgress =
     judgments.length > 0
       ? clampUnit(average(judgments.map((judgment) => judgment.goal_progress)))
@@ -543,6 +546,8 @@ function buildDeterministicSynthesisJudgment(input: {
       : goalProgress,
     evidence_quality: evidenceQuality,
     verification_status: input.baseEvaluation.verification_status,
+    adversarial_verification_status:
+      input.baseEvaluation.adversarial_verification_status,
     recommendation: verificationLocked
       ? input.baseEvaluation.recommendation
       : pickMajorityValue(
@@ -581,7 +586,9 @@ function buildSynthesizedAttemptEvaluation(input: {
   synthesisStrategy: string;
   synthesizerIdentity: AttemptSynthesizerIdentity | null;
 }): AttemptEvaluation {
-  const verificationLocked = input.baseEvaluation.verification_status === "failed";
+  const verificationLocked =
+    input.baseEvaluation.verification_status === "failed" ||
+    input.baseEvaluation.adversarial_verification_status === "failed";
 
   return AttemptEvaluationSchema.parse({
     ...input.baseEvaluation,
@@ -594,6 +601,8 @@ function buildSynthesizedAttemptEvaluation(input: {
       : clampUnit(input.structuredJudgment.goal_progress),
     evidence_quality: clampUnit(input.structuredJudgment.evidence_quality),
     verification_status: input.baseEvaluation.verification_status,
+    adversarial_verification_status:
+      input.baseEvaluation.adversarial_verification_status,
     recommendation: verificationLocked
       ? input.baseEvaluation.recommendation
       : input.structuredJudgment.recommendation,
@@ -658,6 +667,7 @@ function buildAttemptEvaluationBase(input: {
   const attempt = input.reviewPacket.attempt;
   const result = input.reviewPacket.result;
   const runtimeVerification = input.reviewPacket.runtime_verification ?? null;
+  const adversarialVerification = input.reviewPacket.adversarial_verification ?? null;
 
   if (attempt.status !== "completed") {
     throw new Error(
@@ -717,6 +727,7 @@ function buildAttemptEvaluationBase(input: {
       goal_progress: goalProgress,
       evidence_quality: evidenceQuality,
       verification_status: "not_applicable",
+      adversarial_verification_status: "not_applicable",
       recommendation,
       suggested_attempt_type:
         recommendation === "retry"
@@ -743,6 +754,12 @@ function buildAttemptEvaluationBase(input: {
   }
 
   const verificationStatus = runtimeVerification?.status === "passed" ? "passed" : "failed";
+  const adversarialVerificationStatus =
+    verificationStatus === "passed"
+      ? adversarialVerification?.status ?? "failed"
+      : "not_applicable";
+  const dualVerificationPassed =
+    verificationStatus === "passed" && adversarialVerificationStatus === "passed";
   const verifiedCommandScore =
     runtimeVerification?.status === "passed" && runtimeVerification.command_results.length > 0
       ? 1
@@ -761,10 +778,14 @@ function buildAttemptEvaluationBase(input: {
     )
   );
   const goalProgress =
-    verificationStatus === "passed" ? rawGoalProgress : Math.min(rawGoalProgress, 0.34);
+    dualVerificationPassed
+      ? rawGoalProgress
+      : verificationStatus === "passed"
+        ? Math.min(rawGoalProgress, 0.74)
+        : Math.min(rawGoalProgress, 0.34);
   const hasConcreteNextStep = result.recommended_next_steps.length > 0;
   const recommendation =
-    verificationStatus === "passed"
+    dualVerificationPassed
       ? hasConcreteNextStep
         ? "continue"
         : goalProgress >= 0.75 && result.questions.length === 0
@@ -772,14 +793,18 @@ function buildAttemptEvaluationBase(input: {
         : goalProgress >= 0.45
           ? "wait_human"
           : "retry"
+      : verificationStatus === "passed"
+        ? "wait_human"
       : runtimeVerification?.failure_code === "verification_command_failed"
         ? "continue"
         : "wait_human";
   const suggestedAttemptType =
-    verificationStatus === "passed"
+    dualVerificationPassed
       ? recommendation === "complete"
         ? null
         : "execution"
+      : verificationStatus === "passed"
+        ? "execution"
       : runtimeVerification?.failure_code === "verification_command_failed"
         ? "research"
         : "execution";
@@ -788,7 +813,8 @@ function buildAttemptEvaluationBase(input: {
     evidenceQuality,
     nextStepScore,
     artifactScore,
-    runtimeVerification
+    runtimeVerification,
+    adversarialVerification
   });
 
   return AttemptEvaluationSchema.parse({
@@ -797,6 +823,7 @@ function buildAttemptEvaluationBase(input: {
     goal_progress: goalProgress,
     evidence_quality: evidenceQuality,
     verification_status: verificationStatus,
+    adversarial_verification_status: adversarialVerificationStatus,
     recommendation,
     suggested_attempt_type: suggestedAttemptType,
     rationale: [
@@ -805,7 +832,11 @@ function buildAttemptEvaluationBase(input: {
       `confidence=${confidenceScore.toFixed(2)}`,
       `artifacts=${result.artifacts.length}`,
       `runtime_verification=${runtimeVerification?.status ?? "missing"}`,
-      runtimeVerification?.failure_code ? `failure_code=${runtimeVerification.failure_code}` : null
+      `adversarial_verification=${adversarialVerificationStatus}`,
+      runtimeVerification?.failure_code ? `failure_code=${runtimeVerification.failure_code}` : null,
+      adversarialVerification?.failure_code
+        ? `adversarial_failure_code=${adversarialVerification.failure_code}`
+        : null
     ]
       .filter(Boolean)
       .join(", "),
@@ -825,6 +856,7 @@ function buildMissingEvidence(input: {
   artifactScore: number;
   hasExecutionContract?: boolean;
   runtimeVerification?: AttemptRuntimeVerification | null;
+  adversarialVerification?: ReviewableAttemptPacket["adversarial_verification"] | null;
 }): string[] {
   const missing: string[] = [];
 
@@ -859,6 +891,19 @@ function buildMissingEvidence(input: {
       missing.push(input.runtimeVerification.failure_reason);
     } else {
       missing.push("Need runtime-replayed verification before execution can pass.");
+    }
+  }
+
+  if (input.attemptType === "execution" && input.runtimeVerification?.status === "passed") {
+    if (!input.adversarialVerification) {
+      missing.push(
+        "Need a machine-readable adversarial verification artifact after deterministic replay passes."
+      );
+    } else if (input.adversarialVerification.status !== "passed") {
+      missing.push(
+        input.adversarialVerification.failure_reason ??
+          "Need a passing adversarial verification verdict before execution can complete."
+      );
     }
   }
 

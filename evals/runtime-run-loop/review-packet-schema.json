@@ -14,6 +14,7 @@
     "result",
     "evaluation",
     "runtime_verification",
+    "adversarial_verification",
     "artifact_manifest",
     "generated_at"
   ],
@@ -129,6 +130,7 @@
         "objective",
         "success_criteria",
         "required_evidence",
+        "adversarial_verification_required",
         "forbidden_shortcuts",
         "expected_artifacts",
         "created_at"
@@ -161,6 +163,9 @@
           "items": {
             "type": "string"
           }
+        },
+        "adversarial_verification_required": {
+          "type": "boolean"
         },
         "forbidden_shortcuts": {
           "type": "array",
@@ -466,7 +471,8 @@
           "type": "object",
           "required": [
             "attempt_type",
-            "required_evidence"
+            "required_evidence",
+            "adversarial_verification_required"
           ],
           "properties": {
             "attempt_type": {
@@ -490,6 +496,9 @@
               "items": {
                 "type": "string"
               }
+            },
+            "adversarial_verification_required": {
+              "type": "boolean"
             },
             "forbidden_shortcuts": {
               "type": "array",
@@ -581,6 +590,7 @@
         "goal_progress",
         "evidence_quality",
         "verification_status",
+        "adversarial_verification_status",
         "recommendation",
         "suggested_attempt_type",
         "rationale",
@@ -601,6 +611,14 @@
           "type": "number"
         },
         "verification_status": {
+          "type": "string",
+          "enum": [
+            "passed",
+            "failed",
+            "not_applicable"
+          ]
+        },
+        "adversarial_verification_status": {
           "type": "string",
           "enum": [
             "passed",
@@ -787,6 +805,180 @@
             },
             "additionalProperties": true
           }
+        },
+        "created_at": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": true
+    },
+    "adversarial_verification": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "required": [
+        "attempt_id",
+        "run_id",
+        "attempt_type",
+        "status",
+        "verdict",
+        "summary",
+        "failure_code",
+        "failure_reason",
+        "checks",
+        "commands",
+        "output_refs",
+        "source_artifact_path",
+        "created_at"
+      ],
+      "properties": {
+        "attempt_id": {
+          "type": "string"
+        },
+        "run_id": {
+          "type": "string"
+        },
+        "attempt_type": {
+          "type": "string",
+          "enum": [
+            "research",
+            "execution"
+          ]
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "passed",
+            "failed",
+            "not_applicable"
+          ]
+        },
+        "verdict": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "pass",
+            "fail",
+            "partial",
+            null
+          ]
+        },
+        "summary": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "failure_code": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "missing_requirement",
+            "missing_artifact",
+            "invalid_artifact",
+            "missing_checks",
+            "missing_commands",
+            "missing_outputs",
+            "verdict_fail",
+            "verdict_partial",
+            null
+          ]
+        },
+        "failure_reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "checks": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "code",
+              "status",
+              "message"
+            ],
+            "properties": {
+              "code": {
+                "type": "string"
+              },
+              "status": {
+                "type": "string",
+                "enum": [
+                  "passed",
+                  "failed",
+                  "not_applicable"
+                ]
+              },
+              "message": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": true
+          }
+        },
+        "commands": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "purpose",
+              "command",
+              "cwd",
+              "exit_code",
+              "status",
+              "output_ref"
+            ],
+            "properties": {
+              "purpose": {
+                "type": "string"
+              },
+              "command": {
+                "type": "string"
+              },
+              "cwd": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "exit_code": {
+                "type": "integer"
+              },
+              "status": {
+                "type": "string",
+                "enum": [
+                  "passed",
+                  "failed"
+                ]
+              },
+              "output_ref": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "additionalProperties": true
+          }
+        },
+        "output_refs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "source_artifact_path": {
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "created_at": {
           "type": "string"

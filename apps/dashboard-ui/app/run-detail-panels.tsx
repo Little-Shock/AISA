@@ -91,6 +91,10 @@ export function RunOverviewPanel({
   const governance = runDetail.governance;
   const runHealth = runDetail.run_health;
   const automation = runDetail.automation;
+  const runBrief = runDetail.run_brief;
+  const failureSignal = runDetail.failure_signal ?? runBrief?.failure_signal ?? null;
+  const latestPreflight = runDetail.latest_preflight_evaluation;
+  const latestHandoff = runDetail.latest_handoff_bundle;
   const workingContext = runDetail.working_context;
   const workingContextDegraded = runDetail.working_context_degraded;
   const governanceStatus = governance ? statusLabel(governance.status) : "未建立";
@@ -226,6 +230,25 @@ export function RunOverviewPanel({
         </Callout>
       ) : null}
 
+      {runBrief ? (
+        <Callout tone={runBrief.waiting_for_human ? "rose" : "amber"} title="Run Brief">
+          <strong>{localizeUiText(runBrief.headline)}</strong>
+          <br />
+          {localizeUiText(runBrief.summary)}
+        </Callout>
+      ) : null}
+
+      {failureSignal ? (
+        <Callout
+          tone={failureSignal.policy_mode === "fail_closed" ? "rose" : "amber"}
+          title="统一失败信号"
+        >
+          <strong>{failureSignal.failure_code ?? failureSignal.failure_class}</strong>
+          <br />
+          {localizeUiText(failureSignal.summary)}
+        </Callout>
+      ) : null}
+
       <div className="dual-grid">
         <SubPanel title="当前分配任务" accent="emerald">
           <p className="body-copy">
@@ -251,6 +274,8 @@ export function RunOverviewPanel({
           <SectionList
             title="运行中现场"
             items={[
+              `run brief：${localizeUiText(runBrief?.headline ?? "暂无")}`,
+              `run brief ref：${runDetail.run_brief_ref ?? "未落盘"}`,
               `当前焦点：${localizeUiText(workingContext?.current_focus ?? "暂无")}`,
               `计划锚点：${workingContext?.plan_ref ?? "暂无"}`,
               `来源尝试：${workingContext?.source_attempt_id ?? "暂无"}`,
@@ -270,6 +295,18 @@ export function RunOverviewPanel({
                   `${item.kind} · ${item.ref}${item.note ? ` · ${localizeUiText(item.note)}` : ""}`
               ) ?? []
             }
+          />
+          <SectionList
+            title="控制面真相"
+            items={[
+              `failure class：${failureSignal?.failure_class ?? "暂无"}`,
+              `failure policy：${failureSignal?.policy_mode ?? "暂无"}`,
+              `failure ref：${failureSignal?.source_ref ?? "暂无"}`,
+              `preflight：${latestPreflight ? statusLabel(latestPreflight.status) : "暂无"}`,
+              `preflight ref：${runDetail.latest_preflight_evaluation_ref ?? "暂无"}`,
+              `handoff：${localizeUiText(latestHandoff?.summary ?? "暂无")}`,
+              `handoff ref：${runDetail.latest_handoff_bundle_ref ?? "暂无"}`
+            ]}
           />
           <SectionList
             title="当前成功标准"
@@ -338,10 +375,36 @@ export function RunOverviewPanel({
           <SectionList
             title="现场卡点"
             items={[
+              `run brief blocker：${localizeUiText(runBrief?.blocker_summary ?? "暂无")}`,
+              `统一失败信号：${failureSignal?.failure_code ?? failureSignal?.failure_class ?? "暂无"}`,
               `当前 blocker：${localizeUiText(workingContext?.current_blocker?.summary ?? runDetail.current?.blocking_reason ?? "暂无")}`,
               `blocker 锚点：${workingContext?.current_blocker?.ref ?? "暂无"}`,
               `blocker 代码：${workingContext?.current_blocker?.code ?? automation?.reason_code ?? "暂无"}`
             ]}
+          />
+          <SectionList
+            title="交接与发车摘要"
+            items={[
+              `handoff 摘要：${localizeUiText(latestHandoff?.summary ?? "暂无")}`,
+              `handoff 下一动作：${nextActionLabel(latestHandoff?.recommended_next_action)}`,
+              `handoff 下一类型：${
+                latestHandoff?.recommended_attempt_type
+                  ? attemptTypeLabel(latestHandoff.recommended_attempt_type)
+                  : "暂无"
+              }`,
+              `preflight 结果：${latestPreflight ? statusLabel(latestPreflight.status) : "暂无"}`,
+              `preflight 失败码：${latestPreflight?.failure_code ?? "暂无"}`,
+              `preflight 原因：${localizeUiText(latestPreflight?.failure_reason ?? "暂无")}`
+            ]}
+          />
+          <SectionList
+            title="建议先读"
+            items={
+              runBrief?.evidence_refs.map(
+                (item) =>
+                  `${item.label} · ${item.ref}${item.summary ? ` · ${localizeUiText(item.summary)}` : ""}`
+              ) ?? []
+            }
           />
           <SectionList
             title="治理与健康快照"

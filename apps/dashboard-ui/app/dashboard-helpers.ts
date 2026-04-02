@@ -186,6 +186,7 @@ export function deriveRunOperatorState(
   item: RunSummaryItem,
   nowTs: number
 ): RunOperatorState {
+  const failureSignal = item.failure_signal ?? item.run_brief?.failure_signal ?? null;
   const blockingReason = item.current?.blocking_reason?.trim() ?? "";
   const runtimeError = item.latest_attempt_runtime_state?.error?.trim() ?? "";
   const workingContextDegraded = item.working_context_degraded?.is_degraded === true;
@@ -203,23 +204,36 @@ export function deriveRunOperatorState(
         attemptStartedAt !== null &&
         nowTs - attemptStartedAt > WORKER_HEARTBEAT_STALE_MS));
 
-  if (waitingForHuman || hasBlockingReason) {
+  if (
+    waitingForHuman ||
+    hasBlockingReason ||
+    failureSignal?.policy_mode === "fail_closed"
+  ) {
     return {
       kind: "needs_action",
       label: "需介入",
       tone: "rose",
-      reason: blockingReason || "当前运行明确在等待人工决策或恢复动作。",
+      reason:
+        failureSignal?.summary ||
+        blockingReason ||
+        "当前运行明确在等待人工决策或恢复动作。",
       recovery_hint: inferRecoveryHint(item, staleHeartbeat),
       sort_order: 0
     };
   }
 
-  if (hasRuntimeError || staleHeartbeat || workingContextDegraded) {
+  if (
+    hasRuntimeError ||
+    staleHeartbeat ||
+    workingContextDegraded ||
+    failureSignal?.policy_mode === "soft_degrade"
+  ) {
     return {
       kind: "at_risk",
       label: "需排查",
       tone: "amber",
       reason:
+        failureSignal?.summary ||
         runtimeError ||
         item.working_context_degraded?.summary ||
         "运行还在继续，但心跳或实时信号已经偏陈旧，需要先确认 worker 是否卡住。",
@@ -292,6 +306,7 @@ export function deriveRunSignalBadges(
   nowTs: number
 ): RunSignalBadge[] {
   const badges: RunSignalBadge[] = [];
+  const failureSignal = item.failure_signal ?? item.run_brief?.failure_signal ?? null;
   const detail = [
     item.current?.blocking_reason,
     item.latest_attempt_runtime_state?.error,
@@ -313,6 +328,14 @@ export function deriveRunSignalBadges(
 
   if (item.current?.waiting_for_human) {
     badges.push({ key: "waiting-human", label: "等待人工", tone: "rose" });
+  }
+
+  if (failureSignal) {
+    badges.push({
+      key: `failure-signal-${failureSignal.failure_class}`,
+      label: failureSignal.failure_code ?? failureSignal.failure_class,
+      tone: failureSignal.policy_mode === "fail_closed" ? "rose" : "amber"
+    });
   }
 
   if (detail.includes("restart") || detail.includes("source drift")) {
@@ -435,6 +458,7 @@ export function deriveRunPriorityInfo(
   nowTs: number
 ): RunPriorityInfo {
   const operatorState = deriveRunOperatorState(item, nowTs);
+  const failureSignal = item.failure_signal ?? item.run_brief?.failure_signal ?? null;
   const staleHeartbeat = hasStaleRunHeartbeat(item, nowTs);
   const hasRuntimeError = Boolean(item.latest_attempt_runtime_state?.error);
   const hasWorkingContextDegraded = item.working_context_degraded?.is_degraded === true;
@@ -486,6 +510,13 @@ export function deriveRunPriorityInfo(
     tone = "amber";
   }
 
+  if (failureSignal?.policy_mode === "soft_degrade") {
+    score = Math.max(score, 96);
+    label = "P1 信号降级";
+    reason = failureSignal.summary;
+    tone = "amber";
+  }
+
   if (hasBlockingReason) {
     score = 98;
     label = "P0 阻塞待决";
@@ -504,6 +535,13 @@ export function deriveRunPriorityInfo(
     score = 114;
     label = "P0 人工接球";
     reason = "运行明确等待人工输入，应该最先处理。";
+    tone = "rose";
+  }
+
+  if (failureSignal?.policy_mode === "fail_closed") {
+    score = Math.max(score, 112);
+    label = "P0 闭环失败";
+    reason = failureSignal.summary;
     tone = "rose";
   }
 
@@ -606,6 +644,7 @@ export function deriveRunOperatorChecklist(
 }
 
 function inferRecoveryHint(item: RunSummaryItem, staleHeartbeat: boolean): string {
+  const failureSignal = item.failure_signal ?? item.run_brief?.failure_signal ?? null;
   const detail = [
     item.current?.blocking_reason,
     item.latest_attempt_runtime_state?.error,
@@ -615,6 +654,22 @@ function inferRecoveryHint(item: RunSummaryItem, staleHeartbeat: boolean): strin
     .filter(Boolean)
     .join(" ")
     .toLowerCase();
+
+  if (failureSignal?.failure_class === "preflight_blocked") {
+    return "先读发车前结论和对应契约，再补齐硬门、验证计划或工具链。";
+  }
+
+  if (failureSignal?.failure_class === "runtime_verification_failed") {
+    return "先读运行时回放结果，再决定是修代码、补验证命令，还是放弃这轮 execution。";
+  }
+
+  if (failureSignal?.failure_class === "adversarial_verification_failed") {
+    return "先读对抗验证输出，复现那个坏路径，再决定下一轮 execution 怎么修。";
+  }
+
+  if (failureSignal?.failure_class === "handoff_incomplete") {
+    return "先补出 handoff bundle，再继续自动续跑或人工接手。";
+  }
 
   if (detail.includes("restart") || detail.includes("source drift")) {
     return "先重启 control-api 或相关 runtime 进程，再确认这条 run 是否已经恢复到可继续状态。";

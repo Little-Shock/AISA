@@ -1,10 +1,13 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, realpath, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   createAttempt,
+  createAttemptAdversarialVerification,
   createAttemptContract,
+  createAttemptHandoffBundle,
+  createAttemptPreflightEvaluation,
   createRunAutomationControl,
   createCurrentDecision,
   createAttemptRuntimeEvent,
@@ -15,30 +18,34 @@ import {
 } from "../packages/domain/src/index.ts";
 import {
   appendRunJournal,
-    appendAttemptRuntimeEvent,
-    ensureWorkspace,
-    getRunAutomationControl,
-    listAttempts,
+  appendAttemptRuntimeEvent,
+  ensureWorkspace,
+  getRunAutomationControl,
+  listAttempts,
+  resolveRunPaths,
   resolveAttemptPaths,
   resolveWorkspacePaths,
   saveAttempt,
   saveAttemptContract,
   saveAttemptContext,
+  saveAttemptAdversarialVerification,
   saveAttemptEvaluation,
   saveAttemptHeartbeat,
+  saveAttemptHandoffBundle,
+  saveAttemptPreflightEvaluation,
   saveAttemptReviewPacket,
   saveAttemptResult,
   saveAttemptRuntimeState,
-    saveAttemptRuntimeVerification,
-    saveCurrentDecision,
-    saveRun,
-    saveRunAutomationControl
-  } from "../packages/state-store/src/index.ts";
+  saveAttemptRuntimeVerification,
+  saveCurrentDecision,
+  saveRun,
+  saveRunAutomationControl
+} from "../packages/state-store/src/index.ts";
 import { buildServer } from "../apps/control-api/src/index.ts";
 import {
   createRunWorkspaceScopePolicy,
   Orchestrator,
-  refreshRunWorkingContext,
+  refreshRunOperatorSurface,
   SELF_BOOTSTRAP_NEXT_TASK_ACTIVE_ENTRY_RELATIVE_PATH,
   SELF_BOOTSTRAP_NEXT_TASK_ACTIVE_ENTRY_SNAPSHOT_FILE_NAME
 } from "../packages/orchestrator/src/index.ts";
@@ -163,29 +170,27 @@ async function main(): Promise<void> {
     })
   );
   await saveAttempt(workspacePaths, attempt);
-  await saveAttemptContract(
-    workspacePaths,
-    createAttemptContract({
-      attempt_id: attempt.id,
-      run_id: run.id,
-      attempt_type: "execution",
-      objective: attempt.objective,
-      success_criteria: attempt.success_criteria,
-      required_evidence: [
-        "git-visible workspace changes",
-        "runtime replay success"
-      ],
-      expected_artifacts: ["artifacts/runtime.patch"],
-      verification_plan: {
-        commands: [
-          {
-            purpose: "replay runtime suite",
-            command: "pnpm verify:runtime"
-          }
-        ]
-      }
-    })
-  );
+  const attemptContract = createAttemptContract({
+    attempt_id: attempt.id,
+    run_id: run.id,
+    attempt_type: "execution",
+    objective: attempt.objective,
+    success_criteria: attempt.success_criteria,
+    required_evidence: [
+      "git-visible workspace changes",
+      "runtime replay success"
+    ],
+    expected_artifacts: ["artifacts/runtime.patch"],
+    verification_plan: {
+      commands: [
+        {
+          purpose: "replay runtime suite",
+          command: "pnpm verify:runtime"
+        }
+      ]
+    }
+  });
+  await saveAttemptContract(workspacePaths, attemptContract);
   const persistedContext = {
     contract: {
       title: "Run detail API verification"
@@ -260,13 +265,14 @@ async function main(): Promise<void> {
     goal_progress: 0.92,
     evidence_quality: 1,
     verification_status: "passed",
+    adversarial_verification_status: "passed",
     recommendation: "complete",
     suggested_attempt_type: null,
     rationale: "runtime replay passed",
     missing_evidence: [],
     created_at: new Date().toISOString()
   });
-  await saveAttemptRuntimeVerification(workspacePaths, {
+  const runtimeVerification = {
     attempt_id: attempt.id,
     run_id: run.id,
     attempt_type: "execution",
@@ -292,7 +298,90 @@ async function main(): Promise<void> {
       }
     ],
     created_at: new Date().toISOString()
+  };
+  await saveAttemptRuntimeVerification(workspacePaths, runtimeVerification);
+  const adversarialOutputFile = join(
+    rootDir,
+    "artifacts",
+    "adversarial",
+    `${attempt.id}.txt`
+  );
+  await mkdir(join(rootDir, "artifacts", "adversarial"), { recursive: true });
+  await writeFile(adversarialOutputFile, "adversarial probe passed\n", "utf8");
+  const adversarialVerification = createAttemptAdversarialVerification({
+    run_id: run.id,
+    attempt_id: attempt.id,
+    attempt_type: "execution",
+    status: "passed",
+    verdict: "pass",
+    summary: "Adversarial verification passed after deterministic replay.",
+    checks: [
+      {
+        code: "non_happy_path",
+        status: "passed",
+        message: "Probe stayed green on a non-happy path."
+      }
+    ],
+    commands: [
+      {
+        purpose: "probe the persisted runtime patch",
+        command: "pnpm verify:run-api",
+        cwd: rootDir,
+        exit_code: 0,
+        status: "passed",
+        output_ref: adversarialOutputFile
+      }
+    ],
+    output_refs: [adversarialOutputFile],
+    source_artifact_path: join(rootDir, "artifacts", "adversarial-verification.json")
   });
+  await saveAttemptAdversarialVerification(workspacePaths, adversarialVerification);
+  await saveAttemptPreflightEvaluation(
+    workspacePaths,
+    createAttemptPreflightEvaluation({
+      run_id: run.id,
+      attempt_id: attempt.id,
+      attempt_type: "execution",
+      status: "passed",
+      checks: [
+        {
+          code: "verification_plan",
+          status: "passed",
+          message: "Contract kept replayable verification commands."
+        }
+      ]
+    })
+  );
+  const handoffCurrentDecisionSnapshot = createCurrentDecision({
+    run_id: current.run_id,
+    run_status: current.run_status,
+    best_attempt_id: attempt.id,
+    latest_attempt_id: attempt.id,
+    recommended_next_action: current.recommended_next_action,
+    recommended_attempt_type: current.recommended_attempt_type,
+    summary: "Execution left a replayable verification plan."
+  });
+  await saveAttemptHandoffBundle(
+    workspacePaths,
+    createAttemptHandoffBundle({
+      attempt,
+      approved_attempt_contract: attemptContract,
+      current_decision_snapshot: handoffCurrentDecisionSnapshot,
+      failure_context: null,
+      runtime_verification: runtimeVerification,
+      adversarial_verification: adversarialVerification,
+      source_refs: {
+        run_contract: `runs/${run.id}/contract.json`,
+        attempt_meta: `runs/${run.id}/attempts/${attempt.id}/meta.json`,
+        attempt_contract: `runs/${run.id}/attempts/${attempt.id}/attempt_contract.json`,
+        preflight_evaluation: `runs/${run.id}/attempts/${attempt.id}/artifacts/preflight-evaluation.json`,
+        current_decision: `runs/${run.id}/current.json`,
+        review_packet: null,
+        runtime_verification: `runs/${run.id}/attempts/${attempt.id}/artifacts/runtime-verification.json`,
+        adversarial_verification: `runs/${run.id}/attempts/${attempt.id}/artifacts/adversarial-verification.json`
+      }
+    })
+  );
   await saveAttemptRuntimeState(
     workspacePaths,
     createAttemptRuntimeState({
@@ -450,6 +539,7 @@ async function main(): Promise<void> {
     result: null,
     evaluation: null,
     runtime_verification: null,
+    adversarial_verification: null,
     artifact_manifest: [],
     generated_at: new Date().toISOString()
   });
@@ -470,7 +560,7 @@ async function main(): Promise<void> {
   for (const entry of [blockerCreatedEntry, blockerStartedEntry, blockerRecoveryEntry]) {
     await appendRunJournal(workspacePaths, entry);
   }
-  await refreshRunWorkingContext(workspacePaths, run.id);
+  await refreshRunOperatorSurface(workspacePaths, run.id);
 
   const attemptPaths = resolveAttemptPaths(workspacePaths, run.id, attempt.id);
   await Promise.all([
@@ -797,7 +887,7 @@ async function main(): Promise<void> {
         waiting_for_human: true
       })
     );
-    await refreshRunWorkingContext(workspacePaths, staleWorkingContextRun.id);
+    await refreshRunOperatorSurface(workspacePaths, staleWorkingContextRun.id);
     await saveCurrentDecision(
       workspacePaths,
       createCurrentDecision({
@@ -809,6 +899,43 @@ async function main(): Promise<void> {
         waiting_for_human: true
       })
     );
+
+    const writeFailedWorkingContextRun = createRun({
+      title: "Write failed working context verification",
+      description: "Ensure control-api marks failed working context writes explicitly.",
+      success_criteria: ["Expose context_write_failed when working context refresh cannot persist."],
+      constraints: [],
+      owner_id: "test-owner",
+      workspace_root: projectRoot
+    });
+    await saveRun(workspacePaths, writeFailedWorkingContextRun);
+    await saveCurrentDecision(
+      workspacePaths,
+      createCurrentDecision({
+        run_id: writeFailedWorkingContextRun.id,
+        run_status: "running",
+        summary: "Write a healthy working context snapshot first."
+      })
+    );
+    await refreshRunOperatorSurface(workspacePaths, writeFailedWorkingContextRun.id);
+    const brokenWorkingContextPath = resolveRunPaths(
+      workspacePaths,
+      writeFailedWorkingContextRun.id
+    ).workingContextFile;
+    await rm(brokenWorkingContextPath, { force: true });
+    await mkdir(brokenWorkingContextPath, { recursive: true });
+    await saveCurrentDecision(
+      workspacePaths,
+      createCurrentDecision({
+        run_id: writeFailedWorkingContextRun.id,
+        run_status: "waiting_steer",
+        recommended_next_action: "wait_for_human",
+        summary: "Broken working context path should surface an explicit degraded state.",
+        blocking_reason: "Broken working context path should surface an explicit degraded state.",
+        waiting_for_human: true
+      })
+    );
+    await refreshRunOperatorSurface(workspacePaths, writeFailedWorkingContextRun.id);
 
     const response = await app.inject({
       method: "GET",
@@ -822,10 +949,15 @@ async function main(): Promise<void> {
       method: "GET",
       url: `/runs/${staleWorkingContextRun.id}`
     });
+    const writeFailedWorkingContextResponse = await app.inject({
+      method: "GET",
+      url: `/runs/${writeFailedWorkingContextRun.id}`
+    });
 
     assert.equal(response.statusCode, 200);
     assert.equal(staleResponse.statusCode, 200);
     assert.equal(staleWorkingContextResponse.statusCode, 200);
+    assert.equal(writeFailedWorkingContextResponse.statusCode, 200);
     const payload = response.json() as {
       run: {
         harness_profile: {
@@ -843,6 +975,49 @@ async function main(): Promise<void> {
         mode: string;
         reason_code: string | null;
       } | null;
+      failure_signal: {
+        failure_class: string;
+        policy_mode: string;
+        summary: string;
+      } | null;
+      latest_preflight_evaluation: {
+        attempt_id: string;
+        status: string;
+        failure_code: string | null;
+        failure_reason: string | null;
+        failure_class: string | null;
+      } | null;
+      latest_preflight_evaluation_ref: string | null;
+      latest_handoff_bundle: {
+        attempt_id: string;
+        summary: string | null;
+        adversarial_failure_code: string | null;
+        adversarial_verification: {
+          status: string;
+        } | null;
+        source_refs: {
+          preflight_evaluation: string | null;
+          runtime_verification: string | null;
+          adversarial_verification: string | null;
+        };
+      } | null;
+      latest_handoff_bundle_ref: string | null;
+      run_brief: {
+        headline: string;
+        summary: string;
+        latest_attempt_id: string | null;
+        primary_focus: string | null;
+        failure_signal: {
+          failure_class: string;
+          policy_mode: string;
+          summary: string;
+        } | null;
+        evidence_refs: Array<{
+          kind: string;
+          ref: string;
+        }>;
+      } | null;
+      run_brief_ref: string | null;
       working_context: {
         plan_ref: string | null;
         current_focus: string | null;
@@ -868,7 +1043,10 @@ async function main(): Promise<void> {
       attempts: Array<{ id: string }>;
       attempt_details: Array<{
         attempt: { id: string; input_context_ref: string | null };
-        contract: { required_evidence: string[] } | null;
+        contract: {
+          required_evidence: string[];
+          adversarial_verification_required: boolean;
+        } | null;
         context: {
           contract: { title: string };
           current_decision: { summary: string };
@@ -885,8 +1063,16 @@ async function main(): Promise<void> {
           journal_event_ts: string | null;
         } | null;
         result: { summary: string; verification_plan?: { commands: Array<{ command: string }> } } | null;
-        evaluation: { verification_status: string } | null;
+        evaluation: {
+          verification_status: string;
+          adversarial_verification_status: string;
+        } | null;
         runtime_verification: { status: string; changed_files: string[] } | null;
+        adversarial_verification: {
+          status: string;
+          verdict: string | null;
+          output_refs: string[];
+        } | null;
         runtime_state: {
           phase: string | null;
           session_id: string | null;
@@ -923,6 +1109,32 @@ async function main(): Promise<void> {
         summary: string | null;
       };
     };
+    const writeFailedWorkingContextPayload = writeFailedWorkingContextResponse.json() as {
+      working_context: {
+        current_focus: string | null;
+      } | null;
+      working_context_ref: string | null;
+      failure_signal: {
+        failure_class: string;
+        policy_mode: string;
+        summary: string;
+      } | null;
+      working_context_degraded: {
+        is_degraded: boolean;
+        reason_code: string | null;
+        summary: string | null;
+      };
+      run_brief: {
+        headline: string;
+        summary: string;
+        failure_signal: {
+          failure_class: string;
+          policy_mode: string;
+          summary: string;
+        } | null;
+      } | null;
+      run_brief_ref: string | null;
+    };
 
     const completedDetail = payload.attempt_details.find(
       (detail) => detail.attempt.id === attempt.id
@@ -943,6 +1155,10 @@ async function main(): Promise<void> {
       "git-visible workspace changes",
       "runtime replay success"
     ]);
+    assert.equal(
+      completedDetail?.contract?.adversarial_verification_required,
+      true
+    );
     assert.deepEqual(completedDetail?.context, persistedContext);
     assert.equal(
       completedDetail?.failure_context,
@@ -954,7 +1170,17 @@ async function main(): Promise<void> {
       "pnpm verify:runtime"
     );
     assert.equal(completedDetail?.evaluation?.verification_status, "passed");
+    assert.equal(
+      completedDetail?.evaluation?.adversarial_verification_status,
+      "passed"
+    );
     assert.equal(completedDetail?.runtime_verification?.status, "passed");
+    assert.equal(completedDetail?.adversarial_verification?.status, "passed");
+    assert.equal(completedDetail?.adversarial_verification?.verdict, "pass");
+    assert.equal(
+      completedDetail?.adversarial_verification?.output_refs[0],
+      adversarialOutputFile
+    );
     assert.equal(completedDetail?.runtime_state?.phase, "completed");
     assert.equal(completedDetail?.runtime_state?.session_id, "sess_run_detail");
     assert.equal(completedDetail?.runtime_state?.event_count, 2);
@@ -993,6 +1219,7 @@ async function main(): Promise<void> {
     assert.equal(blockerDetail?.context, null);
     assert.equal(blockerDetail?.result, null);
     assert.equal(blockerDetail?.runtime_verification, null);
+    assert.equal(blockerDetail?.adversarial_verification, null);
     assert.equal(blockerDetail?.runtime_state, null);
     assert.deepEqual(blockerDetail?.runtime_events, []);
     assert.equal(blockerDetail?.heartbeat, null);
@@ -1011,6 +1238,35 @@ async function main(): Promise<void> {
     assert.equal(payload.worker_effort.synthesizer.requested_effort, "medium");
     assert.equal(payload.worker_effort.synthesizer.status, "unsupported");
     assert.equal(payload.automation?.mode, "active");
+    assert.equal(payload.failure_signal, null);
+    assert.equal(payload.latest_preflight_evaluation?.attempt_id, attempt.id);
+    assert.equal(payload.latest_preflight_evaluation?.status, "passed");
+    assert.equal(payload.latest_preflight_evaluation?.failure_class, null);
+    assert.ok(
+      payload.latest_preflight_evaluation_ref?.endsWith("artifacts/preflight-evaluation.json")
+    );
+    assert.equal(payload.latest_handoff_bundle?.attempt_id, blockerAttempt.id);
+    assert.equal(payload.latest_handoff_bundle?.adversarial_verification, null);
+    assert.equal(payload.latest_handoff_bundle?.adversarial_failure_code, null);
+    assert.equal(
+      payload.latest_handoff_bundle?.summary,
+      blockerFailureContext.message
+    );
+    assert.ok(
+      payload.latest_handoff_bundle_ref?.endsWith("artifacts/handoff_bundle.json")
+    );
+    assert.equal(payload.latest_handoff_bundle?.source_refs.preflight_evaluation, null);
+    assert.equal(payload.latest_handoff_bundle?.source_refs.adversarial_verification, null);
+    assert.equal(payload.run_brief?.latest_attempt_id, blockerAttempt.id);
+    assert.equal(payload.run_brief?.headline, blockerFailureContext.message);
+    assert.equal(payload.run_brief?.primary_focus, blockerAttempt.objective);
+    assert.equal(payload.run_brief?.failure_signal, null);
+    assert.ok(payload.run_brief_ref?.endsWith("run-brief.json"));
+    assert.ok(
+      payload.run_brief?.evidence_refs.some(
+        (item) => item.kind === "handoff_bundle" && item.ref.endsWith("handoff_bundle.json")
+      )
+    );
     assert.equal(payload.working_context_degraded.is_degraded, false);
     assert.equal(payload.working_context?.source_attempt_id, blockerAttempt.id);
     assert.equal(payload.working_context?.current_focus, blockerAttempt.objective);
@@ -1037,6 +1293,33 @@ async function main(): Promise<void> {
       staleWorkingContextPayload.working_context_degraded.summary?.includes("working context")
     );
     assert.ok(staleWorkingContextPayload.working_context_ref?.endsWith("working-context.json"));
+    assert.equal(writeFailedWorkingContextPayload.working_context, null);
+    assert.equal(writeFailedWorkingContextPayload.working_context_ref, null);
+    assert.equal(
+      writeFailedWorkingContextPayload.failure_signal?.failure_class,
+      "working_context_degraded"
+    );
+    assert.equal(
+      writeFailedWorkingContextPayload.failure_signal?.policy_mode,
+      "soft_degrade"
+    );
+    assert.equal(writeFailedWorkingContextPayload.working_context_degraded.is_degraded, true);
+    assert.equal(
+      writeFailedWorkingContextPayload.working_context_degraded.reason_code,
+      "context_write_failed"
+    );
+    assert.ok(
+      writeFailedWorkingContextPayload.working_context_degraded.summary?.includes("写入失败")
+    );
+    assert.ok(writeFailedWorkingContextPayload.run_brief_ref?.endsWith("run-brief.json"));
+    assert.equal(
+      writeFailedWorkingContextPayload.run_brief?.headline,
+      "Broken working context path should surface an explicit degraded state."
+    );
+    assert.equal(
+      writeFailedWorkingContextPayload.run_brief?.failure_signal?.failure_class,
+      "working_context_degraded"
+    );
 
     const runsResponse = await app.inject({
       method: "GET",
@@ -1058,6 +1341,42 @@ async function main(): Promise<void> {
           is_degraded: boolean;
           reason_code: string | null;
         };
+        failure_signal: {
+          failure_class: string;
+          policy_mode: string;
+          summary: string;
+        } | null;
+        latest_preflight_evaluation: {
+          attempt_id: string;
+          status: string;
+          failure_reason: string | null;
+          failure_class: string | null;
+        } | null;
+        latest_preflight_evaluation_ref: string | null;
+        latest_handoff_bundle: {
+          attempt_id: string;
+          summary: string | null;
+          adversarial_verification: {
+            status: string;
+          } | null;
+          source_refs: {
+            preflight_evaluation: string | null;
+            adversarial_verification: string | null;
+          };
+        } | null;
+        latest_handoff_bundle_ref: string | null;
+        run_brief: {
+          latest_attempt_id: string | null;
+          headline: string;
+          summary: string;
+          primary_focus: string | null;
+          failure_signal: {
+            failure_class: string;
+            policy_mode: string;
+            summary: string;
+          } | null;
+        } | null;
+        run_brief_ref: string | null;
         task_focus: string;
         latest_attempt_runtime_state: { session_id: string | null } | null;
       }>;
@@ -1068,7 +1387,31 @@ async function main(): Promise<void> {
     assert.equal(runSummary?.latest_attempt_runtime_state, null);
     assert.equal(runSummary?.run_health.status, "waiting_steer");
     assert.equal(runSummary?.working_context_degraded.is_degraded, false);
+    assert.equal(runSummary?.failure_signal, null);
     assert.ok(runSummary?.working_context_ref?.endsWith("working-context.json"));
+    assert.equal(runSummary?.latest_preflight_evaluation?.attempt_id, attempt.id);
+    assert.equal(runSummary?.latest_preflight_evaluation?.status, "passed");
+    assert.equal(runSummary?.latest_preflight_evaluation?.failure_class, null);
+    assert.ok(
+      runSummary?.latest_preflight_evaluation_ref?.endsWith("artifacts/preflight-evaluation.json")
+    );
+    assert.equal(runSummary?.latest_handoff_bundle?.attempt_id, blockerAttempt.id);
+    assert.equal(
+      runSummary?.latest_handoff_bundle?.summary,
+      blockerFailureContext.message
+    );
+    assert.ok(
+      runSummary?.latest_handoff_bundle_ref?.endsWith("artifacts/handoff_bundle.json")
+    );
+    assert.equal(runSummary?.latest_handoff_bundle?.source_refs.preflight_evaluation, null);
+    assert.equal(runSummary?.latest_handoff_bundle?.source_refs.adversarial_verification, null);
+    assert.equal(runSummary?.latest_handoff_bundle?.adversarial_verification, null);
+    assert.equal(runSummary?.run_brief?.latest_attempt_id, blockerAttempt.id);
+    assert.equal(runSummary?.run_brief?.headline, blockerFailureContext.message);
+    assert.equal(runSummary?.run_brief?.summary, blockerFailureContext.message);
+    assert.equal(runSummary?.run_brief?.primary_focus, blockerAttempt.objective);
+    assert.equal(runSummary?.run_brief?.failure_signal, null);
+    assert.ok(runSummary?.run_brief_ref?.endsWith("run-brief.json"));
     assert.equal(runSummary?.task_focus, blockerAttempt.objective);
 
     const healthResponse = await app.inject({

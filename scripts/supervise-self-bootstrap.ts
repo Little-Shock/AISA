@@ -23,7 +23,7 @@ import {
 } from "../packages/domain/src/index.js";
 import {
   assessRunHealth,
-  refreshRunWorkingContext,
+  refreshRunOperatorSurface,
   resolveRuntimeLayout,
   syncRuntimeLayoutHint
 } from "../packages/orchestrator/src/index.ts";
@@ -1083,7 +1083,7 @@ async function suspendSupersededSelfBootstrapRuns(input: {
         ts: suspendedAt
       })
     );
-    await refreshRunWorkingContext(workspacePaths, run.id);
+    await refreshRunOperatorSurface(workspacePaths, run.id);
     recordRepair(
       input.state,
       run.id,

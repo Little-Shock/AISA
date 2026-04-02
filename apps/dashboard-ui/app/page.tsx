@@ -331,6 +331,12 @@ export default function Page() {
                 : null,
               automation: nextDetail.automation,
               governance: nextDetail.governance,
+              latest_preflight_evaluation: nextDetail.latest_preflight_evaluation,
+              latest_preflight_evaluation_ref: nextDetail.latest_preflight_evaluation_ref,
+              latest_handoff_bundle: nextDetail.latest_handoff_bundle,
+              latest_handoff_bundle_ref: nextDetail.latest_handoff_bundle_ref,
+              run_brief: nextDetail.run_brief,
+              run_brief_ref: nextDetail.run_brief_ref,
               working_context: nextDetail.working_context,
               working_context_ref: nextDetail.working_context_ref,
               working_context_degraded: nextDetail.working_context_degraded,
@@ -340,6 +346,7 @@ export default function Page() {
               latest_attempt_runtime_state: latestDetail?.runtime_state ?? null,
               latest_attempt_heartbeat: latestDetail?.heartbeat ?? null,
               task_focus:
+                nextDetail.run_brief?.primary_focus ??
                 nextDetail.working_context?.current_focus ??
                 latestDetail?.contract?.objective ??
                 latestDetail?.attempt.objective ??

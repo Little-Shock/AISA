@@ -143,6 +143,7 @@ type ScenarioObservation = {
     has_result: boolean;
     has_evaluation: boolean;
     has_runtime_verification: boolean;
+    has_adversarial_verification: boolean;
     artifact_manifest_count: number;
     has_meta_artifact: boolean;
     meta_artifact_exists: boolean;
@@ -156,17 +157,24 @@ type ScenarioObservation = {
     evaluation_artifact_exists: boolean;
     has_runtime_verification_artifact: boolean;
     runtime_verification_artifact_exists: boolean;
+    has_adversarial_verification_artifact: boolean;
+    adversarial_verification_artifact_exists: boolean;
     expected_input_context_ref: string;
     meta_input_context_ref: string | null;
     review_packet_attempt_input_context_ref: string | null;
     input_context_ref_matches_expected: boolean;
     runtime_verification_status: string | null;
     runtime_verification_failure_code: string | null;
+    adversarial_verification_status: string | null;
+    adversarial_verification_verdict: string | null;
+    adversarial_verification_failure_code: string | null;
+    evaluation_adversarial_verification_status: string | null;
     runtime_verification_preexisting_git_status: string[];
     runtime_verification_new_git_status: string[];
     runtime_verification_changed_files: string[];
     attempt_contract_done_rubric_codes: string[];
     attempt_contract_failure_mode_codes: string[];
+    attempt_contract_adversarial_verification_required: boolean;
     attempt_contract_has_verification_plan: boolean;
     attempt_contract_verification_commands: string[];
     has_preflight_artifact: boolean;
@@ -182,7 +190,9 @@ type ScenarioObservation = {
     handoff_bundle_matches_attempt: boolean;
     handoff_bundle_has_contract: boolean;
     handoff_bundle_has_runtime_verification: boolean;
+    handoff_bundle_has_adversarial_verification: boolean;
     handoff_bundle_failure_code: string | null;
+    handoff_bundle_adversarial_failure_code: string | null;
     handoff_bundle_recommended_next_action: string | null;
     handoff_bundle_source_refs: {
       run_contract: string | null;
@@ -191,6 +201,7 @@ type ScenarioObservation = {
       current_decision: string | null;
       review_packet: string | null;
       runtime_verification: string | null;
+      adversarial_verification: string | null;
     } | null;
     restart_required_message: string | null;
     restart_required_affected_files: string[];
@@ -258,9 +269,49 @@ const REVIEW_PACKET_TOP_LEVEL_REQUIRED = [
   "result",
   "evaluation",
   "runtime_verification",
+  "adversarial_verification",
   "artifact_manifest",
   "generated_at"
 ] as const;
+
+async function writeAdversarialVerificationFixture(
+  workspaceRoot: string,
+  attemptId: string
+): Promise<void> {
+  const adversarialDir = join(workspaceRoot, "artifacts", "adversarial");
+  await mkdir(adversarialDir, { recursive: true });
+  const outputRef = join(adversarialDir, `${attemptId}.txt`);
+  await writeFile(outputRef, `adversarial probe passed for ${attemptId}\n`, "utf8");
+  await writeFile(
+    join(workspaceRoot, "artifacts", "adversarial-verification.json"),
+    JSON.stringify(
+      {
+        summary: "Adversarial verification passed after deterministic replay.",
+        verdict: "pass",
+        checks: [
+          {
+            code: "non_happy_path",
+            status: "passed",
+            message: "A non-happy-path probe stayed green."
+          }
+        ],
+        commands: [
+          {
+            purpose: "probe repeated execution output",
+            command: `test -f execution-change.md && rg -n "^execution change from ${attemptId}$" execution-change.md`,
+            exit_code: 0,
+            status: "passed",
+            output_ref: "artifacts/adversarial/" + `${attemptId}.txt`
+          }
+        ],
+        output_refs: ["artifacts/adversarial/" + `${attemptId}.txt`]
+      },
+      null,
+      2
+    ) + "\n",
+    "utf8"
+  );
+}
 
 let reviewPacketSchemaCache: JsonSchemaLite | null = null;
 
@@ -545,6 +596,10 @@ class ScenarioAdapter {
           "utf8"
         );
       }
+      await writeAdversarialVerificationFixture(
+        input.attempt.workspace_root,
+        input.attempt.id
+      );
     }
 
     const writeback =
@@ -605,6 +660,7 @@ class ScenarioAdapter {
             "git-visible workspace changes",
             "a replayable verification command that checks the execution change"
           ],
+          adversarial_verification_required: true,
           done_rubric: [
             {
               code: "git_change_recorded",
@@ -613,6 +669,10 @@ class ScenarioAdapter {
             {
               code: "verification_replay_passed",
               description: "Pass the locked replay command."
+            },
+            {
+              code: "adversarial_verification_passed",
+              description: "Leave a machine-readable adversarial verification artifact."
             }
           ],
           failure_modes: [
@@ -623,6 +683,10 @@ class ScenarioAdapter {
             {
               code: "missing_local_verifier_toolchain",
               description: "Do not dispatch pnpm replay without local node_modules."
+            },
+            {
+              code: "missing_adversarial_verification_artifact",
+              description: "Do not treat execution as complete without adversarial verification."
             }
           ],
           forbidden_shortcuts: [
@@ -648,7 +712,10 @@ class ScenarioAdapter {
         questions: [],
         recommended_next_steps: ["Resume the follow-up execution step after restart."],
         confidence: 0.86,
-        artifacts: [{ type: "patch", path: "artifacts/diff.patch" }]
+        artifacts: [
+          { type: "patch", path: "artifacts/diff.patch" },
+          { type: "test_result", path: "artifacts/adversarial-verification.json" }
+        ]
       };
     }
 
@@ -665,7 +732,10 @@ class ScenarioAdapter {
         questions: [],
         recommended_next_steps: ["Apply the next concrete execution step without reopening research."],
         confidence: 0.88,
-        artifacts: [{ type: "patch", path: "artifacts/diff.patch" }]
+        artifacts: [
+          { type: "patch", path: "artifacts/diff.patch" },
+          { type: "test_result", path: "artifacts/adversarial-verification.json" }
+        ]
       };
     }
 
@@ -694,7 +764,10 @@ class ScenarioAdapter {
       recommended_next_steps: [],
       confidence: 0.88,
       verification_plan: verificationPlan,
-      artifacts: [{ type: "patch", path: "artifacts/diff.patch" }]
+      artifacts: [
+        { type: "patch", path: "artifacts/diff.patch" },
+        { type: "test_result", path: "artifacts/adversarial-verification.json" }
+      ]
     };
   }
 
@@ -2458,6 +2531,182 @@ async function assertCliSynthesizerCannotOverrideFailedRuntimeVerification(): Pr
   );
 }
 
+async function assertCliSynthesizerCannotOverrideFailedAdversarialVerification(): Promise<void> {
+  const run = createRun({
+    goal_id: "goal_adversarial_hard_gate",
+    branch_id: null,
+    title: "adversarial hard gate",
+    description: "ensure failed adversarial verification stays hard-gated",
+    success_criteria: ["failed adversarial verification stays hard-gated"],
+    owner_id: "verify-run-loop",
+    workspace_root: process.cwd()
+  });
+  const baseAttempt = createAttempt({
+    run_id: run.id,
+    attempt_type: "execution",
+    worker: "codex",
+    objective: "ship the guarded change",
+    success_criteria: ["both verification gates should pass"],
+    workspace_root: process.cwd()
+  });
+  const attempt = updateAttempt(baseAttempt, {
+    status: "completed",
+    started_at: new Date().toISOString(),
+    ended_at: new Date().toISOString()
+  });
+  const attemptContract = createAttemptContract({
+    attempt_id: attempt.id,
+    run_id: run.id,
+    attempt_type: "execution",
+    objective: attempt.objective,
+    success_criteria: attempt.success_criteria,
+    required_evidence: ["deterministic replay", "adversarial verification output"],
+    verification_plan: {
+      commands: [
+        {
+          purpose: "typecheck",
+          command: "pnpm typecheck"
+        }
+      ]
+    }
+  });
+  const reviewInputPacket = {
+    run_id: run.id,
+    attempt_id: attempt.id,
+    attempt,
+    attempt_contract: attemptContract,
+    current_decision_snapshot: createCurrentDecision({
+      run_id: run.id,
+      run_status: "running",
+      latest_attempt_id: attempt.id,
+      recommended_next_action: "attempt_running",
+      recommended_attempt_type: "execution",
+      summary: "adversarial failure under review"
+    }),
+    context: null,
+    journal: [],
+    failure_context: {
+      message: "Adversarial verification failed.",
+      journal_event_id: null,
+      journal_event_ts: null
+    },
+    result: WorkerWritebackSchema.parse({
+      summary: "Deterministic replay passed but adversarial verification found a hole.",
+      findings: [
+        {
+          type: "fact",
+          content: "The repeated command exposed a regression.",
+          evidence: ["artifacts/adversarial-verification.json => verdict fail"]
+        }
+      ],
+      questions: [],
+      recommended_next_steps: ["repair the regression before calling the attempt complete"],
+      confidence: 0.82,
+      artifacts: [{ type: "test_result", path: "artifacts/adversarial-verification.json" }]
+    }),
+    runtime_verification: {
+      attempt_id: attempt.id,
+      run_id: run.id,
+      attempt_type: "execution",
+      status: "passed",
+      repo_root: process.cwd(),
+      git_head: "abc123",
+      git_status: [" M packages/judge/src/index.ts"],
+      preexisting_git_status: [],
+      new_git_status: [" M packages/judge/src/index.ts"],
+      changed_files: ["packages/judge/src/index.ts"],
+      failure_code: null,
+      failure_reason: null,
+      command_results: [
+        {
+          purpose: "typecheck",
+          command: "pnpm typecheck",
+          cwd: process.cwd(),
+          expected_exit_code: 0,
+          exit_code: 0,
+          passed: true,
+          stdout_file: "/tmp/typecheck.stdout",
+          stderr_file: "/tmp/typecheck.stderr"
+        }
+      ],
+      created_at: new Date().toISOString()
+    },
+    adversarial_verification: {
+      attempt_id: attempt.id,
+      run_id: run.id,
+      attempt_type: "execution",
+      status: "failed",
+      verdict: "fail",
+      summary: "Adversarial verification found a reproducible regression.",
+      failure_code: "verdict_fail",
+      failure_reason: "Repeated execution corrupted the output.",
+      checks: [
+        {
+          code: "repeat_probe",
+          status: "failed",
+          message: "Repeated execution corrupted the output."
+        }
+      ],
+      commands: [
+        {
+          purpose: "repeat the command",
+          command: "pnpm typecheck",
+          cwd: process.cwd(),
+          exit_code: 1,
+          status: "failed",
+          output_ref: "/tmp/adversarial.stdout"
+        }
+      ],
+      output_refs: ["/tmp/adversarial.stdout"],
+      source_artifact_path: "/tmp/adversarial-verification.json",
+      created_at: new Date().toISOString()
+    },
+    artifact_manifest: [],
+    generated_at: new Date().toISOString()
+  };
+  const synthesis = await synthesizeAttemptEvaluation({
+    reviewInputPacket,
+    opinions: [],
+    reviewInputPacketRef: `runs/${run.id}/attempts/${attempt.id}/review_input_packet.json`,
+    opinionRefs: [],
+    synthesizerConfig: {
+      kind: "cli",
+      synthesizer_id: "fixture-adversarial-hard-gate",
+      role: "final_synthesizer",
+      adapter: "fixture-cli-synthesizer",
+      command: process.execPath,
+      args: [join(process.cwd(), "scripts", "fixture-synthesizer-cli.mjs")],
+      cwd: process.cwd(),
+      timeout_ms: 5_000
+    }
+  });
+
+  assert.equal(
+    synthesis.evaluation.verification_status,
+    "passed",
+    "cli_synthesizer_adversarial_hard_gate: deterministic runtime verification should stay passed"
+  );
+  assert.equal(
+    synthesis.evaluation.adversarial_verification_status,
+    "failed",
+    "cli_synthesizer_adversarial_hard_gate: failed adversarial verification must remain failed after cli synthesis"
+  );
+  assert.equal(
+    synthesis.evaluation.recommendation,
+    "wait_human",
+    "cli_synthesizer_adversarial_hard_gate: failed adversarial verification must preserve the deterministic wait_human recommendation"
+  );
+  assert.equal(
+    synthesis.evaluation.suggested_attempt_type,
+    "execution",
+    "cli_synthesizer_adversarial_hard_gate: failed adversarial verification should keep the deterministic execution retry suggestion"
+  );
+  assert.ok(
+    synthesis.evaluation.goal_progress <= 0.74,
+    "cli_synthesizer_adversarial_hard_gate: failed adversarial verification must keep goal_progress capped below the completion band"
+  );
+}
+
 function buildCliReviewerFailureMatcher(
   mode: CliReviewerFailureMode,
   timeoutMs: number
@@ -3778,6 +4027,8 @@ async function collectObservation(
         const resultArtifact = artifactByKind.get("attempt_result") ?? null;
         const evaluationArtifact = artifactByKind.get("attempt_evaluation") ?? null;
         const runtimeVerificationArtifact = artifactByKind.get("runtime_verification") ?? null;
+        const adversarialVerificationArtifact =
+          artifactByKind.get("adversarial_verification") ?? null;
         const expectedInputContextRef = buildExpectedInputContextRef(runId, attempt.id);
         const attemptContractVerificationCommands =
           reviewPacket?.attempt_contract?.verification_plan?.commands.map(
@@ -3828,6 +4079,7 @@ async function collectObservation(
           has_result: reviewPacket?.result !== null,
           has_evaluation: reviewPacket?.evaluation !== null,
           has_runtime_verification: reviewPacket?.runtime_verification !== null,
+          has_adversarial_verification: reviewPacket?.adversarial_verification !== null,
           artifact_manifest_count: artifactManifest.length,
           has_meta_artifact: metaArtifact !== null,
           meta_artifact_exists: metaArtifact?.exists ?? false,
@@ -3841,6 +4093,9 @@ async function collectObservation(
           evaluation_artifact_exists: evaluationArtifact?.exists ?? false,
           has_runtime_verification_artifact: runtimeVerificationArtifact !== null,
           runtime_verification_artifact_exists: runtimeVerificationArtifact?.exists ?? false,
+          has_adversarial_verification_artifact: adversarialVerificationArtifact !== null,
+          adversarial_verification_artifact_exists:
+            adversarialVerificationArtifact?.exists ?? false,
           expected_input_context_ref: expectedInputContextRef,
           meta_input_context_ref: attempt.input_context_ref,
           review_packet_attempt_input_context_ref:
@@ -3851,6 +4106,14 @@ async function collectObservation(
           runtime_verification_status: reviewPacket?.runtime_verification?.status ?? null,
           runtime_verification_failure_code:
             reviewPacket?.runtime_verification?.failure_code ?? null,
+          adversarial_verification_status:
+            reviewPacket?.adversarial_verification?.status ?? null,
+          adversarial_verification_verdict:
+            reviewPacket?.adversarial_verification?.verdict ?? null,
+          adversarial_verification_failure_code:
+            reviewPacket?.adversarial_verification?.failure_code ?? null,
+          evaluation_adversarial_verification_status:
+            reviewPacket?.evaluation?.adversarial_verification_status ?? null,
           runtime_verification_preexisting_git_status:
             reviewPacket?.runtime_verification?.preexisting_git_status ?? [],
           runtime_verification_new_git_status:
@@ -3861,6 +4124,8 @@ async function collectObservation(
             reviewPacket?.attempt_contract?.done_rubric.map((item) => item.code) ?? [],
           attempt_contract_failure_mode_codes:
             reviewPacket?.attempt_contract?.failure_modes.map((item) => item.code) ?? [],
+          attempt_contract_adversarial_verification_required:
+            reviewPacket?.attempt_contract?.adversarial_verification_required ?? false,
           attempt_contract_has_verification_plan:
             reviewPacket?.attempt_contract?.verification_plan !== undefined,
           attempt_contract_verification_commands: attemptContractVerificationCommands,
@@ -3881,7 +4146,11 @@ async function collectObservation(
           handoff_bundle_has_contract: handoffBundle?.approved_attempt_contract !== null,
           handoff_bundle_has_runtime_verification:
             handoffBundle?.runtime_verification !== null,
+          handoff_bundle_has_adversarial_verification:
+            handoffBundle?.adversarial_verification !== null,
           handoff_bundle_failure_code: handoffBundle?.failure_code ?? null,
+          handoff_bundle_adversarial_failure_code:
+            handoffBundle?.adversarial_failure_code ?? null,
           handoff_bundle_recommended_next_action:
             handoffBundle?.recommended_next_action ?? null,
           handoff_bundle_source_refs: handoffBundle
@@ -3891,7 +4160,9 @@ async function collectObservation(
                 attempt_contract: handoffBundle.source_refs.attempt_contract,
                 current_decision: handoffBundle.source_refs.current_decision,
                 review_packet: handoffBundle.source_refs.review_packet,
-                runtime_verification: handoffBundle.source_refs.runtime_verification
+                runtime_verification: handoffBundle.source_refs.runtime_verification,
+                adversarial_verification:
+                  handoffBundle.source_refs.adversarial_verification
               }
             : null,
           restart_required_message:
@@ -4065,9 +4336,19 @@ function assertCase(scenario: ScenarioCase, observation: ScenarioObservation): v
       `${scenario.id}: handoff bundle runtime verification should mirror review packet for ${reviewPacket.attempt_id}`
     );
     assert.equal(
+      reviewPacket.handoff_bundle_has_adversarial_verification,
+      reviewPacket.has_adversarial_verification,
+      `${scenario.id}: handoff bundle adversarial verification should mirror review packet for ${reviewPacket.attempt_id}`
+    );
+    assert.equal(
       reviewPacket.handoff_bundle_failure_code,
       reviewPacket.runtime_verification_failure_code,
       `${scenario.id}: handoff bundle failure code should mirror review packet for ${reviewPacket.attempt_id}`
+    );
+    assert.equal(
+      reviewPacket.handoff_bundle_adversarial_failure_code,
+      reviewPacket.adversarial_verification_failure_code,
+      `${scenario.id}: handoff bundle adversarial failure code should mirror review packet for ${reviewPacket.attempt_id}`
     );
     assert.equal(
       reviewPacket.handoff_bundle_recommended_next_action,
@@ -4106,6 +4387,26 @@ function assertCase(scenario: ScenarioCase, observation: ScenarioObservation): v
         : null,
       `${scenario.id}: handoff bundle should point at runtime verification for ${reviewPacket.attempt_id}`
     );
+    assert.equal(
+      reviewPacket.handoff_bundle_source_refs?.adversarial_verification,
+      reviewPacket.has_adversarial_verification
+        ? `runs/${observation.run_id}/attempts/${reviewPacket.attempt_id}/artifacts/adversarial-verification.json`
+        : null,
+      `${scenario.id}: handoff bundle should point at adversarial verification for ${reviewPacket.attempt_id}`
+    );
+    if (reviewPacket.attempt_type === "execution" && reviewPacket.has_attempt_contract) {
+      assert.equal(
+        reviewPacket.attempt_contract_adversarial_verification_required,
+        true,
+        `${scenario.id}: execution attempt contract should explicitly require adversarial verification for ${reviewPacket.attempt_id}`
+      );
+      assert.ok(
+        reviewPacket.attempt_contract_done_rubric_codes.includes(
+          "adversarial_verification_passed"
+        ),
+        `${scenario.id}: execution contract should carry adversarial done_rubric for ${reviewPacket.attempt_id}`
+      );
+    }
 
     if (reviewPacket.attempt_status === "completed") {
       assert.ok(
@@ -4132,6 +4433,48 @@ function assertCase(scenario: ScenarioCase, observation: ScenarioObservation): v
         reviewPacket.runtime_verification_artifact_exists,
         `${scenario.id}: completed attempt missing persisted runtime verification artifact for ${reviewPacket.attempt_id}`
       );
+      if (reviewPacket.attempt_type === "execution") {
+        assert.ok(
+          reviewPacket.has_adversarial_verification,
+          `${scenario.id}: completed execution missing adversarial verification in review packet for ${reviewPacket.attempt_id}`
+        );
+        assert.ok(
+          reviewPacket.has_adversarial_verification_artifact,
+          `${scenario.id}: completed execution missing adversarial verification manifest entry for ${reviewPacket.attempt_id}`
+        );
+        assert.ok(
+          reviewPacket.adversarial_verification_artifact_exists,
+          `${scenario.id}: completed execution missing persisted adversarial verification artifact for ${reviewPacket.attempt_id}`
+        );
+        if (reviewPacket.runtime_verification_status === "passed") {
+          assert.equal(
+            reviewPacket.adversarial_verification_status,
+            "passed",
+            `${scenario.id}: completed execution should pass adversarial verification for ${reviewPacket.attempt_id}`
+          );
+          assert.equal(
+            reviewPacket.adversarial_verification_verdict,
+            "pass",
+            `${scenario.id}: completed execution should persist a pass verdict for ${reviewPacket.attempt_id}`
+          );
+          assert.equal(
+            reviewPacket.evaluation_adversarial_verification_status,
+            "passed",
+            `${scenario.id}: evaluation should mirror adversarial verification status for ${reviewPacket.attempt_id}`
+          );
+        } else {
+          assert.equal(
+            reviewPacket.adversarial_verification_status,
+            "not_applicable",
+            `${scenario.id}: adversarial verification should stay not_applicable when runtime verification fails for ${reviewPacket.attempt_id}`
+          );
+          assert.equal(
+            reviewPacket.evaluation_adversarial_verification_status,
+            "not_applicable",
+            `${scenario.id}: evaluation should mirror the skipped adversarial verification state for ${reviewPacket.attempt_id}`
+          );
+        }
+      }
     } else {
       assert.ok(
         reviewPacket.journal_count > 0 || reviewPacket.has_failure_context,
@@ -4805,6 +5148,20 @@ async function main(): Promise<void> {
   } catch (error) {
     results.push({
       id: "cli_synthesizer_hard_gate_preserves_failed_runtime_verification",
+      status: "fail",
+      error: error instanceof Error ? error.message : String(error)
+    });
+  }
+
+  try {
+    await assertCliSynthesizerCannotOverrideFailedAdversarialVerification();
+    results.push({
+      id: "cli_synthesizer_hard_gate_preserves_failed_adversarial_verification",
+      status: "pass"
+    });
+  } catch (error) {
+    results.push({
+      id: "cli_synthesizer_hard_gate_preserves_failed_adversarial_verification",
       status: "fail",
       error: error instanceof Error ? error.message : String(error)
     });

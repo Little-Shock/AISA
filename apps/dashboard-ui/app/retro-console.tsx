@@ -587,7 +587,10 @@ function AgentCard({
       <MeasuredText
         className="mb-4 text-sm leading-6 text-slate-100"
         lines={2}
-        text={truncateText(localizeUiText(run.task_focus || run.run.description), 160)}
+        text={truncateText(
+          localizeUiText(run.run_brief?.headline ?? run.task_focus ?? run.run.description),
+          160
+        )}
       />
 
       <div className="mb-4 grid grid-cols-2 gap-2 font-mono text-xs">

@@ -1696,6 +1696,10 @@ function buildCodexAttemptPrompt(
     type: "patch",
     path: "runs/<run_id>/attempts/<attempt_id>/artifacts/diff.patch"
   };
+  const adversarialArtifactExample = {
+    type: "test_result",
+    path: "artifacts/adversarial-verification.json"
+  };
 
   return [
     "You are a Codex CLI worker inside AISA.",
@@ -1739,9 +1743,25 @@ function buildCodexAttemptPrompt(
     attempt.attempt_type === "execution"
       ? "Do not replace the contract verification plan with a different one after execution starts."
       : null,
+    attempt.attempt_type === "execution" &&
+    attemptContract.adversarial_verification_required === true
+      ? "After the contract replay commands pass, run a separate adversarial verification pass and save a machine-readable JSON artifact at artifacts/adversarial-verification.json in the workspace root."
+      : null,
+    attempt.attempt_type === "execution" &&
+    attemptContract.adversarial_verification_required === true
+      ? "That adversarial artifact must include checks, commands, output_refs, and a verdict of pass, fail, or partial. Deterministic replay and adversarial verification are two separate layers."
+      : null,
+    attempt.attempt_type === "execution" &&
+    attemptContract.adversarial_verification_required === true
+      ? 'Use this JSON shape for artifacts/adversarial-verification.json: {"summary":"简短结论","verdict":"pass","checks":[{"code":"non_happy_path","status":"passed","message":"实际验证结果"}],"commands":[{"purpose":"对抗性验证","command":"pnpm verify:run-api","exit_code":0,"status":"passed","output_ref":"artifacts/adversarial/run-api.txt"}],"output_refs":["artifacts/adversarial/run-api.txt"]}'
+      : null,
     `Allowed findings.type values: ${workerFindingTypes}. Do not invent values like "gap".`,
     `artifacts must be an array of objects with stable keys. Allowed artifacts[].type values: ${workerArtifactTypes}.`,
     `Copy this artifacts object shape when you have one: ${JSON.stringify(executionArtifactExample)}`,
+    attempt.attempt_type === "execution" &&
+    attemptContract.adversarial_verification_required === true
+      ? `Include this extra artifact when adversarial verification is required: ${JSON.stringify(adversarialArtifactExample)}`
+      : null,
     'Do not return artifacts as plain strings like "scripts/verify-run-detail-api.ts".',
     "If you only want to cite files or commands as evidence, put them in findings[].evidence, recommended_next_steps, or next_attempt_contract.expected_artifacts instead of artifacts[].",
     attempt.attempt_type === "research"
@@ -1798,7 +1818,11 @@ function buildCodexAttemptPrompt(
               }
             : undefined,
         artifacts:
-          attempt.attempt_type === "execution" ? [executionArtifactExample] : []
+          attempt.attempt_type === "execution"
+            ? attemptContract.adversarial_verification_required === true
+              ? [executionArtifactExample, adversarialArtifactExample]
+              : [executionArtifactExample]
+            : []
       },
       null,
       2

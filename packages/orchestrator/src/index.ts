@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { open, readFile, stat, unlink } from "node:fs/promises";
 import { join, relative, resolve } from "node:path";
 import {
+  createAttemptAdversarialVerification,
   createAttemptRuntimeState,
   createAttemptHandoffBundle,
   createAttempt,
@@ -25,6 +26,7 @@ import {
   updateSteer,
   resolveRunHarnessProfile,
   type Attempt,
+  type AttemptAdversarialVerification,
   type AttemptContract,
   type AttemptContractDraft,
   type AttemptEvaluation,
@@ -69,6 +71,7 @@ import {
   getAttempt,
   getAttemptContract,
   getAttemptContext,
+  getAttemptAdversarialVerification,
   getAttemptHandoffBundle,
   getAttemptHeartbeat,
   getAttemptEvaluation,
@@ -77,6 +80,7 @@ import {
   getAttemptReviewInputPacket,
   getAttemptReviewPacket,
   getAttemptResult,
+  getAttemptPreflightEvaluation,
   getAttemptRuntimeState,
   getAttemptRuntimeVerification,
   getCurrentDecision,
@@ -104,6 +108,7 @@ import {
   saveAttempt,
   saveAttemptContract,
   saveAttemptContext,
+  saveAttemptAdversarialVerification,
   saveAttemptEvaluation,
   saveAttemptEvaluationSynthesisRecord,
   saveAttemptPreflightEvaluation,
@@ -175,7 +180,12 @@ import {
   parseSelfBootstrapNextTaskActiveEntry,
   type SelfBootstrapNextTaskActiveEntry
 } from "./self-bootstrap-next-task.js";
-import { refreshRunWorkingContext } from "./working-context.js";
+import { refreshRunOperatorSurface } from "./run-brief.js";
+import {
+  deriveFailureSignalFromAdversarialVerification,
+  deriveFailureSignalFromPreflight,
+  deriveFailureSignalFromRuntimeVerification
+} from "./failure-policy.js";
 
 export interface OrchestratorOptions {
   attemptHeartbeatIntervalMs?: number;
@@ -221,6 +231,9 @@ export type RunWorkerEffortView = {
   reviewer: RunWorkerEffortSlotView;
   synthesizer: RunWorkerEffortSlotView;
 };
+
+const ADVERSARIAL_VERIFICATION_ARTIFACT_RELATIVE_PATH =
+  "artifacts/adversarial-verification.json";
 
 type RunDispatchLeaseRecord = {
   version: 1;
@@ -356,6 +369,11 @@ function buildDefaultExecutionDoneRubric(): AttemptContract["done_rubric"] {
     {
       code: "verification_replay_passed",
       description: "Pass the replayable verification commands locked into this contract."
+    },
+    {
+      code: "adversarial_verification_passed",
+      description:
+        "Leave a machine-readable adversarial verification artifact after deterministic replay passes."
     }
   ];
 }
@@ -373,6 +391,16 @@ function buildDefaultExecutionFailureModes(): AttemptContract["failure_modes"] {
     {
       code: "unchanged_workspace_state",
       description: "Do not treat unchanged workspace state as a completed execution step."
+    },
+    {
+      code: "missing_adversarial_verification_requirement",
+      description:
+        "Do not dispatch execution when attempt_contract.json does not explicitly require adversarial verification."
+    },
+    {
+      code: "missing_adversarial_verification_artifact",
+      description:
+        "Do not treat execution as complete without a machine-readable adversarial verification artifact."
     }
   ];
 }
@@ -965,7 +993,7 @@ export class Orchestrator {
         waiting_for_human: true
       })
     );
-    await refreshRunWorkingContext(this.workspacePaths, runId);
+    await refreshRunOperatorSurface(this.workspacePaths, runId);
   }
 
   private async tickRuns(): Promise<void> {
@@ -1229,7 +1257,7 @@ export class Orchestrator {
         }
       })
     );
-    await refreshRunWorkingContext(this.workspacePaths, runId);
+    await refreshRunOperatorSurface(this.workspacePaths, runId);
   }
 
   private async planNextAttempt(
@@ -1568,7 +1596,7 @@ export class Orchestrator {
           }
         })
       );
-      await refreshRunWorkingContext(this.workspacePaths, runId);
+      await refreshRunOperatorSurface(this.workspacePaths, runId);
       await startLease.release();
       startLeaseReleased = true;
 
@@ -1602,6 +1630,14 @@ export class Orchestrator {
         result: execution.writeback,
         attemptPaths
       });
+      const adversarialVerification = await this.runAttemptAdversarialVerification({
+        run,
+        attempt,
+        attemptContract: preflightOutcome.dispatchableAttemptContract,
+        result: execution.writeback,
+        runtimeVerification: runtimeVerification.verification,
+        attemptPaths
+      });
       const completedAttemptForEvaluation = updateAttempt(attempt, {
         status: "completed",
         ended_at: new Date().toISOString(),
@@ -1615,6 +1651,7 @@ export class Orchestrator {
         context,
         result: execution.writeback,
         runtimeVerification: runtimeVerification.verification,
+        adversarialVerification,
         journal: await listRunJournal(this.workspacePaths, runId)
       });
       await saveAttemptReviewInputPacket(this.workspacePaths, reviewInputPacket);
@@ -1783,6 +1820,11 @@ export class Orchestrator {
         })
       );
       await this.appendRuntimeVerificationJournal(runId, attempt.id, runtimeVerification);
+      await this.appendAdversarialVerificationJournal(
+        runId,
+        attempt.id,
+        adversarialVerification
+      );
       await this.appendCheckpointJournal(runId, attempt.id, checkpointOutcome);
       await this.appendRuntimePromotionJournal(runId, attempt.id, promotionOutcome);
       await this.appendRuntimeSourceDriftJournal(
@@ -1896,7 +1938,9 @@ export class Orchestrator {
       evaluationSynthesis,
       reviewInputPacket,
       reviewOpinions,
+      preflightEvaluation,
       runtimeVerification,
+      adversarialVerification,
       journal,
       previousGovernance
     ] = await Promise.all([
@@ -1907,7 +1951,9 @@ export class Orchestrator {
       getAttemptEvaluationSynthesisRecord(this.workspacePaths, input.runId, input.attempt.id),
       getAttemptReviewInputPacket(this.workspacePaths, input.runId, input.attempt.id),
       listAttemptReviewOpinions(this.workspacePaths, input.runId, input.attempt.id),
+      getAttemptPreflightEvaluation(this.workspacePaths, input.runId, input.attempt.id),
       getAttemptRuntimeVerification(this.workspacePaths, input.runId, input.attempt.id),
+      getAttemptAdversarialVerification(this.workspacePaths, input.runId, input.attempt.id),
       listRunJournal(this.workspacePaths, input.runId),
       getRunGovernanceState(this.workspacePaths, input.runId)
     ]);
@@ -1921,6 +1967,7 @@ export class Orchestrator {
         context,
         result,
         runtimeVerification,
+        adversarialVerification,
         journal
       }));
     const reviewPacket = await this.buildAttemptReviewPacket({
@@ -1940,9 +1987,11 @@ export class Orchestrator {
       runId: input.runId,
       attempt: input.attempt,
       attemptContract,
+      preflightEvaluation,
       currentSnapshot: reviewPacket.current_decision_snapshot,
       failureContext: reviewPacket.failure_context,
       runtimeVerification: reviewPacket.runtime_verification,
+      adversarialVerification: reviewPacket.adversarial_verification,
       reviewPacketRef
     });
 
@@ -1963,7 +2012,7 @@ export class Orchestrator {
         runtimeVerification
       });
     await saveRunGovernanceState(this.workspacePaths, governanceSnapshot);
-    await refreshRunWorkingContext(this.workspacePaths, input.runId);
+    await refreshRunOperatorSurface(this.workspacePaths, input.runId);
   }
 
   private async transitionAttemptRuntimeState(input: {
@@ -2011,6 +2060,10 @@ export class Orchestrator {
       return;
     }
 
+    const failureSignal = deriveFailureSignalFromRuntimeVerification({
+      verification: verificationOutcome.verification,
+      sourceRef: verificationOutcome.artifact_path
+    });
     await appendRunJournal(
       this.workspacePaths,
       createRunJournalEntry({
@@ -2022,6 +2075,8 @@ export class Orchestrator {
             : "attempt.verification.failed",
         payload: {
           status: verificationOutcome.verification.status,
+          failure_class: failureSignal?.failure_class ?? null,
+          failure_policy_mode: failureSignal?.policy_mode ?? null,
           failure_code: verificationOutcome.verification.failure_code,
           failure_reason: verificationOutcome.verification.failure_reason,
           changed_files: verificationOutcome.verification.changed_files,
@@ -2030,6 +2085,305 @@ export class Orchestrator {
         }
       })
     );
+  }
+
+  private async appendAdversarialVerificationJournal(
+    runId: string,
+    attemptId: string,
+    verification: AttemptAdversarialVerification
+  ): Promise<void> {
+    if (verification.status === "not_applicable") {
+      return;
+    }
+
+    const artifactPath = this.buildAttemptAdversarialVerificationRef(runId, attemptId);
+    const failureSignal = deriveFailureSignalFromAdversarialVerification({
+      verification,
+      sourceRef: artifactPath
+    });
+    await appendRunJournal(
+      this.workspacePaths,
+      createRunJournalEntry({
+        run_id: runId,
+        attempt_id: attemptId,
+        type:
+          verification.status === "passed"
+            ? "attempt.adversarial_verification.passed"
+            : "attempt.adversarial_verification.failed",
+        payload: {
+          status: verification.status,
+          verdict: verification.verdict,
+          failure_class: failureSignal?.failure_class ?? null,
+          failure_policy_mode: failureSignal?.policy_mode ?? null,
+          failure_code: verification.failure_code,
+          message: verification.failure_reason ?? verification.summary,
+          command_count: verification.commands.length,
+          output_count: verification.output_refs.length,
+          artifact_path: artifactPath
+        }
+      })
+    );
+  }
+
+  private async runAttemptAdversarialVerification(input: {
+    run: Run;
+    attempt: Attempt;
+    attemptContract: AttemptContract | null;
+    result: WorkerWriteback;
+    runtimeVerification: AttemptRuntimeVerification;
+    attemptPaths: ReturnType<typeof resolveAttemptPaths>;
+  }): Promise<AttemptAdversarialVerification> {
+    const persist = async (
+      verification: AttemptAdversarialVerification
+    ): Promise<AttemptAdversarialVerification> => {
+      await saveAttemptAdversarialVerification(this.workspacePaths, verification);
+      return verification;
+    };
+
+    if (input.attempt.attempt_type !== "execution") {
+      return await persist(
+        createAttemptAdversarialVerification({
+          run_id: input.run.id,
+          attempt_id: input.attempt.id,
+          attempt_type: input.attempt.attempt_type,
+          status: "not_applicable",
+          summary: "Adversarial verification only applies to execution attempts."
+        })
+      );
+    }
+
+    if (input.runtimeVerification.status !== "passed") {
+      return await persist(
+        createAttemptAdversarialVerification({
+          run_id: input.run.id,
+          attempt_id: input.attempt.id,
+          attempt_type: input.attempt.attempt_type,
+          status: "not_applicable",
+          summary:
+            "Adversarial verification was skipped because deterministic runtime verification did not pass.",
+          failure_reason: input.runtimeVerification.failure_reason
+        })
+      );
+    }
+
+    if (!input.attemptContract?.adversarial_verification_required) {
+      return await persist(
+        createAttemptAdversarialVerification({
+          run_id: input.run.id,
+          attempt_id: input.attempt.id,
+          attempt_type: input.attempt.attempt_type,
+          status: "failed",
+          verdict: "fail",
+          summary: "Execution contract is missing the adversarial verification requirement.",
+          failure_code: "missing_requirement",
+          failure_reason:
+            "Execution contract does not explicitly require adversarial verification after deterministic replay passes."
+        })
+      );
+    }
+
+    const sourceArtifactPath =
+      input.result.artifacts.find(
+        (artifact) => artifact.path === ADVERSARIAL_VERIFICATION_ARTIFACT_RELATIVE_PATH
+      )?.path ??
+      input.result.artifacts.find((artifact) =>
+        artifact.path.endsWith("/adversarial-verification.json")
+      )?.path ??
+      null;
+    if (!sourceArtifactPath) {
+      return await persist(
+        createAttemptAdversarialVerification({
+          run_id: input.run.id,
+          attempt_id: input.attempt.id,
+          attempt_type: input.attempt.attempt_type,
+          status: "failed",
+          verdict: "fail",
+          summary: "Execution finished without a machine-readable adversarial verification artifact.",
+          failure_code: "missing_artifact",
+          failure_reason:
+            "Execution must leave artifacts/adversarial-verification.json and include it in writeback.artifacts."
+        })
+      );
+    }
+
+    const resolvedSourceArtifactPath = resolve(input.attempt.workspace_root, sourceArtifactPath);
+
+    try {
+      const raw = JSON.parse(await readFile(resolvedSourceArtifactPath, "utf8")) as Record<
+        string,
+        unknown
+      >;
+      const normalized = createAttemptAdversarialVerification({
+        run_id: input.run.id,
+        attempt_id: input.attempt.id,
+        attempt_type: input.attempt.attempt_type,
+        status:
+          raw.status === "passed" || raw.status === "failed" || raw.status === "not_applicable"
+            ? raw.status
+            : raw.verdict === "pass"
+              ? "passed"
+              : raw.verdict === "fail" || raw.verdict === "partial"
+                ? "failed"
+                : "failed",
+        verdict:
+          raw.verdict === "pass" || raw.verdict === "fail" || raw.verdict === "partial"
+            ? raw.verdict
+            : null,
+        summary: typeof raw.summary === "string" ? raw.summary : null,
+        failure_code:
+          raw.failure_code === "missing_requirement" ||
+          raw.failure_code === "missing_artifact" ||
+          raw.failure_code === "invalid_artifact" ||
+          raw.failure_code === "missing_checks" ||
+          raw.failure_code === "missing_commands" ||
+          raw.failure_code === "missing_outputs" ||
+          raw.failure_code === "verdict_fail" ||
+          raw.failure_code === "verdict_partial"
+            ? raw.failure_code
+            : null,
+        failure_reason: typeof raw.failure_reason === "string" ? raw.failure_reason : null,
+        checks: Array.isArray(raw.checks) ? raw.checks : [],
+        commands: Array.isArray(raw.commands)
+          ? raw.commands.map((command) =>
+              typeof command === "object" && command !== null
+                ? {
+                    ...command,
+                    cwd:
+                      "cwd" in command && typeof command.cwd === "string"
+                        ? resolve(input.attempt.workspace_root, command.cwd)
+                        : null,
+                    output_ref:
+                      "output_ref" in command && typeof command.output_ref === "string"
+                        ? resolve(input.attempt.workspace_root, command.output_ref)
+                        : null
+                  }
+                : command
+            )
+          : [],
+        output_refs: Array.isArray(raw.output_refs)
+          ? raw.output_refs
+              .filter((value): value is string => typeof value === "string" && value.length > 0)
+              .map((value) => resolve(input.attempt.workspace_root, value))
+          : [],
+        source_artifact_path: resolvedSourceArtifactPath
+      });
+
+      const effectiveOutputRefs = [
+        ...normalized.output_refs,
+        ...normalized.commands
+          .map((command) => command.output_ref)
+          .filter((value): value is string => Boolean(value))
+      ];
+      const uniqueOutputRefs = [...new Set(effectiveOutputRefs)];
+      const base = {
+        run_id: normalized.run_id,
+        attempt_id: normalized.attempt_id,
+        attempt_type: normalized.attempt_type,
+        verdict: normalized.verdict,
+        summary: normalized.summary,
+        checks: normalized.checks,
+        commands: normalized.commands,
+        output_refs: uniqueOutputRefs,
+        source_artifact_path: normalized.source_artifact_path
+      } as const;
+
+      if (!normalized.verdict) {
+        return await persist(
+          createAttemptAdversarialVerification({
+            ...base,
+            status: "failed",
+            verdict: "fail",
+            failure_code: "invalid_artifact",
+            failure_reason:
+              "Adversarial verification artifact is missing a machine-readable verdict."
+          })
+        );
+      }
+
+      if (normalized.checks.length === 0) {
+        return await persist(
+          createAttemptAdversarialVerification({
+            ...base,
+            status: "failed",
+            failure_code: "missing_checks",
+            failure_reason:
+              "Adversarial verification artifact must include at least one structured check."
+          })
+        );
+      }
+
+      if (normalized.commands.length === 0) {
+        return await persist(
+          createAttemptAdversarialVerification({
+            ...base,
+            status: "failed",
+            failure_code: "missing_commands",
+            failure_reason:
+              "Adversarial verification artifact must include at least one executed command."
+          })
+        );
+      }
+
+      if (uniqueOutputRefs.length === 0) {
+        return await persist(
+          createAttemptAdversarialVerification({
+            ...base,
+            status: "failed",
+            failure_code: "missing_outputs",
+            failure_reason:
+              "Adversarial verification artifact must include at least one output reference."
+          })
+        );
+      }
+
+      if (normalized.verdict === "fail") {
+        return await persist(
+          createAttemptAdversarialVerification({
+            ...base,
+            status: "failed",
+            failure_code: normalized.failure_code ?? "verdict_fail",
+            failure_reason:
+              normalized.failure_reason ??
+              "Adversarial verification returned a failing verdict."
+          })
+        );
+      }
+
+      if (normalized.verdict === "partial") {
+        return await persist(
+          createAttemptAdversarialVerification({
+            ...base,
+            status: "failed",
+            failure_code: normalized.failure_code ?? "verdict_partial",
+            failure_reason:
+              normalized.failure_reason ??
+              "Adversarial verification returned PARTIAL, so execution cannot complete."
+          })
+        );
+      }
+
+      return await persist(
+        createAttemptAdversarialVerification({
+          ...base,
+          status: "passed"
+        })
+      );
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      return await persist(
+        createAttemptAdversarialVerification({
+          run_id: input.run.id,
+          attempt_id: input.attempt.id,
+          attempt_type: input.attempt.attempt_type,
+          status: "failed",
+          verdict: "fail",
+          summary: "Execution left an unreadable adversarial verification artifact.",
+          failure_code: "invalid_artifact",
+          failure_reason: `Failed to parse ${sourceArtifactPath}: ${reason}`,
+          source_artifact_path: resolvedSourceArtifactPath
+        })
+      );
+    }
   }
 
   private buildAttemptContextRef(runId: string, attemptId: string): string {
@@ -2058,6 +2412,10 @@ export class Orchestrator {
 
   private buildAttemptRuntimeVerificationRef(runId: string, attemptId: string): string {
     return `runs/${runId}/attempts/${attemptId}/artifacts/runtime-verification.json`;
+  }
+
+  private buildAttemptAdversarialVerificationRef(runId: string, attemptId: string): string {
+    return `runs/${runId}/attempts/${attemptId}/artifacts/adversarial-verification.json`;
   }
 
   private buildAttemptHandoffBundleRef(runId: string, attemptId: string): string {
@@ -2292,7 +2650,7 @@ export class Orchestrator {
         }
       })
     );
-    await refreshRunWorkingContext(this.workspacePaths, input.runId);
+    await refreshRunOperatorSurface(this.workspacePaths, input.runId);
   }
 
   private async runAttemptEvaluationSynthesis(input: {
@@ -2342,13 +2700,20 @@ export class Orchestrator {
         runId,
         attempt.id
       );
+      const preflightEvaluation = await getAttemptPreflightEvaluation(
+        this.workspacePaths,
+        runId,
+        attempt.id
+      );
       const nextHandoffBundle = this.buildAttemptHandoffBundle({
         runId,
         attempt,
         attemptContract,
+        preflightEvaluation,
         currentSnapshot: reviewPacket.current_decision_snapshot,
         failureContext: reviewPacket.failure_context,
         runtimeVerification: reviewPacket.runtime_verification,
+        adversarialVerification: reviewPacket.adversarial_verification,
         reviewPacketRef: this.buildAttemptReviewPacketRef(runId, attempt.id)
       });
       await saveAttemptHandoffBundle(this.workspacePaths, nextHandoffBundle);
@@ -2369,7 +2734,9 @@ export class Orchestrator {
       evaluationSynthesis,
       reviewInputPacket,
       reviewOpinions,
+      preflightEvaluation,
       runtimeVerification,
+      adversarialVerification,
       journal
     ] = await Promise.all([
       getAttempt(this.workspacePaths, runId, attemptId),
@@ -2380,7 +2747,9 @@ export class Orchestrator {
       getAttemptEvaluationSynthesisRecord(this.workspacePaths, runId, attemptId),
       getAttemptReviewInputPacket(this.workspacePaths, runId, attemptId),
       listAttemptReviewOpinions(this.workspacePaths, runId, attemptId),
+      getAttemptPreflightEvaluation(this.workspacePaths, runId, attemptId),
       getAttemptRuntimeVerification(this.workspacePaths, runId, attemptId),
+      getAttemptAdversarialVerification(this.workspacePaths, runId, attemptId),
       listRunJournal(this.workspacePaths, runId)
     ]);
     const effectiveReviewInputPacket =
@@ -2393,6 +2762,7 @@ export class Orchestrator {
         context,
         result,
         runtimeVerification,
+        adversarialVerification,
         journal
       }));
     const reviewPacket = await this.buildAttemptReviewPacket({
@@ -2411,9 +2781,11 @@ export class Orchestrator {
       runId,
       attempt,
       attemptContract,
+      preflightEvaluation,
       currentSnapshot: reviewPacket.current_decision_snapshot,
       failureContext: reviewPacket.failure_context,
       runtimeVerification: reviewPacket.runtime_verification,
+      adversarialVerification: reviewPacket.adversarial_verification,
       reviewPacketRef: this.buildAttemptReviewPacketRef(runId, attemptId)
     });
 
@@ -2425,6 +2797,7 @@ export class Orchestrator {
     attempt: Attempt;
     currentSnapshot: CurrentDecision | null;
     runtimeVerification: AttemptRuntimeVerification | null;
+    adversarialVerification: AttemptAdversarialVerification | null;
     journal: Awaited<ReturnType<typeof listRunJournal>>;
   }): AttemptReviewInputPacket["failure_context"] {
     const failureEntry = [...input.journal].reverse().find((entry) =>
@@ -2441,6 +2814,7 @@ export class Orchestrator {
     const failureMessage =
       this.getReviewPacketFailureMessage(failureEntry?.payload) ??
       input.runtimeVerification?.failure_reason ??
+      input.adversarialVerification?.failure_reason ??
       (["failed", "stopped"].includes(input.attempt.status)
         ? currentBlockingReason ?? `Attempt ${input.attempt.id} ended as ${input.attempt.status}.`
         : currentBlockingReason);
@@ -2462,6 +2836,7 @@ export class Orchestrator {
     context: unknown | null;
     result: WorkerWriteback | null;
     runtimeVerification: AttemptRuntimeVerification | null;
+    adversarialVerification: AttemptAdversarialVerification | null;
     journal: Awaited<ReturnType<typeof listRunJournal>>;
   }): Promise<AttemptReviewInputPacket> {
     const attemptPaths = resolveAttemptPaths(
@@ -2483,14 +2858,17 @@ export class Orchestrator {
         attempt: input.attempt,
         currentSnapshot: input.currentSnapshot,
         runtimeVerification: input.runtimeVerification,
+        adversarialVerification: input.adversarialVerification,
         journal: attemptJournal
       }),
       result: input.result,
       runtime_verification: input.runtimeVerification,
+      adversarial_verification: input.adversarialVerification,
       artifact_manifest: await this.buildAttemptArtifactManifest({
         attemptPaths,
         result: input.result,
         runtimeVerification: input.runtimeVerification,
+        adversarialVerification: input.adversarialVerification,
         journal: attemptJournal,
         reviewInputPacketFile: null,
         evaluationSynthesisFile: null,
@@ -2535,6 +2913,7 @@ export class Orchestrator {
         attempt: input.attempt,
         currentSnapshot: input.currentSnapshot,
         runtimeVerification: input.reviewInputPacket.runtime_verification,
+        adversarialVerification: input.reviewInputPacket.adversarial_verification,
         journal: attemptJournal
       }),
       evaluation: input.evaluation,
@@ -2542,6 +2921,7 @@ export class Orchestrator {
         attemptPaths,
         result: input.reviewInputPacket.result,
         runtimeVerification: input.reviewInputPacket.runtime_verification,
+        adversarialVerification: input.reviewInputPacket.adversarial_verification,
         journal: attemptJournal,
         reviewInputPacketFile: input.reviewInputPacketRef
           ? attemptPaths.reviewInputPacketFile
@@ -2575,22 +2955,29 @@ export class Orchestrator {
     runId: string;
     attempt: Attempt;
     attemptContract: AttemptContract | null;
+    preflightEvaluation: Awaited<ReturnType<typeof getAttemptPreflightEvaluation>> | null;
     currentSnapshot: CurrentDecision | null;
     failureContext: AttemptFailureContext | null;
     runtimeVerification: AttemptRuntimeVerification | null;
+    adversarialVerification: AttemptAdversarialVerification | null;
     reviewPacketRef: string | null;
   }): AttemptHandoffBundle {
     return createAttemptHandoffBundle({
       attempt: input.attempt,
       approved_attempt_contract: input.attemptContract,
+      preflight_evaluation: input.preflightEvaluation,
       current_decision_snapshot: input.currentSnapshot,
       failure_context: input.failureContext,
       runtime_verification: input.runtimeVerification,
+      adversarial_verification: input.adversarialVerification,
       source_refs: {
         run_contract: this.buildRunContractRef(input.runId),
         attempt_meta: this.buildAttemptMetaRef(input.runId, input.attempt.id),
         attempt_contract: input.attemptContract
           ? this.buildAttemptContractRef(input.runId, input.attempt.id)
+          : null,
+        preflight_evaluation: input.preflightEvaluation
+          ? this.buildAttemptPreflightEvaluationRef(input.runId, input.attempt.id)
           : null,
         current_decision: input.currentSnapshot
           ? this.buildCurrentDecisionRef(input.runId)
@@ -2598,6 +2985,9 @@ export class Orchestrator {
         review_packet: input.reviewPacketRef,
         runtime_verification: input.runtimeVerification
           ? this.buildAttemptRuntimeVerificationRef(input.runId, input.attempt.id)
+          : null,
+        adversarial_verification: input.adversarialVerification
+          ? this.buildAttemptAdversarialVerificationRef(input.runId, input.attempt.id)
           : null
       }
     });
@@ -2607,6 +2997,7 @@ export class Orchestrator {
     attemptPaths: ReturnType<typeof resolveAttemptPaths>;
     result: WorkerWriteback | null;
     runtimeVerification: AttemptRuntimeVerification | null;
+    adversarialVerification: AttemptAdversarialVerification | null;
     journal: Awaited<ReturnType<typeof listRunJournal>>;
     reviewInputPacketFile: string | null;
     evaluationSynthesisFile: string | null;
@@ -2633,6 +3024,7 @@ export class Orchestrator {
     addPath("review_input_packet", input.reviewInputPacketFile);
     addPath("evaluation_synthesis", input.evaluationSynthesisFile);
     addPath("runtime_verification", input.attemptPaths.runtimeVerificationFile);
+    addPath("adversarial_verification", input.attemptPaths.adversarialVerificationFile);
     addPath("heartbeat", input.attemptPaths.heartbeatFile);
     addPath("stdout", input.attemptPaths.stdoutFile);
     addPath("stderr", input.attemptPaths.stderrFile);
@@ -2647,6 +3039,14 @@ export class Orchestrator {
     for (const commandResult of input.runtimeVerification?.command_results ?? []) {
       addPath("verification_stdout", commandResult.stdout_file);
       addPath("verification_stderr", commandResult.stderr_file);
+    }
+
+    for (const command of input.adversarialVerification?.commands ?? []) {
+      addPath("adversarial_output", command.output_ref);
+    }
+
+    for (const outputRef of input.adversarialVerification?.output_refs ?? []) {
+      addPath("adversarial_output", outputRef);
     }
 
     addPath(
@@ -3189,6 +3589,7 @@ export class Orchestrator {
       `- 评估建议：${evaluation.recommendation}`,
       `- 建议的下一次类型：${evaluation.suggested_attempt_type ?? "none"}`,
       `- 验证状态：${evaluation.verification_status}`,
+      `- 对抗验证：${evaluation.adversarial_verification_status}`,
       `- 运行时回放：${runtimeVerification.verification.status}`,
       "",
       "## 摘要",
@@ -3428,8 +3829,13 @@ export class Orchestrator {
           reusableExecutionContract?.required_evidence ?? [
             "Leave git-visible workspace changes tied to the objective.",
             "Leave artifacts that show what changed.",
-            "Pass the replayable verification commands locked into this contract."
+            "Pass the replayable verification commands locked into this contract.",
+            "Leave a machine-readable adversarial verification artifact after deterministic replay passes."
           ],
+        adversarial_verification_required:
+          draft?.adversarial_verification_required ??
+          reusableExecutionContract?.adversarial_verification_required ??
+          true,
         done_rubric:
           draft && draft.done_rubric.length > 0
             ? draft.done_rubric
@@ -3446,7 +3852,8 @@ export class Orchestrator {
           draft?.forbidden_shortcuts ??
           reusableExecutionContract?.forbidden_shortcuts ?? [
             "Do not claim success without replayable verification commands.",
-            "Do not treat unchanged workspace state as a completed execution step."
+            "Do not treat unchanged workspace state as a completed execution step.",
+            "Do not treat deterministic replay as the only verification layer for execution."
           ],
         expected_artifacts:
           draft?.expected_artifacts ??
@@ -3545,6 +3952,8 @@ export class Orchestrator {
 
     return {
       has_required_evidence: attemptContract.required_evidence.length > 0,
+      requires_adversarial_verification:
+        attemptContract.adversarial_verification_required === true,
       has_done_rubric: attemptContract.done_rubric.length > 0,
       has_failure_modes: attemptContract.failure_modes.length > 0,
       has_verification_plan: (attemptContract.verification_plan?.commands.length ?? 0) > 0,
@@ -3612,6 +4021,24 @@ export class Orchestrator {
       failureCode = "missing_attempt_contract";
       failureReason = `Attempt ${input.attempt.id} is missing attempt_contract.json. Dispatch is blocked until the contract is recreated.`;
       addCheck("attempt_contract_present", "failed", failureReason);
+    }
+
+    if (contractSummary?.requires_adversarial_verification) {
+      addCheck(
+        "adversarial_verification_required",
+        "passed",
+        "Execution contract explicitly requires adversarial verification."
+      );
+    } else if (!failureReason) {
+      failureCode = "missing_adversarial_verification_requirement";
+      failureReason = `Execution attempt ${input.attempt.id} is blocked before dispatch because attempt_contract.json does not explicitly require adversarial verification.`;
+      addCheck("adversarial_verification_required", "failed", failureReason);
+    } else {
+      addCheck(
+        "adversarial_verification_required",
+        "not_applicable",
+        "adversarial verification requirement check was skipped after an earlier preflight failure."
+      );
     }
 
     if (contractSummary?.has_done_rubric) {
@@ -3703,6 +4130,10 @@ export class Orchestrator {
       input.runId,
       input.attempt.id
     );
+    const failureSignal = deriveFailureSignalFromPreflight({
+      preflight: evaluation,
+      sourceRef: artifactPath
+    });
     await appendRunJournal(
       this.workspacePaths,
       createRunJournalEntry({
@@ -3711,6 +4142,8 @@ export class Orchestrator {
         type: failureReason ? "attempt.preflight.failed" : "attempt.preflight.passed",
         payload: {
           status: evaluation.status,
+          failure_class: failureSignal?.failure_class ?? null,
+          failure_policy_mode: failureSignal?.policy_mode ?? null,
           failure_code: evaluation.failure_code,
           message: evaluation.failure_reason,
           artifact_path: artifactPath
@@ -3841,7 +4274,7 @@ export class Orchestrator {
           }
         })
       );
-      await refreshRunWorkingContext(this.workspacePaths, runId);
+      await refreshRunOperatorSurface(this.workspacePaths, runId);
     });
   }
 
@@ -3877,7 +4310,7 @@ export class Orchestrator {
   }): Promise<{
     reason: string;
     message: string;
-    failureCode?: AttemptRuntimeVerification["failure_code"];
+    failureCode?: string;
     handoffBundleRef?: string | null;
   } | null> {
     const governance = await getRunGovernanceState(this.workspacePaths, input.runId);
@@ -3913,6 +4346,17 @@ export class Orchestrator {
         : null;
     if (runtimeVerificationBlocker) {
       return runtimeVerificationBlocker;
+    }
+
+    const adversarialVerificationBlocker =
+      input.latestAttempt.attempt_type === "execution"
+        ? this.getAutomaticResumeAdversarialVerificationBlocker({
+            handoffBundle: input.latestHandoffBundle,
+            handoffBundleRef: input.latestHandoffBundleRef
+          })
+        : null;
+    if (adversarialVerificationBlocker) {
+      return adversarialVerificationBlocker;
     }
 
     const restartRequiredEntry = this.getLatestAttemptJournalEntry(
@@ -4294,7 +4738,9 @@ export class Orchestrator {
   }): {
     reason: string;
     message: string;
-    failureCode?: AttemptRuntimeVerification["failure_code"];
+    failureClass?: string;
+    failurePolicyMode?: string;
+    failureCode?: string;
     handoffBundleRef?: string | null;
   } | null {
     if (input.handoffBundle?.runtime_verification?.status !== "failed") {
@@ -4305,6 +4751,8 @@ export class Orchestrator {
       case "no_git_changes":
         return {
           reason: "runtime_verification_failed",
+          failureClass: "runtime_verification_failed",
+          failurePolicyMode: "fail_closed",
           failureCode: "no_git_changes",
           message:
             "上一轮 execution 的运行时回放失败码是 no_git_changes，说明没有留下新的 git 可见改动，自动续跑已暂停。",
@@ -4313,6 +4761,37 @@ export class Orchestrator {
       default:
         return null;
     }
+  }
+
+  private getAutomaticResumeAdversarialVerificationBlocker(input: {
+    handoffBundle: AttemptHandoffBundle | null;
+    handoffBundleRef: string | null;
+  }): {
+    reason: string;
+    message: string;
+    failureClass?: string;
+    failurePolicyMode?: string;
+    failureCode?: string;
+    handoffBundleRef?: string | null;
+  } | null {
+    if (input.handoffBundle?.adversarial_verification?.status !== "failed") {
+      return null;
+    }
+
+    return {
+      reason: "adversarial_verification_failed",
+      failureClass: "adversarial_verification_failed",
+      failurePolicyMode: "fail_closed",
+      failureCode:
+        input.handoffBundle.adversarial_failure_code ??
+        input.handoffBundle.adversarial_verification.failure_code ??
+        undefined,
+      message:
+        input.handoffBundle.adversarial_verification.failure_reason ??
+        input.handoffBundle.adversarial_verification.summary ??
+        "上一轮 execution 的 adversarial verification 没有通过，自动续跑已暂停。",
+      handoffBundleRef: input.handoffBundleRef
+    };
   }
 
   private hasCheckpointBlocker(
@@ -4571,7 +5050,9 @@ export class Orchestrator {
     blocker?: {
       reason: string;
       message: string;
-      failureCode?: AttemptRuntimeVerification["failure_code"];
+      failureClass?: string;
+      failurePolicyMode?: string;
+      failureCode?: string;
       handoffBundleRef?: string | null;
     }
   ): Promise<void> {
@@ -4591,6 +5072,8 @@ export class Orchestrator {
         type: "run.auto_resume.blocked",
         payload: {
           reason: blocker?.reason ?? "manual_only_blocker",
+          failure_class: blocker?.failureClass ?? null,
+          failure_policy_mode: blocker?.failurePolicyMode ?? null,
           failure_code: blocker?.failureCode ?? null,
           handoff_bundle_ref: blocker?.handoffBundleRef ?? null,
           message
@@ -4604,7 +5087,7 @@ export class Orchestrator {
       imposedBy: "orchestrator",
       failureCode: blocker?.failureCode ?? null
     });
-    await refreshRunWorkingContext(this.workspacePaths, runId);
+    await refreshRunOperatorSurface(this.workspacePaths, runId);
   }
 
   private async persistAutomaticResumeExhausted(
@@ -4646,7 +5129,7 @@ export class Orchestrator {
       reason: message,
       imposedBy: "orchestrator"
     });
-    await refreshRunWorkingContext(this.workspacePaths, runId);
+    await refreshRunOperatorSurface(this.workspacePaths, runId);
   }
 
   private hasAutoResumeTerminalEvent(
@@ -4768,7 +5251,7 @@ export class Orchestrator {
     }
 
     await this.appendRunWorkspaceScopeBlockedEntry(run.id, current.latest_attempt_id, error);
-    await refreshRunWorkingContext(this.workspacePaths, run.id);
+    await refreshRunOperatorSurface(this.workspacePaths, run.id);
   }
 
   private async appendRunWorkspaceScopeBlockedEntry(
@@ -5099,3 +5582,11 @@ export {
   refreshRunWorkingContext,
   type RunWorkingContextView
 } from "./working-context.js";
+
+export {
+  buildRunBrief,
+  readRunBriefView,
+  refreshRunBrief,
+  refreshRunOperatorSurface,
+  type RunBriefView
+} from "./run-brief.js";

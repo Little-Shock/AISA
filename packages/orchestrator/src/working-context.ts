@@ -25,6 +25,7 @@ import {
   getRunGovernanceState,
   getRunWorkingContext,
   listAttempts,
+  listRunJournal,
   listRunSteers,
   resolveAttemptPaths,
   resolveRunPaths,
@@ -37,6 +38,16 @@ export type RunWorkingContextView = {
   working_context_ref: string | null;
   working_context_degraded: RunWorkingContextDegradedState;
 };
+
+export class RunWorkingContextWriteError extends Error {
+  readonly causeError: unknown;
+
+  constructor(message: string, causeError: unknown) {
+    super(message);
+    this.name = "RunWorkingContextWriteError";
+    this.causeError = causeError;
+  }
+}
 
 function toTimestamp(value: string | null | undefined): number {
   if (!value) {
@@ -240,7 +251,28 @@ function buildDegradedState(input: {
   governance: RunGovernanceState | null;
   latestAttempt: Attempt | null;
   latestSteer: RunSteer | null;
+  latestRefreshFailure: {
+    ts: string;
+    reason_code: string | null;
+    summary: string | null;
+  } | null;
 }): RunWorkingContextDegradedState {
+  const workingContextUpdatedAt = toTimestamp(input.workingContext?.updated_at);
+  const latestRefreshFailureAt = toTimestamp(input.latestRefreshFailure?.ts);
+
+  if (
+    input.latestRefreshFailure &&
+    (!input.workingContext || latestRefreshFailureAt > workingContextUpdatedAt)
+  ) {
+    return createRunWorkingContextDegradedState({
+      is_degraded: true,
+      reason_code: "context_write_failed",
+      summary:
+        input.latestRefreshFailure.summary ??
+        "working context 写入失败，当前现场不可信。"
+    });
+  }
+
   if (!input.workingContext) {
     return createRunWorkingContextDegradedState({
       is_degraded: true,
@@ -253,7 +285,6 @@ function buildDegradedState(input: {
     return input.workingContext.degraded;
   }
 
-  const workingContextUpdatedAt = toTimestamp(input.workingContext.updated_at);
   const latestSourceUpdatedAt = Math.max(
     toTimestamp(input.current?.updated_at),
     toTimestamp(input.automation?.updated_at),
@@ -424,7 +455,15 @@ export async function refreshRunWorkingContext(
   runId: string
 ): Promise<RunWorkingContext> {
   const workingContext = await buildRunWorkingContext(paths, runId);
-  await saveRunWorkingContext(paths, workingContext);
+  try {
+    await saveRunWorkingContext(paths, workingContext);
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    throw new RunWorkingContextWriteError(
+      `Failed to save working context for run ${runId}: ${reason}`,
+      error
+    );
+  }
   return workingContext;
 }
 
@@ -432,24 +471,43 @@ export async function readRunWorkingContextView(
   paths: WorkspacePaths,
   runId: string
 ): Promise<RunWorkingContextView> {
-  const [workingContext, current, automationControl, governanceState, attempts, steers] =
+  const [workingContext, current, automationControl, governanceState, attempts, steers, journal] =
     await Promise.all([
       getRunWorkingContext(paths, runId),
       getCurrentDecision(paths, runId),
       getRunAutomationControl(paths, runId),
       getRunGovernanceState(paths, runId),
       listAttempts(paths, runId),
-      listRunSteers(paths, runId)
+      listRunSteers(paths, runId),
+      listRunJournal(paths, runId)
     ]);
   const latestAttempt = pickLatestAttempt(attempts, current);
   const latestSteer = pickLatestSteer(steers);
+  const latestRefreshFailure = journal
+    .filter((entry) => entry.type === "run.working_context.refresh_failed")
+    .slice()
+    .sort((left, right) => toTimestamp(left.ts) - toTimestamp(right.ts))
+    .at(-1);
   const degraded = buildDegradedState({
     workingContext,
     current,
     automation: automationControl,
     governance: governanceState,
     latestAttempt,
-    latestSteer
+    latestSteer,
+    latestRefreshFailure: latestRefreshFailure
+      ? {
+          ts: latestRefreshFailure.ts,
+          reason_code:
+            typeof latestRefreshFailure.payload.reason_code === "string"
+              ? latestRefreshFailure.payload.reason_code
+              : null,
+          summary:
+            typeof latestRefreshFailure.payload.summary === "string"
+              ? latestRefreshFailure.payload.summary
+              : null
+        }
+      : null
   });
 
   return {

@@ -22,6 +22,7 @@ import {
   SELF_BOOTSTRAP_NEXT_TASK_PROMOTION_ARTIFACT_FILE_NAME,
   SELF_BOOTSTRAP_NEXT_TASK_SOURCE_ASSET_SNAPSHOT_FILE_NAME
 } from "./self-bootstrap-next-task.js";
+import { annotateRuntimeVerificationFailure } from "./failure-policy.js";
 
 export interface AttemptRuntimeVerificationOutcome {
   verification: AttemptRuntimeVerification;
@@ -448,7 +449,9 @@ async function writeVerificationArtifact(
   verification: AttemptRuntimeVerification
 ): Promise<AttemptRuntimeVerificationOutcome> {
   const artifactPath = attemptPaths.runtimeVerificationFile;
-  const parsed = AttemptRuntimeVerificationSchema.parse(verification);
+  const parsed = AttemptRuntimeVerificationSchema.parse(
+    annotateRuntimeVerificationFailure(verification)
+  );
   await writeJsonFile(artifactPath, parsed);
   return {
     verification: parsed,

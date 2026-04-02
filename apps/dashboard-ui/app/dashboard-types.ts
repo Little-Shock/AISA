@@ -181,6 +181,83 @@ export type RunWorkingContext = {
   updated_at: string;
 } | null;
 
+export type RunFailureSignal = {
+  failure_class: string;
+  policy_mode: string;
+  source_kind: string;
+  source_ref: string | null;
+  failure_code: string | null;
+  summary: string;
+} | null;
+
+export type RunBriefEvidenceRef = {
+  kind: string;
+  ref: string;
+  label: string;
+  summary: string | null;
+};
+
+export type RunBrief = {
+  run_id: string;
+  status: string;
+  headline: string;
+  summary: string;
+  failure_signal: RunFailureSignal;
+  blocker_summary: string | null;
+  recommended_next_action: string | null;
+  recommended_attempt_type: string | null;
+  waiting_for_human: boolean;
+  automation_mode: string;
+  latest_attempt_id: string | null;
+  primary_focus: string | null;
+  evidence_refs: RunBriefEvidenceRef[];
+  updated_at: string;
+} | null;
+
+export type RunLatestPreflightEvaluation = {
+  run_id: string;
+  attempt_id: string;
+  attempt_type: string;
+  status: string;
+  failure_class: string | null;
+  failure_policy_mode: string | null;
+  failure_code: string | null;
+  failure_reason: string | null;
+  checks: Array<{
+    code: string;
+    status: string;
+    message: string;
+  }>;
+  created_at: string;
+} | null;
+
+export type RunLatestHandoffBundle = {
+  run_id: string;
+  attempt_id: string;
+  failure_signal: RunFailureSignal;
+  failure_class: string | null;
+  failure_policy_mode: string | null;
+  failure_code: string | null;
+  adversarial_failure_code: string | null;
+  recommended_next_action: string | null;
+  recommended_attempt_type: string | null;
+  summary: string | null;
+  adversarial_verification: {
+    status: string;
+    verdict: string | null;
+    failure_code: string | null;
+    failure_reason: string | null;
+    output_refs: string[];
+  } | null;
+  source_refs: {
+    preflight_evaluation: string | null;
+    review_packet: string | null;
+    runtime_verification: string | null;
+    adversarial_verification: string | null;
+  };
+  generated_at: string;
+} | null;
+
 export type RunSummaryItem = {
   run: {
     id: string;
@@ -201,6 +278,13 @@ export type RunSummaryItem = {
   } | null;
   automation: RunAutomationControlView;
   governance: RunGovernanceState;
+  failure_signal: RunFailureSignal;
+  latest_preflight_evaluation: RunLatestPreflightEvaluation;
+  latest_preflight_evaluation_ref: string | null;
+  latest_handoff_bundle: RunLatestHandoffBundle;
+  latest_handoff_bundle_ref: string | null;
+  run_brief: RunBrief;
+  run_brief_ref: string | null;
   working_context: RunWorkingContext;
   working_context_ref: string | null;
   working_context_degraded: RunWorkingContextDegraded;
@@ -247,6 +331,13 @@ export type RunDetail = {
   } | null;
   automation: RunAutomationControlView;
   governance: RunGovernanceState;
+  failure_signal: RunFailureSignal;
+  latest_preflight_evaluation: RunLatestPreflightEvaluation;
+  latest_preflight_evaluation_ref: string | null;
+  latest_handoff_bundle: RunLatestHandoffBundle;
+  latest_handoff_bundle_ref: string | null;
+  run_brief: RunBrief;
+  run_brief_ref: string | null;
   working_context: RunWorkingContext;
   working_context_ref: string | null;
   working_context_degraded: RunWorkingContextDegraded;
@@ -280,6 +371,7 @@ export type RunDetail = {
       objective: string;
       success_criteria: string[];
       required_evidence: string[];
+      adversarial_verification_required: boolean;
       forbidden_shortcuts: string[];
       expected_artifacts: string[];
       verification_plan?: {
@@ -302,6 +394,7 @@ export type RunDetail = {
     } | null;
     evaluation: {
       verification_status: string;
+      adversarial_verification_status: string;
       recommendation: string;
       suggested_attempt_type: string | null;
       rationale: string;
@@ -311,6 +404,8 @@ export type RunDetail = {
     } | null;
     runtime_verification: {
       status: string;
+      failure_class: string | null;
+      failure_policy_mode: string | null;
       failure_code: string | null;
       failure_reason: string | null;
       changed_files: string[];
@@ -320,6 +415,22 @@ export type RunDetail = {
         passed: boolean;
         exit_code: number;
         expected_exit_code: number;
+      }>;
+    } | null;
+    adversarial_verification: {
+      status: string;
+      failure_class: string | null;
+      failure_policy_mode: string | null;
+      verdict: string | null;
+      failure_code: string | null;
+      failure_reason: string | null;
+      output_refs: string[];
+      commands: Array<{
+        purpose: string;
+        command: string;
+        exit_code: number;
+        status: string;
+        output_ref: string | null;
       }>;
     } | null;
     runtime_state: AttemptRuntimeState | null;

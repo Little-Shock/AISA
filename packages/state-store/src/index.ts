@@ -10,6 +10,7 @@ import {
 import { basename, dirname, join } from "node:path";
 import type {
   Attempt,
+  AttemptAdversarialVerification,
   AttemptContract,
   AttemptHeartbeat,
   AttemptEvaluationSynthesisRecord,
@@ -32,6 +33,7 @@ import type {
   Goal,
   RunGovernanceState,
   RunAutomationControl,
+  RunBrief,
   RunWorkingContext,
   RuntimeHealthSnapshot,
   Run,
@@ -43,6 +45,7 @@ import type {
 } from "@autoresearch/domain";
 import {
   AttemptSchema,
+  AttemptAdversarialVerificationSchema,
   AttemptContractSchema,
   AttemptHeartbeatSchema,
   AttemptEvaluationSynthesisRecordSchema,
@@ -62,6 +65,7 @@ import {
   EvalResultSchema,
   GoalSchema,
   RunAutomationControlSchema,
+  RunBriefSchema,
   RunGovernanceStateSchema,
   RunWorkingContextSchema,
   RuntimeHealthSnapshotSchema,
@@ -110,6 +114,7 @@ export interface RunPaths {
   contractFile: string;
   currentFile: string;
   automationFile: string;
+  runBriefFile: string;
   workingContextFile: string;
   governanceFile: string;
   reportFile: string;
@@ -131,6 +136,7 @@ export interface AttemptPaths {
   reviewOpinionsDir: string;
   preflightEvaluationFile: string;
   runtimeVerificationFile: string;
+  adversarialVerificationFile: string;
   heartbeatFile: string;
   runtimeStateFile: string;
   runtimeEventsFile: string;
@@ -162,6 +168,7 @@ export function resolveRunPaths(paths: WorkspacePaths, runId: string): RunPaths 
     contractFile: join(runDir, "contract.json"),
     currentFile: join(runDir, "current.json"),
     automationFile: join(runDir, "automation.json"),
+    runBriefFile: join(runDir, "run-brief.json"),
     workingContextFile: join(runDir, "working-context.json"),
     governanceFile: join(runDir, "governance.json"),
     reportFile: join(runDir, "report.md"),
@@ -195,6 +202,11 @@ export function resolveAttemptPaths(
     reviewOpinionsDir: join(attemptDir, "review_opinions"),
     preflightEvaluationFile: join(attemptDir, "artifacts", "preflight-evaluation.json"),
     runtimeVerificationFile: join(attemptDir, "artifacts", "runtime-verification.json"),
+    adversarialVerificationFile: join(
+      attemptDir,
+      "artifacts",
+      "adversarial-verification.json"
+    ),
     heartbeatFile: join(attemptDir, "artifacts", "heartbeat.json"),
     runtimeStateFile: join(attemptDir, "artifacts", "runtime-state.json"),
     runtimeEventsFile: join(attemptDir, "artifacts", "runtime-events.ndjson"),
@@ -508,6 +520,26 @@ export async function saveRunWorkingContext(
 ): Promise<void> {
   const runPaths = await ensureRunDirectories(paths, workingContext.run_id);
   await writeJsonFile(runPaths.workingContextFile, workingContext);
+}
+
+export async function saveRunBrief(
+  paths: WorkspacePaths,
+  runBrief: RunBrief
+): Promise<void> {
+  const runPaths = await ensureRunDirectories(paths, runBrief.run_id);
+  await writeJsonFile(runPaths.runBriefFile, runBrief);
+}
+
+export async function getRunBrief(
+  paths: WorkspacePaths,
+  runId: string
+): Promise<RunBrief | null> {
+  try {
+    const runBrief = await readJsonFile<RunBrief>(resolveRunPaths(paths, runId).runBriefFile);
+    return RunBriefSchema.parse(runBrief);
+  } catch {
+    return null;
+  }
 }
 
 export async function getRunWorkingContext(
@@ -847,6 +879,18 @@ export async function saveAttemptRuntimeVerification(
   await writeJsonFile(attemptPaths.runtimeVerificationFile, verification);
 }
 
+export async function saveAttemptAdversarialVerification(
+  paths: WorkspacePaths,
+  verification: AttemptAdversarialVerification
+): Promise<void> {
+  const attemptPaths = await ensureAttemptDirectories(
+    paths,
+    verification.run_id,
+    verification.attempt_id
+  );
+  await writeJsonFile(attemptPaths.adversarialVerificationFile, verification);
+}
+
 export async function getAttemptEvaluation(
   paths: WorkspacePaths,
   runId: string,
@@ -960,6 +1004,21 @@ export async function getAttemptRuntimeVerification(
       resolveAttemptPaths(paths, runId, attemptId).runtimeVerificationFile
     );
     return AttemptRuntimeVerificationSchema.parse(verification);
+  } catch {
+    return null;
+  }
+}
+
+export async function getAttemptAdversarialVerification(
+  paths: WorkspacePaths,
+  runId: string,
+  attemptId: string
+): Promise<AttemptAdversarialVerification | null> {
+  try {
+    const verification = await readJsonFile<AttemptAdversarialVerification>(
+      resolveAttemptPaths(paths, runId, attemptId).adversarialVerificationFile
+    );
+    return AttemptAdversarialVerificationSchema.parse(verification);
   } catch {
     return null;
   }

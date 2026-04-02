@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -15,6 +15,7 @@ import {
 } from "../packages/domain/src/index.ts";
 import {
   Orchestrator,
+  refreshRunOperatorSurface,
   readRunWorkingContextView,
   resolveRuntimeLayout,
   type RuntimeLayout
@@ -23,6 +24,8 @@ import {
   appendRunJournal,
   ensureWorkspace,
   getRunWorkingContext,
+  listRunJournal,
+  resolveRunPaths,
   resolveWorkspacePaths,
   saveAttempt,
   saveAttemptContract,
@@ -308,6 +311,79 @@ async function main(): Promise<void> {
     assert.equal(staleView.working_context_degraded.is_degraded, true);
     assert.equal(staleView.working_context_degraded.reason_code, "context_stale");
 
+    const writeFailedRun = createRun({
+      title: "Write failed working context verification",
+      description: "Read path should expose a failed working context refresh explicitly.",
+      success_criteria: ["Return context_write_failed instead of pretending the snapshot is usable."],
+      constraints: [],
+      owner_id: "test-owner",
+      workspace_root: rootDir
+    });
+    await saveRun(workspacePaths, writeFailedRun);
+    await saveCurrentDecision(
+      workspacePaths,
+      createCurrentDecision({
+        run_id: writeFailedRun.id,
+        run_status: "running",
+        summary: "Write a first working context snapshot."
+      })
+    );
+    await refreshRunOperatorSurface(workspacePaths, writeFailedRun.id);
+
+    const brokenWorkingContextPath = resolveRunPaths(
+      workspacePaths,
+      writeFailedRun.id
+    ).workingContextFile;
+    await rm(brokenWorkingContextPath, { force: true });
+    await mkdir(brokenWorkingContextPath, { recursive: true });
+    await saveCurrentDecision(
+      workspacePaths,
+      createCurrentDecision({
+        run_id: writeFailedRun.id,
+        run_status: "waiting_steer",
+        summary: "Broken working context path should surface an explicit degraded state.",
+        blocking_reason: "Broken working context path should surface an explicit degraded state.",
+        waiting_for_human: true
+      })
+    );
+    await refreshRunOperatorSurface(workspacePaths, writeFailedRun.id);
+
+    const writeFailedView = await readRunWorkingContextView(
+      workspacePaths,
+      writeFailedRun.id
+    );
+    assert.equal(writeFailedView.working_context, null);
+    assert.equal(writeFailedView.working_context_degraded.is_degraded, true);
+    assert.equal(
+      writeFailedView.working_context_degraded.reason_code,
+      "context_write_failed"
+    );
+    assert.ok(
+      writeFailedView.working_context_degraded.summary?.includes("写入失败")
+    );
+    const writeFailedJournal = await listRunJournal(workspacePaths, writeFailedRun.id);
+    assert.ok(
+      writeFailedJournal.some(
+        (entry) => entry.type === "run.working_context.refresh_failed"
+      )
+    );
+
+    await rm(brokenWorkingContextPath, { recursive: true, force: true });
+    await saveCurrentDecision(
+      workspacePaths,
+      createCurrentDecision({
+        run_id: writeFailedRun.id,
+        run_status: "running",
+        summary: "Restore the working context path and refresh again."
+      })
+    );
+    await refreshRunOperatorSurface(workspacePaths, writeFailedRun.id);
+    const recoveredWriteFailedView = await readRunWorkingContextView(
+      workspacePaths,
+      writeFailedRun.id
+    );
+    assert.equal(recoveredWriteFailedView.working_context_degraded.is_degraded, false);
+
     console.log(
       JSON.stringify(
         {
@@ -318,7 +394,8 @@ async function main(): Promise<void> {
             (item) => item.kind
           ),
           missing_reason_code: missingView.working_context_degraded.reason_code,
-          stale_reason_code: staleView.working_context_degraded.reason_code
+          stale_reason_code: staleView.working_context_degraded.reason_code,
+          write_failed_reason_code: writeFailedView.working_context_degraded.reason_code
         },
         null,
         2

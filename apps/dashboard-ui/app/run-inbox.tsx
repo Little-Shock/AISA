@@ -247,12 +247,12 @@ export function InterventionQueuePanel({
                 <MeasuredText
                   className="queue-card-summary"
                   lines={2}
-                  text={truncateText(localizeUiText(state.reason), 180)}
+                  text={truncateText(localizeUiText(run.run_brief?.headline ?? state.reason), 180)}
                 />
                 <MeasuredText
                   className="queue-card-summary"
                   lines={2}
-                  text={truncateText(localizeUiText(state.recovery_hint), 180)}
+                  text={truncateText(localizeUiText(run.run_brief?.summary ?? state.recovery_hint), 180)}
                 />
                 <div className="queue-card-meta">
                   {run.current?.recommended_next_action
@@ -397,17 +397,27 @@ export function RunInboxPanel({
             const signalBadges = deriveRunSignalBadges(item, nowTs).slice(0, 4);
             const inboxReasons = deriveRunInboxReasons(item, activeFilter, focusLens, nowTs);
             const taskFocus = truncateText(
-              localizeUiText(item.task_focus || item.run.description),
+              localizeUiText(
+                item.run_brief?.primary_focus ?? item.task_focus ?? item.run.description
+              ),
               120
             );
             const taskSummary = truncateText(
               localizeUiText(
-                item.current?.blocking_reason ?? item.current?.summary ?? item.run.description
+                item.run_brief?.headline ??
+                  item.latest_handoff_bundle?.summary ??
+                  item.current?.blocking_reason ??
+                  item.current?.summary ??
+                  item.run.description
               ),
               110
             );
             const governanceHeadline = truncateText(
-              localizeUiText(item.governance?.context_summary.headline ?? ""),
+              localizeUiText(
+                item.latest_preflight_evaluation?.failure_reason ??
+                  item.governance?.context_summary.headline ??
+                  ""
+              ),
               110
             );
             const workspaceLabel = abbreviateWorkspace(item.run.workspace_root);
@@ -502,6 +512,13 @@ export function RunInboxPanel({
                   ) : null}
                 </div>
                 <MeasuredText className="run-card-summary" lines={3} text={taskSummary} />
+                {item.run_brief?.summary ? (
+                  <MeasuredText
+                    className="run-card-summary"
+                    lines={2}
+                    text={truncateText(localizeUiText(item.run_brief.summary), 120)}
+                  />
+                ) : null}
                 {liveProgress ? (
                   <MeasuredText className="run-card-summary" lines={2} text={liveProgress} />
                 ) : null}

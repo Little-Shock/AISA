@@ -29,10 +29,11 @@ import {
   lockRunWorkspaceRoot,
   loadSelfBootstrapNextTaskActiveEntry,
   Orchestrator,
+  readRunBriefView,
   readRunWorkingContextView,
   repairRunManagedWorkspace,
   ensureRunManagedWorkspace,
-  refreshRunWorkingContext,
+  refreshRunOperatorSurface,
   resolveRuntimeLayout,
   SELF_BOOTSTRAP_NEXT_TASK_ACTIVE_ENTRY_SNAPSHOT_FILE_NAME,
   syncRuntimeLayoutHint,
@@ -41,13 +42,16 @@ import {
 import { buildSelfBootstrapRunTemplate, generateInitialPlan } from "@autoresearch/planner";
 import {
   appendRunJournal,
+  getAttemptAdversarialVerification,
   getAttemptContract,
   getAttemptContext,
   ensureWorkspace,
   getAttemptEvaluation,
+  getAttemptHandoffBundle,
   getAttemptHeartbeat,
   getAttemptReviewPacket,
   getAttemptLogExcerpt,
+  getAttemptPreflightEvaluation,
   getAttemptResult,
   getAttemptRuntimeState,
   getAttemptRuntimeVerification,
@@ -71,6 +75,7 @@ import {
   listRunSteers,
   listSteers,
   listWorkerRuns,
+  resolveAttemptPaths,
   resolveRunPaths,
   resolveWorkspacePaths,
   saveCurrentDecision,
@@ -278,6 +283,7 @@ export async function buildServer(
       result,
       evaluation,
       runtimeVerification,
+      adversarialVerification,
       runtimeState,
       runtimeEvents,
       heartbeat,
@@ -290,6 +296,7 @@ export async function buildServer(
       getAttemptResult(workspacePaths, runId, attempt.id),
       getAttemptEvaluation(workspacePaths, runId, attempt.id),
       getAttemptRuntimeVerification(workspacePaths, runId, attempt.id),
+      getAttemptAdversarialVerification(workspacePaths, runId, attempt.id),
       getAttemptRuntimeState(workspacePaths, runId, attempt.id),
       listAttemptRuntimeEvents(workspacePaths, runId, attempt.id, 80),
       getAttemptHeartbeat(workspacePaths, runId, attempt.id),
@@ -305,6 +312,7 @@ export async function buildServer(
       result,
       evaluation,
       runtime_verification: runtimeVerification,
+      adversarial_verification: adversarialVerification,
       runtime_state: runtimeState,
       runtime_events: runtimeEvents,
       heartbeat,
@@ -314,8 +322,87 @@ export async function buildServer(
     };
   };
 
+  const buildLatestAttemptSurface = async (input: {
+    runId: string;
+    current: Awaited<ReturnType<typeof getCurrentDecision>> | null;
+    attempts: Awaited<ReturnType<typeof listAttempts>>;
+  }) => {
+    const latestAttempt =
+      input.attempts.find((attempt) => attempt.id === input.current?.latest_attempt_id) ??
+      input.attempts.at(-1) ??
+      null;
+    if (!latestAttempt) {
+      return {
+        latestAttempt,
+        latest_preflight_evaluation: null,
+        latest_preflight_evaluation_ref: null,
+        latest_handoff_bundle: null,
+        latest_handoff_bundle_ref: null
+      };
+    }
+
+    const orderedCandidates = [
+      latestAttempt,
+      ...input.attempts
+        .slice()
+        .reverse()
+        .filter((attempt) => attempt.id !== latestAttempt.id)
+    ];
+    let latestPreflightEvaluation = null;
+    let latestPreflightAttempt = null;
+    let latestHandoffBundle = null;
+    let latestHandoffAttempt = null;
+
+    for (const candidate of orderedCandidates) {
+      const [candidatePreflight, candidateHandoff] = await Promise.all([
+        getAttemptPreflightEvaluation(workspacePaths, input.runId, candidate.id),
+        getAttemptHandoffBundle(workspacePaths, input.runId, candidate.id)
+      ]);
+
+      if (!latestPreflightEvaluation && candidatePreflight) {
+        latestPreflightEvaluation = candidatePreflight;
+        latestPreflightAttempt = candidate;
+      }
+
+      if (!latestHandoffBundle && candidateHandoff) {
+        latestHandoffBundle = candidateHandoff;
+        latestHandoffAttempt = candidate;
+      }
+
+      if (latestPreflightEvaluation && latestHandoffBundle) {
+        break;
+      }
+    }
+
+    return {
+      latestAttempt,
+      latest_preflight_evaluation: latestPreflightEvaluation,
+      latest_preflight_evaluation_ref: latestPreflightEvaluation
+        ? relative(
+            workspacePaths.rootDir,
+            resolveAttemptPaths(
+              workspacePaths,
+              input.runId,
+              latestPreflightAttempt!.id
+            ).preflightEvaluationFile
+          )
+        : null,
+      latest_handoff_bundle: latestHandoffBundle,
+      latest_handoff_bundle_ref: latestHandoffBundle
+        ? relative(
+            workspacePaths.rootDir,
+            resolveAttemptPaths(
+              workspacePaths,
+              input.runId,
+              latestHandoffAttempt!.id
+            ).handoffBundleFile
+          )
+        : null
+    };
+  };
+
   const buildRunDetailPayload = async (runId: string) => {
-    const [run, current, automation, governance, attempts, steers, journal, report, workingContextView] = await Promise.all([
+    const [run, current, automation, governance, attempts, steers, journal, report, workingContextView, runBriefView] = await Promise.all([
       getRun(workspacePaths, runId),
       getCurrentDecision(workspacePaths, runId),
       getRunAutomationControl(workspacePaths, runId),
@@ -324,8 +411,14 @@ export async function buildServer(
       listRunSteers(workspacePaths, runId),
       listRunJournal(workspacePaths, runId),
       getRunReport(workspacePaths, runId),
-      readRunWorkingContextView(workspacePaths, runId)
+      readRunWorkingContextView(workspacePaths, runId),
+      readRunBriefView(workspacePaths, runId)
     ]);
+    const latestAttemptSurface = await buildLatestAttemptSurface({
+      runId,
+      current,
+      attempts
+    });
     const automationView =
       automation ??
       createRunAutomationControl({
@@ -340,10 +433,7 @@ export async function buildServer(
         })
       )
     );
-    const latestAttempt =
-      attempts.find((attempt) => attempt.id === current?.latest_attempt_id) ??
-      attempts.at(-1) ??
-      null;
+    const latestAttempt = latestAttemptSurface.latestAttempt;
     const latestAttemptDetail =
       attemptDetails.find((detail) => detail.attempt.id === latestAttempt?.id) ?? null;
     const runHealth = assessRunHealth({
@@ -360,6 +450,16 @@ export async function buildServer(
       current,
       automation: automationView,
       governance,
+      failure_signal:
+        runBriefView.run_brief?.failure_signal ??
+        latestAttemptSurface.latest_handoff_bundle?.failure_signal ??
+        null,
+      latest_preflight_evaluation: latestAttemptSurface.latest_preflight_evaluation,
+      latest_preflight_evaluation_ref: latestAttemptSurface.latest_preflight_evaluation_ref,
+      latest_handoff_bundle: latestAttemptSurface.latest_handoff_bundle,
+      latest_handoff_bundle_ref: latestAttemptSurface.latest_handoff_bundle_ref,
+      run_brief: runBriefView.run_brief,
+      run_brief_ref: runBriefView.run_brief_ref,
       working_context: workingContextView.working_context,
       working_context_ref: workingContextView.working_context_ref,
       working_context_degraded: workingContextView.working_context_degraded,
@@ -374,22 +474,25 @@ export async function buildServer(
   };
 
   const buildRunSummaryItem = async (run: Awaited<ReturnType<typeof listRuns>>[number]) => {
-    const [current, automation, governance, attempts, workingContextView] = await Promise.all([
+    const [current, automation, governance, attempts, workingContextView, runBriefView] = await Promise.all([
       getCurrentDecision(workspacePaths, run.id),
       getRunAutomationControl(workspacePaths, run.id),
       getRunGovernanceState(workspacePaths, run.id),
       listAttempts(workspacePaths, run.id),
-      readRunWorkingContextView(workspacePaths, run.id)
+      readRunWorkingContextView(workspacePaths, run.id),
+      readRunBriefView(workspacePaths, run.id)
     ]);
+    const latestAttemptSurface = await buildLatestAttemptSurface({
+      runId: run.id,
+      current,
+      attempts
+    });
     const automationView =
       automation ??
       createRunAutomationControl({
         run_id: run.id
       });
-    const latestAttempt =
-      attempts.find((attempt) => attempt.id === current?.latest_attempt_id) ??
-      attempts.at(-1) ??
-      null;
+    const latestAttempt = latestAttemptSurface.latestAttempt;
     const [latestContract, latestRuntimeState, latestHeartbeat] = await Promise.all([
       latestAttempt
         ? getAttemptContract(workspacePaths, run.id, latestAttempt.id)
@@ -407,6 +510,16 @@ export async function buildServer(
       current,
       automation: automationView,
       governance,
+      failure_signal:
+        runBriefView.run_brief?.failure_signal ??
+        latestAttemptSurface.latest_handoff_bundle?.failure_signal ??
+        null,
+      latest_preflight_evaluation: latestAttemptSurface.latest_preflight_evaluation,
+      latest_preflight_evaluation_ref: latestAttemptSurface.latest_preflight_evaluation_ref,
+      latest_handoff_bundle: latestAttemptSurface.latest_handoff_bundle,
+      latest_handoff_bundle_ref: latestAttemptSurface.latest_handoff_bundle_ref,
+      run_brief: runBriefView.run_brief,
+      run_brief_ref: runBriefView.run_brief_ref,
       working_context: workingContextView.working_context,
       working_context_ref: workingContextView.working_context_ref,
       working_context_degraded: workingContextView.working_context_degraded,
@@ -434,6 +547,7 @@ export async function buildServer(
       latest_attempt_runtime_state: latestRuntimeState,
       latest_attempt_heartbeat: latestHeartbeat,
       task_focus:
+        runBriefView.run_brief?.primary_focus ??
         workingContextView.working_context?.current_focus ??
         latestContract?.objective ??
         latestAttempt?.objective ??
@@ -599,7 +713,7 @@ export async function buildServer(
           }
         })
       );
-      await refreshRunWorkingContext(workspacePaths, run.id);
+      await refreshRunOperatorSurface(workspacePaths, run.id);
 
       return reply.code(201).send({ run, current });
     } catch (error) {
@@ -746,7 +860,7 @@ export async function buildServer(
       );
       await activateRunAutomation(run.id, "control-api");
     }
-    await refreshRunWorkingContext(workspacePaths, run.id);
+    await refreshRunOperatorSurface(workspacePaths, run.id);
 
     return reply.code(201).send({
       run,
@@ -802,7 +916,7 @@ export async function buildServer(
           payload: {}
         })
       );
-      await refreshRunWorkingContext(workspacePaths, runId);
+      await refreshRunOperatorSurface(workspacePaths, runId);
 
       return { current: nextCurrent };
     } catch (error) {
@@ -866,7 +980,7 @@ export async function buildServer(
             }
           })
         );
-        await refreshRunWorkingContext(workspacePaths, runId);
+        await refreshRunOperatorSurface(workspacePaths, runId);
 
         return {
           run: ensuredRun,
@@ -935,7 +1049,7 @@ export async function buildServer(
             }
           })
         );
-        await refreshRunWorkingContext(workspacePaths, runId);
+        await refreshRunOperatorSurface(workspacePaths, runId);
 
         return {
           run: repair.run,
@@ -994,7 +1108,7 @@ export async function buildServer(
           }
         })
       );
-      await refreshRunWorkingContext(workspacePaths, runId);
+      await refreshRunOperatorSurface(workspacePaths, runId);
 
       return reply.code(201).send({ steer: runSteer, current: nextCurrent });
     } catch {

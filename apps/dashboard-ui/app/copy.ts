@@ -169,11 +169,17 @@ const ACTIVITY_LABELS: Record<string, string> = {
   "attempt.completed": "尝试已完成",
   "attempt.failed": "尝试失败",
   "attempt.recovery_required": "尝试需要人工恢复",
+  "attempt.preflight.passed": "发车前检查通过",
+  "attempt.preflight.failed": "发车前检查失败",
   "attempt.verification.passed": "回放验证通过",
   "attempt.verification.failed": "回放验证失败",
+  "attempt.adversarial_verification.passed": "对抗验证通过",
+  "attempt.adversarial_verification.failed": "对抗验证失败",
   "attempt.checkpoint.created": "检查点已创建",
   "attempt.checkpoint.blocked": "检查点被阻塞",
-  "attempt.checkpoint.skipped": "检查点已跳过"
+  "attempt.checkpoint.skipped": "检查点已跳过",
+  "run.working_context.refresh_failed": "运行现场写入失败",
+  "run.auto_resume.blocked": "自动续跑已阻塞"
 };
 
 export function localizeUiText(value: string | null | undefined): string {

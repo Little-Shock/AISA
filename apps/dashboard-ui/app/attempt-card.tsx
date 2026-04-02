@@ -67,6 +67,10 @@ export function AttemptCard({
           label="回放"
           value={statusLabel(detail.runtime_verification?.status ?? "未运行")}
         />
+        <MiniMetric
+          label="对抗"
+          value={statusLabel(detail.adversarial_verification?.status ?? "未运行")}
+        />
         <MiniMetric label="发现" value={String(detail.result?.findings.length ?? 0)} />
       </div>
 
@@ -115,6 +119,11 @@ export function AttemptCard({
               {localizeUiText(detail.runtime_verification.failure_reason)}
             </Callout>
           ) : null}
+          {detail.adversarial_verification?.failure_reason ? (
+            <Callout tone="rose" title="对抗验证失败原因">
+              {localizeUiText(detail.adversarial_verification.failure_reason)}
+            </Callout>
+          ) : null}
           {detail.runtime_state?.error ? (
             <Callout tone="rose" title="运行错误">
               {localizeUiText(detail.runtime_state.error)}
@@ -130,6 +139,7 @@ export function AttemptCard({
                 `目标进度：${detail.evaluation.goal_progress.toFixed(2)}`,
                 `证据质量：${detail.evaluation.evidence_quality.toFixed(2)}`,
                 `验证状态：${statusLabel(detail.evaluation.verification_status)}`,
+                `对抗验证：${statusLabel(detail.evaluation.adversarial_verification_status)}`,
                 "",
                 localizeUiText(detail.evaluation.rationale)
               ].join("\n")}

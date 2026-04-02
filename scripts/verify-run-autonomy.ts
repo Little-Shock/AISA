@@ -24,10 +24,10 @@ import {
 import {
   appendRunJournal,
   ensureWorkspace,
-    getAttemptHandoffBundle,
-    getAttemptReviewPacket,
-    getRunAutomationControl,
-    getCurrentDecision,
+  getAttemptHandoffBundle,
+  getAttemptReviewPacket,
+  getRunAutomationControl,
+  getCurrentDecision,
   listAttempts,
   listRunJournal,
   resolveAttemptPaths,
@@ -35,11 +35,11 @@ import {
   saveAttempt,
   saveAttemptContract,
   saveAttemptResult,
-    saveAttemptRuntimeVerification,
-    saveCurrentDecision,
-    saveRun,
-    saveRunAutomationControl
-  } from "../packages/state-store/src/index.js";
+  saveAttemptRuntimeVerification,
+  saveCurrentDecision,
+  saveRun,
+  saveRunAutomationControl
+} from "../packages/state-store/src/index.js";
 
 type CaseResult = {
   id: string;
@@ -77,11 +77,9 @@ class AutoResumeExecutionAdapter {
     if (input.attempt.attempt_type !== "execution") {
       throw new Error("Failed execution should auto-resume through execution.");
     }
-
-    await writeFile(
-      join(input.attempt.workspace_root, "execution-change.md"),
-      `execution change from ${input.attempt.id}\n`,
-      "utf8"
+    const artifacts = await writeExecutionCompletionArtifacts(
+      input.attempt.workspace_root,
+      input.attempt.id
     );
 
     return {
@@ -97,7 +95,7 @@ class AutoResumeExecutionAdapter {
         questions: [],
         recommended_next_steps: [],
         confidence: 0.88,
-        artifacts: [{ type: "patch", path: "artifacts/diff.patch" }]
+        artifacts
       },
       reportMarkdown: "# fake",
       exitCode: 0
@@ -157,11 +155,9 @@ class CheckpointExecutionAdapter {
       input.attempt.objective,
       /clean git workspace|提交现场|checkpoint/u
     );
-
-    await writeFile(
-      join(input.attempt.workspace_root, "execution-change.md"),
-      `execution change from ${input.attempt.id}\n`,
-      "utf8"
+    const artifacts = await writeExecutionCompletionArtifacts(
+      input.attempt.workspace_root,
+      input.attempt.id
     );
 
     return {
@@ -177,7 +173,7 @@ class CheckpointExecutionAdapter {
         questions: [],
         recommended_next_steps: [],
         confidence: 0.8,
-        artifacts: [{ type: "patch", path: "artifacts/diff.patch" }]
+        artifacts
       },
       reportMarkdown: "# fake",
       exitCode: 0
@@ -199,11 +195,9 @@ class RecoveryExecutionAdapter {
     if (input.attempt.attempt_type !== "execution") {
       throw new Error("Recovery case should only dispatch execution.");
     }
-
-    await writeFile(
-      join(input.attempt.workspace_root, "execution-change.md"),
-      `execution change from ${input.attempt.id}\n`,
-      "utf8"
+    const artifacts = await writeExecutionCompletionArtifacts(
+      input.attempt.workspace_root,
+      input.attempt.id
     );
 
     return {
@@ -219,7 +213,7 @@ class RecoveryExecutionAdapter {
         questions: [],
         recommended_next_steps: [],
         confidence: 0.9,
-        artifacts: [{ type: "patch", path: "artifacts/diff.patch" }]
+        artifacts
       },
       reportMarkdown: "# fake",
       exitCode: 0
@@ -241,11 +235,9 @@ class ContinuingExecutionAdapter {
     if (input.attempt.attempt_type !== "execution") {
       throw new Error("Continued execution case should stay in execution.");
     }
-
-    await writeFile(
-      join(input.attempt.workspace_root, "execution-change.md"),
-      `execution change from ${input.attempt.id}\n`,
-      "utf8"
+    const artifacts = await writeExecutionCompletionArtifacts(
+      input.attempt.workspace_root,
+      input.attempt.id
     );
 
     return {
@@ -261,7 +253,7 @@ class ContinuingExecutionAdapter {
         questions: [],
         recommended_next_steps: ["Continue the verified execution mainline."],
         confidence: 0.9,
-        artifacts: [{ type: "patch", path: "artifacts/diff.patch" }]
+        artifacts
       },
       reportMarkdown: "# fake",
       exitCode: 0
@@ -283,11 +275,9 @@ class FastRetryExecutionAdapter {
     if (input.attempt.attempt_type !== "execution") {
       throw new Error("Rate-limited execution retry should stay in execution.");
     }
-
-    await writeFile(
-      join(input.attempt.workspace_root, "execution-change.md"),
-      `execution change from ${input.attempt.id}\n`,
-      "utf8"
+    const artifacts = await writeExecutionCompletionArtifacts(
+      input.attempt.workspace_root,
+      input.attempt.id
     );
 
     return {
@@ -303,7 +293,7 @@ class FastRetryExecutionAdapter {
         questions: [],
         recommended_next_steps: [],
         confidence: 0.86,
-        artifacts: [{ type: "patch", path: "artifacts/diff.patch" }]
+        artifacts
       },
       reportMarkdown: "# fake",
       exitCode: 0
@@ -508,6 +498,71 @@ async function writeExecutionWorkspacePackage(rootDir: string): Promise<void> {
   );
   await mkdir(join(rootDir, "node_modules"), { recursive: true });
   await writeFile(join(rootDir, "node_modules", ".placeholder"), "toolchain\n", "utf8");
+}
+
+async function writeAdversarialVerificationFixture(
+  workspaceRoot: string,
+  attemptId: string
+): Promise<void> {
+  const outputDir = join(workspaceRoot, "artifacts", "adversarial");
+  await mkdir(outputDir, { recursive: true });
+  const outputRef = join(outputDir, `${attemptId}.txt`);
+  await writeFile(outputRef, `adversarial probe passed for ${attemptId}\n`, "utf8");
+  await writeFile(
+    join(workspaceRoot, "artifacts", "adversarial-verification.json"),
+    JSON.stringify(
+      {
+        summary: "Adversarial verification passed after deterministic replay.",
+        verdict: "pass",
+        checks: [
+          {
+            code: "non_happy_path",
+            status: "passed",
+            message: "A non-happy-path probe stayed green."
+          }
+        ],
+        commands: [
+          {
+            purpose: "probe repeated execution output",
+            command: `test -f execution-change.md && rg -n "^execution change from ${attemptId}$" execution-change.md`,
+            exit_code: 0,
+            status: "passed",
+            output_ref: "artifacts/adversarial/" + `${attemptId}.txt`
+          }
+        ],
+        output_refs: ["artifacts/adversarial/" + `${attemptId}.txt`]
+      },
+      null,
+      2
+    ) + "\n",
+    "utf8"
+  );
+}
+
+async function writeExecutionCompletionArtifacts(
+  workspaceRoot: string,
+  attemptId: string
+): Promise<WorkerWriteback["artifacts"]> {
+  await writeFile(join(workspaceRoot, "execution-change.md"), `execution change from ${attemptId}\n`, "utf8");
+  await mkdir(join(workspaceRoot, "artifacts"), { recursive: true });
+  await writeFile(
+    join(workspaceRoot, "artifacts", "diff.patch"),
+    [
+      "diff --git a/execution-change.md b/execution-change.md",
+      "new file mode 100644",
+      "--- /dev/null",
+      "+++ b/execution-change.md",
+      "@@ -0,0 +1 @@",
+      `+execution change from ${attemptId}`
+    ].join("\n") + "\n",
+    "utf8"
+  );
+  await writeAdversarialVerificationFixture(workspaceRoot, attemptId);
+
+  return [
+    { type: "patch", path: "artifacts/diff.patch" },
+    { type: "test_result", path: "artifacts/adversarial-verification.json" }
+  ];
 }
 
 async function runCommand(rootDir: string, args: string[]): Promise<void> {
@@ -1129,6 +1184,7 @@ async function verifyRecoveryAutoResumesExecution(): Promise<void> {
       "git-visible workspace changes",
       "a replayable verification command that checks the execution change"
     ],
+    adversarial_verification_required: true,
     forbidden_shortcuts: ["do not claim success without replayable verification"],
     expected_artifacts: ["execution-change.md"],
     verification_plan: {
@@ -2340,6 +2396,10 @@ async function verifyVerifiedExecutionContinueDoesNotPauseForHuman(): Promise<vo
       ended_at: new Date().toISOString()
     }
   );
+  const previousExecutionArtifacts = await writeExecutionCompletionArtifacts(
+    rootDir,
+    previousExecution.id
+  );
 
   await saveAttempt(workspacePaths, previousExecution);
   await saveAttemptResult(workspacePaths, run.id, previousExecution.id, {
@@ -2354,7 +2414,7 @@ async function verifyVerifiedExecutionContinueDoesNotPauseForHuman(): Promise<vo
     questions: [],
     recommended_next_steps: ["Continue the verified execution mainline."],
     confidence: 0.9,
-    artifacts: [{ type: "patch", path: "artifacts/diff.patch" }]
+    artifacts: previousExecutionArtifacts
   });
   await saveCurrentDecision(
     workspacePaths,

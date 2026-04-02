@@ -265,6 +265,38 @@ export const RunWorkingContextDegradedStateSchema = z.object({
   summary: z.string().nullable().default(null)
 });
 
+export const RunFailureClassSchema = z.enum([
+  "preflight_blocked",
+  "runtime_verification_failed",
+  "adversarial_verification_failed",
+  "handoff_incomplete",
+  "working_context_degraded",
+  "run_brief_degraded"
+]);
+
+export const RunFailurePolicyModeSchema = z.enum([
+  "fail_closed",
+  "soft_degrade"
+]);
+
+export const RunFailureSourceKindSchema = z.enum([
+  "preflight_evaluation",
+  "runtime_verification",
+  "adversarial_verification",
+  "handoff_bundle",
+  "working_context",
+  "run_brief"
+]);
+
+export const RunFailureSignalSchema = z.object({
+  failure_class: RunFailureClassSchema,
+  policy_mode: RunFailurePolicyModeSchema,
+  source_kind: RunFailureSourceKindSchema,
+  source_ref: z.string().min(1).nullable().default(null),
+  failure_code: z.string().min(1).nullable().default(null),
+  summary: z.string().min(1)
+});
+
 export const RunWorkingContextAutomationSchema = z.object({
   mode: RunAutomationModeSchema,
   reason_code: RunAutomationReasonCodeSchema.nullable().default(null)
@@ -281,6 +313,30 @@ export const RunWorkingContextSchema = z.object({
   automation: RunWorkingContextAutomationSchema,
   degraded: RunWorkingContextDegradedStateSchema,
   source_attempt_id: z.string().nullable().default(null),
+  updated_at: z.string().datetime()
+});
+
+export const RunBriefEvidenceRefSchema = z.object({
+  kind: z.string().min(1),
+  ref: z.string().min(1),
+  label: z.string().min(1),
+  summary: z.string().nullable().default(null)
+});
+
+export const RunBriefSchema = z.object({
+  run_id: z.string(),
+  status: RunStatusSchema,
+  headline: z.string().min(1),
+  summary: z.string().min(1),
+  failure_signal: RunFailureSignalSchema.nullable().default(null),
+  blocker_summary: z.string().nullable().default(null),
+  recommended_next_action: z.string().min(1).nullable().default(null),
+  recommended_attempt_type: AttemptTypeSchema.nullable().default(null),
+  waiting_for_human: z.boolean().default(false),
+  automation_mode: RunAutomationModeSchema,
+  latest_attempt_id: z.string().nullable().default(null),
+  primary_focus: z.string().nullable().default(null),
+  evidence_refs: z.array(RunBriefEvidenceRefSchema).default([]),
   updated_at: z.string().datetime()
 });
 
@@ -341,6 +397,9 @@ export const AttemptEvaluationSchema = z.object({
   goal_progress: z.number().min(0).max(1),
   evidence_quality: z.number().min(0).max(1),
   verification_status: z.enum(["passed", "failed", "not_applicable"]),
+  adversarial_verification_status: z
+    .enum(["passed", "failed", "not_applicable"])
+    .default("not_applicable"),
   recommendation: z.enum(["continue", "wait_human", "complete", "retry"]),
   suggested_attempt_type: AttemptTypeSchema.nullable(),
   rationale: z.string().min(1),
@@ -456,6 +515,7 @@ export const AttemptContractDraftSchema = z.object({
   objective: z.string().min(1).optional(),
   success_criteria: z.array(z.string().min(1)).min(1).optional(),
   required_evidence: z.array(z.string().min(1)).min(1),
+  adversarial_verification_required: z.boolean().optional(),
   done_rubric: z.array(AttemptDoneRubricItemSchema).default([]),
   failure_modes: z.array(AttemptFailureModeSchema).default([]),
   forbidden_shortcuts: z.array(z.string().min(1)).default([]),
@@ -470,6 +530,7 @@ export const AttemptContractSchema = z.object({
   objective: z.string().min(1),
   success_criteria: z.array(z.string().min(1)).min(1),
   required_evidence: z.array(z.string().min(1)).min(1),
+  adversarial_verification_required: z.boolean().default(false),
   done_rubric: z.array(AttemptDoneRubricItemSchema).default([]),
   failure_modes: z.array(AttemptFailureModeSchema).default([]),
   forbidden_shortcuts: z.array(z.string().min(1)).default([]),
@@ -495,6 +556,7 @@ export const ExecutionVerificationToolchainAssessmentSchema = z.object({
 
 export const AttemptContractPreflightSummarySchema = z.object({
   has_required_evidence: z.boolean(),
+  requires_adversarial_verification: z.boolean().default(false),
   has_done_rubric: z.boolean(),
   has_failure_modes: z.boolean(),
   has_verification_plan: z.boolean(),
@@ -517,6 +579,7 @@ export const AttemptPreflightCheckSchema = z.object({
 
 export const AttemptPreflightFailureCodeSchema = z.enum([
   "missing_attempt_contract",
+  "missing_adversarial_verification_requirement",
   "missing_done_rubric",
   "missing_failure_modes",
   "missing_contract_verification_plan",
@@ -528,6 +591,8 @@ export const AttemptPreflightEvaluationSchema = z.object({
   attempt_id: z.string(),
   attempt_type: AttemptTypeSchema,
   status: z.enum(["passed", "failed", "not_applicable"]),
+  failure_class: RunFailureClassSchema.nullable().default(null),
+  failure_policy_mode: RunFailurePolicyModeSchema.nullable().default(null),
   failure_code: AttemptPreflightFailureCodeSchema.nullable().default(null),
   failure_reason: z.string().min(1).nullable().default(null),
   contract: AttemptContractPreflightSummarySchema.nullable().default(null),
@@ -570,6 +635,8 @@ export const AttemptRuntimeVerificationSchema = z.object({
   run_id: z.string(),
   attempt_type: AttemptTypeSchema,
   status: z.enum(["passed", "failed", "not_applicable"]),
+  failure_class: RunFailureClassSchema.nullable().default(null),
+  failure_policy_mode: RunFailurePolicyModeSchema.nullable().default(null),
   repo_root: z.string().nullable(),
   git_head: z.string().nullable(),
   git_status: z.array(z.string().min(1)).default([]),
@@ -581,6 +648,56 @@ export const AttemptRuntimeVerificationSchema = z.object({
   command_results: z.array(VerificationCommandResultSchema).default([]),
   synced_self_bootstrap_artifacts:
     SyncedSelfBootstrapArtifactsSchema.nullable().default(null),
+  created_at: z.string().datetime()
+});
+
+export const AttemptAdversarialVerificationVerdictSchema = z.enum([
+  "pass",
+  "fail",
+  "partial"
+]);
+
+export const AttemptAdversarialVerificationFailureCodeSchema = z.enum([
+  "missing_requirement",
+  "missing_artifact",
+  "invalid_artifact",
+  "missing_checks",
+  "missing_commands",
+  "missing_outputs",
+  "verdict_fail",
+  "verdict_partial"
+]);
+
+export const AttemptAdversarialVerificationCheckSchema = z.object({
+  code: z.string().min(1),
+  status: AttemptPreflightCheckStatusSchema,
+  message: z.string().min(1)
+});
+
+export const AttemptAdversarialVerificationCommandSchema = z.object({
+  purpose: z.string().min(1),
+  command: z.string().min(1),
+  cwd: z.string().min(1).nullable().default(null),
+  exit_code: z.number().int(),
+  status: z.enum(["passed", "failed"]),
+  output_ref: z.string().min(1).nullable().default(null)
+});
+
+export const AttemptAdversarialVerificationSchema = z.object({
+  attempt_id: z.string(),
+  run_id: z.string(),
+  attempt_type: AttemptTypeSchema,
+  status: z.enum(["passed", "failed", "not_applicable"]),
+  failure_class: RunFailureClassSchema.nullable().default(null),
+  failure_policy_mode: RunFailurePolicyModeSchema.nullable().default(null),
+  verdict: AttemptAdversarialVerificationVerdictSchema.nullable().default(null),
+  summary: z.string().min(1).nullable().default(null),
+  failure_code: AttemptAdversarialVerificationFailureCodeSchema.nullable().default(null),
+  failure_reason: z.string().min(1).nullable().default(null),
+  checks: z.array(AttemptAdversarialVerificationCheckSchema).default([]),
+  commands: z.array(AttemptAdversarialVerificationCommandSchema).default([]),
+  output_refs: z.array(z.string().min(1)).default([]),
+  source_artifact_path: z.string().min(1).nullable().default(null),
   created_at: z.string().datetime()
 });
 
@@ -702,6 +819,9 @@ export const AttemptReviewerJudgmentSchema = z.object({
   goal_progress: z.number().min(0).max(1),
   evidence_quality: z.number().min(0).max(1),
   verification_status: z.enum(["passed", "failed", "not_applicable"]),
+  adversarial_verification_status: z
+    .enum(["passed", "failed", "not_applicable"])
+    .default("not_applicable"),
   recommendation: z.enum(["continue", "wait_human", "complete", "retry"]),
   suggested_attempt_type: AttemptTypeSchema.nullable(),
   rationale: z.string().min(1),
@@ -719,6 +839,7 @@ export const AttemptReviewInputPacketSchema = z.object({
   failure_context: AttemptFailureContextSchema.nullable(),
   result: WorkerWritebackSchema.nullable(),
   runtime_verification: AttemptRuntimeVerificationSchema.nullable(),
+  adversarial_verification: AttemptAdversarialVerificationSchema.nullable().default(null),
   artifact_manifest: z.array(ReviewPacketArtifactSchema).default([]),
   generated_at: z.string().datetime()
 });
@@ -748,6 +869,7 @@ export const AttemptReviewPacketSchema = z.object({
   result: WorkerWritebackSchema.nullable(),
   evaluation: AttemptEvaluationSchema.nullable(),
   runtime_verification: AttemptRuntimeVerificationSchema.nullable(),
+  adversarial_verification: AttemptAdversarialVerificationSchema.nullable().default(null),
   artifact_manifest: z.array(ReviewPacketArtifactSchema).default([]),
   review_input_packet_ref: z.string().min(1).nullable().default(null),
   review_opinion_refs: z.array(z.string().min(1)).default([]),
@@ -760,9 +882,11 @@ export const AttemptHandoffBundleSourceRefsSchema = z.object({
   run_contract: z.string().min(1),
   attempt_meta: z.string().min(1),
   attempt_contract: z.string().min(1).nullable().default(null),
+  preflight_evaluation: z.string().min(1).nullable().default(null),
   current_decision: z.string().min(1).nullable().default(null),
   review_packet: z.string().min(1).nullable().default(null),
-  runtime_verification: z.string().min(1).nullable().default(null)
+  runtime_verification: z.string().min(1).nullable().default(null),
+  adversarial_verification: z.string().min(1).nullable().default(null)
 });
 
 export const AttemptHandoffBundleSchema = z.object({
@@ -774,7 +898,13 @@ export const AttemptHandoffBundleSchema = z.object({
   current_decision_snapshot: CurrentDecisionSchema.nullable(),
   failure_context: AttemptFailureContextSchema.nullable(),
   runtime_verification: AttemptRuntimeVerificationSchema.nullable(),
+  adversarial_verification: AttemptAdversarialVerificationSchema.nullable().default(null),
+  failure_signal: RunFailureSignalSchema.nullable().default(null),
+  failure_class: RunFailureClassSchema.nullable().default(null),
+  failure_policy_mode: RunFailurePolicyModeSchema.nullable().default(null),
   failure_code: RuntimeVerificationFailureCodeSchema.nullable().default(null),
+  adversarial_failure_code:
+    AttemptAdversarialVerificationFailureCodeSchema.nullable().default(null),
   recommended_next_action: z.string().min(1).nullable().default(null),
   recommended_attempt_type: AttemptTypeSchema.nullable().default(null),
   summary: z.string().min(1).nullable().default(null),
@@ -877,6 +1007,12 @@ export type RunWorkingContextAutomation = z.infer<
   typeof RunWorkingContextAutomationSchema
 >;
 export type RunWorkingContext = z.infer<typeof RunWorkingContextSchema>;
+export type RunFailureClass = z.infer<typeof RunFailureClassSchema>;
+export type RunFailurePolicyMode = z.infer<typeof RunFailurePolicyModeSchema>;
+export type RunFailureSourceKind = z.infer<typeof RunFailureSourceKindSchema>;
+export type RunFailureSignal = z.infer<typeof RunFailureSignalSchema>;
+export type RunBriefEvidenceRef = z.infer<typeof RunBriefEvidenceRefSchema>;
+export type RunBrief = z.infer<typeof RunBriefSchema>;
 export type RunGovernanceStatus = z.infer<typeof RunGovernanceStatusSchema>;
 export type RunGovernanceExcludedPlan = z.infer<typeof RunGovernanceExcludedPlanSchema>;
 export type RunGovernanceContextSummary = z.infer<typeof RunGovernanceContextSummarySchema>;
@@ -917,6 +1053,21 @@ export type RuntimeVerificationFailureCode = z.infer<
 >;
 export type VerificationCommandResult = z.infer<typeof VerificationCommandResultSchema>;
 export type AttemptRuntimeVerification = z.infer<typeof AttemptRuntimeVerificationSchema>;
+export type AttemptAdversarialVerificationVerdict = z.infer<
+  typeof AttemptAdversarialVerificationVerdictSchema
+>;
+export type AttemptAdversarialVerificationFailureCode = z.infer<
+  typeof AttemptAdversarialVerificationFailureCodeSchema
+>;
+export type AttemptAdversarialVerificationCheck = z.infer<
+  typeof AttemptAdversarialVerificationCheckSchema
+>;
+export type AttemptAdversarialVerificationCommand = z.infer<
+  typeof AttemptAdversarialVerificationCommandSchema
+>;
+export type AttemptAdversarialVerification = z.infer<
+  typeof AttemptAdversarialVerificationSchema
+>;
 export type RuntimeHealthHistoryContractDrift = z.infer<
   typeof RuntimeHealthHistoryContractDriftSchema
 >;
@@ -964,6 +1115,11 @@ function buildDefaultExecutionDoneRubric(): AttemptDoneRubricItem[] {
     {
       code: "verification_replay_passed",
       description: "Pass the replayable verification commands locked into this contract."
+    },
+    {
+      code: "adversarial_verification_passed",
+      description:
+        "Leave a machine-readable adversarial verification artifact after deterministic replay passes."
     }
   ];
 }
@@ -981,6 +1137,16 @@ function buildDefaultExecutionFailureModes(): AttemptFailureMode[] {
     {
       code: "unchanged_workspace_state",
       description: "Do not treat unchanged workspace state as a completed execution step."
+    },
+    {
+      code: "missing_adversarial_verification_requirement",
+      description:
+        "Do not dispatch execution when attempt_contract.json does not explicitly require adversarial verification."
+    },
+    {
+      code: "missing_adversarial_verification_artifact",
+      description:
+        "Do not treat execution as complete without a machine-readable adversarial verification artifact."
     }
   ];
 }
@@ -1149,6 +1315,7 @@ export function createAttemptContract(input: {
   objective: string;
   success_criteria: string[];
   required_evidence: string[];
+  adversarial_verification_required?: boolean;
   done_rubric?: AttemptDoneRubricItem[];
   failure_modes?: AttemptFailureMode[];
   forbidden_shortcuts?: string[];
@@ -1167,6 +1334,8 @@ export function createAttemptContract(input: {
     objective: input.objective,
     success_criteria: input.success_criteria,
     required_evidence: input.required_evidence,
+    adversarial_verification_required:
+      input.adversarial_verification_required ?? input.attempt_type === "execution",
     done_rubric: input.done_rubric ?? defaultDoneRubric,
     failure_modes: input.failure_modes ?? defaultFailureModes,
     forbidden_shortcuts: input.forbidden_shortcuts ?? [],
@@ -1188,17 +1357,77 @@ export function createAttemptPreflightEvaluation(input: {
   checkpoint_preflight?: AttemptCheckpointPreflight | null;
   checks?: AttemptPreflightCheck[];
 }): AttemptPreflightEvaluation {
+  const failureSignal =
+    input.status === "failed"
+      ? createRunFailureSignal({
+          failure_class: "preflight_blocked",
+          policy_mode: "fail_closed",
+          source_kind: "preflight_evaluation",
+          failure_code: input.failure_code ?? null,
+          summary:
+            input.failure_reason ??
+            `Preflight blocked attempt ${input.attempt_id}.`
+        })
+      : null;
   return AttemptPreflightEvaluationSchema.parse({
     run_id: input.run_id,
     attempt_id: input.attempt_id,
     attempt_type: input.attempt_type,
     status: input.status,
+    failure_class: failureSignal?.failure_class ?? null,
+    failure_policy_mode: failureSignal?.policy_mode ?? null,
     failure_code: input.failure_code ?? null,
     failure_reason: input.failure_reason ?? null,
     contract: input.contract ?? null,
     toolchain_assessment: input.toolchain_assessment ?? null,
     checkpoint_preflight: input.checkpoint_preflight ?? null,
     checks: input.checks ?? [],
+    created_at: new Date().toISOString()
+  });
+}
+
+export function createAttemptAdversarialVerification(input: {
+  run_id: string;
+  attempt_id: string;
+  attempt_type: AttemptType;
+  status: "passed" | "failed" | "not_applicable";
+  verdict?: AttemptAdversarialVerificationVerdict | null;
+  summary?: string | null;
+  failure_code?: AttemptAdversarialVerificationFailureCode | null;
+  failure_reason?: string | null;
+  checks?: AttemptAdversarialVerificationCheck[];
+  commands?: AttemptAdversarialVerificationCommand[];
+  output_refs?: string[];
+  source_artifact_path?: string | null;
+}): AttemptAdversarialVerification {
+  const failureSignal =
+    input.status === "failed"
+      ? createRunFailureSignal({
+          failure_class: "adversarial_verification_failed",
+          policy_mode: "fail_closed",
+          source_kind: "adversarial_verification",
+          failure_code: input.failure_code ?? null,
+          summary:
+            input.failure_reason ??
+            input.summary ??
+            `Adversarial verification failed for attempt ${input.attempt_id}.`
+        })
+      : null;
+  return AttemptAdversarialVerificationSchema.parse({
+    run_id: input.run_id,
+    attempt_id: input.attempt_id,
+    attempt_type: input.attempt_type,
+    status: input.status,
+    failure_class: failureSignal?.failure_class ?? null,
+    failure_policy_mode: failureSignal?.policy_mode ?? null,
+    verdict: input.verdict ?? null,
+    summary: input.summary ?? null,
+    failure_code: input.failure_code ?? null,
+    failure_reason: input.failure_reason ?? null,
+    checks: input.checks ?? [],
+    commands: input.commands ?? [],
+    output_refs: input.output_refs ?? [],
+    source_artifact_path: input.source_artifact_path ?? null,
     created_at: new Date().toISOString()
   });
 }
@@ -1273,11 +1502,54 @@ export function createAttemptRuntimeEvent(input: {
 export function createAttemptHandoffBundle(input: {
   attempt: Attempt;
   approved_attempt_contract?: AttemptContract | null;
+  preflight_evaluation?: AttemptPreflightEvaluation | null;
   current_decision_snapshot?: CurrentDecision | null;
   failure_context?: AttemptFailureContext | null;
   runtime_verification?: AttemptRuntimeVerification | null;
+  adversarial_verification?: AttemptAdversarialVerification | null;
+  failure_signal?: RunFailureSignal | null;
   source_refs: AttemptHandoffBundleSourceRefs;
 }): AttemptHandoffBundle {
+  const failureSignal =
+    input.failure_signal ??
+    (input.adversarial_verification?.failure_class
+      ? createRunFailureSignal({
+          failure_class: input.adversarial_verification.failure_class,
+          policy_mode:
+            input.adversarial_verification.failure_policy_mode ?? "fail_closed",
+          source_kind: "adversarial_verification",
+          source_ref: input.source_refs.adversarial_verification,
+          failure_code: input.adversarial_verification.failure_code ?? null,
+          summary:
+            input.adversarial_verification.failure_reason ??
+            input.adversarial_verification.summary ??
+            `Adversarial verification failed for attempt ${input.attempt.id}.`
+        })
+      : null) ??
+    (input.runtime_verification?.failure_class
+      ? createRunFailureSignal({
+          failure_class: input.runtime_verification.failure_class,
+          policy_mode: input.runtime_verification.failure_policy_mode ?? "fail_closed",
+          source_kind: "runtime_verification",
+          source_ref: input.source_refs.runtime_verification,
+          failure_code: input.runtime_verification.failure_code ?? null,
+          summary:
+            input.runtime_verification.failure_reason ??
+            `Runtime verification failed for attempt ${input.attempt.id}.`
+        })
+      : null) ??
+    (input.preflight_evaluation?.failure_class
+      ? createRunFailureSignal({
+          failure_class: input.preflight_evaluation.failure_class,
+          policy_mode: input.preflight_evaluation.failure_policy_mode ?? "fail_closed",
+          source_kind: "preflight_evaluation",
+          source_ref: input.source_refs.preflight_evaluation,
+          failure_code: input.preflight_evaluation.failure_code ?? null,
+          summary:
+            input.preflight_evaluation.failure_reason ??
+            `Preflight blocked attempt ${input.attempt.id}.`
+        })
+      : null);
   return AttemptHandoffBundleSchema.parse({
     version: 1,
     run_id: input.attempt.run_id,
@@ -1287,14 +1559,22 @@ export function createAttemptHandoffBundle(input: {
     current_decision_snapshot: input.current_decision_snapshot ?? null,
     failure_context: input.failure_context ?? null,
     runtime_verification: input.runtime_verification ?? null,
+    adversarial_verification: input.adversarial_verification ?? null,
+    failure_signal: failureSignal ?? null,
+    failure_class: failureSignal?.failure_class ?? null,
+    failure_policy_mode: failureSignal?.policy_mode ?? null,
     failure_code: input.runtime_verification?.failure_code ?? null,
+    adversarial_failure_code: input.adversarial_verification?.failure_code ?? null,
     recommended_next_action:
       input.current_decision_snapshot?.recommended_next_action ?? null,
     recommended_attempt_type:
       input.current_decision_snapshot?.recommended_attempt_type ?? null,
     summary:
-      input.current_decision_snapshot?.summary ??
+      failureSignal?.summary ??
       input.failure_context?.message ??
+      input.current_decision_snapshot?.summary ??
+      input.preflight_evaluation?.failure_reason ??
+      input.adversarial_verification?.failure_reason ??
       input.runtime_verification?.failure_reason ??
       null,
     source_refs: input.source_refs,
@@ -1398,6 +1678,57 @@ export function createRunWorkingContext(input: {
   });
 }
 
+export function createRunBrief(input: {
+  run_id: string;
+  status: RunStatus;
+  headline: string;
+  summary: string;
+  failure_signal?: RunFailureSignal | null;
+  blocker_summary?: string | null;
+  recommended_next_action?: string | null;
+  recommended_attempt_type?: AttemptType | null;
+  waiting_for_human?: boolean;
+  automation_mode?: RunAutomationMode;
+  latest_attempt_id?: string | null;
+  primary_focus?: string | null;
+  evidence_refs?: RunBriefEvidenceRef[];
+}): RunBrief {
+  return RunBriefSchema.parse({
+    run_id: input.run_id,
+    status: input.status,
+    headline: input.headline,
+    summary: input.summary,
+    failure_signal: input.failure_signal ?? null,
+    blocker_summary: input.blocker_summary ?? null,
+    recommended_next_action: input.recommended_next_action ?? null,
+    recommended_attempt_type: input.recommended_attempt_type ?? null,
+    waiting_for_human: input.waiting_for_human ?? false,
+    automation_mode: input.automation_mode ?? "active",
+    latest_attempt_id: input.latest_attempt_id ?? null,
+    primary_focus: input.primary_focus ?? null,
+    evidence_refs: input.evidence_refs ?? [],
+    updated_at: new Date().toISOString()
+  });
+}
+
+export function createRunFailureSignal(input: {
+  failure_class: RunFailureClass;
+  policy_mode: RunFailurePolicyMode;
+  source_kind: RunFailureSourceKind;
+  source_ref?: string | null;
+  failure_code?: string | null;
+  summary: string;
+}): RunFailureSignal {
+  return RunFailureSignalSchema.parse({
+    failure_class: input.failure_class,
+    policy_mode: input.policy_mode,
+    source_kind: input.source_kind,
+    source_ref: input.source_ref ?? null,
+    failure_code: input.failure_code ?? null,
+    summary: input.summary
+  });
+}
+
 export function createRunGovernanceState(input: {
   run_id: string;
   status?: RunGovernanceStatus;
@@ -1446,6 +1777,7 @@ export function isExecutionContractDraftReady(
 ): contract is AttemptContractDraft {
   return (
     contract?.attempt_type === "execution" &&
+    (contract.adversarial_verification_required ?? true) === true &&
     (contract.verification_plan?.commands.length ?? 0) > 0 &&
     contract.required_evidence.length > 0 &&
     contract.done_rubric.length > 0 &&
@@ -1458,6 +1790,7 @@ export function isExecutionAttemptContractReady(
 ): contract is AttemptContract {
   return (
     contract?.attempt_type === "execution" &&
+    contract.adversarial_verification_required === true &&
     (contract.verification_plan?.commands.length ?? 0) > 0 &&
     contract.required_evidence.length > 0 &&
     contract.done_rubric.length > 0 &&
