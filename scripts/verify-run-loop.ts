@@ -1882,6 +1882,60 @@ async function assertExplicitPnpmVerificationPlanNeedsLocalNodeModules(): Promis
   );
 }
 
+async function assertVerifierKitScopesDefaultInference(): Promise<void> {
+  const rootDir = await createVerifyTempDir("aisa-verifier-kit-toolchain-");
+  await seedPackageJsonScriptsWithoutNodeModules(rootDir);
+
+  const repoAssessment = await assessExecutionVerificationToolchain({
+    workspaceRoot: rootDir,
+    verifierKit: "repo"
+  });
+  const apiAssessment = await assessExecutionVerificationToolchain({
+    workspaceRoot: rootDir,
+    verifierKit: "api"
+  });
+
+  assert.deepEqual(
+    repoAssessment.inferred_pnpm_commands,
+    ["pnpm typecheck", "pnpm verify:runtime"],
+    "verifier_kit_scopes_default_inference: repo kit should keep default pnpm inference"
+  );
+  assert.deepEqual(
+    apiAssessment.inferred_pnpm_commands,
+    [],
+    "verifier_kit_scopes_default_inference: non-repo kits should not auto-infer pnpm replay commands"
+  );
+
+  const defaultExecutionContract = createAttemptContract({
+    attempt_id: "att_verifier_default",
+    run_id: "run_verifier_default",
+    attempt_type: "execution",
+    objective: "Keep verifier kit defaults stable.",
+    success_criteria: ["Default execution contracts should stay on the repo kit."],
+    required_evidence: ["Persist the chosen verifier kit."]
+  });
+  const explicitApiContract = createAttemptContract({
+    attempt_id: "att_verifier_api",
+    run_id: "run_verifier_api",
+    attempt_type: "execution",
+    objective: "Keep explicit verifier kit selections stable.",
+    success_criteria: ["Explicit execution contracts should preserve the api kit."],
+    required_evidence: ["Persist the chosen verifier kit."],
+    verifier_kit: "api"
+  });
+
+  assert.equal(
+    defaultExecutionContract.verifier_kit,
+    "repo",
+    "verifier_kit_scopes_default_inference: execution contracts should default to repo"
+  );
+  assert.equal(
+    explicitApiContract.verifier_kit,
+    "api",
+    "verifier_kit_scopes_default_inference: explicit verifier kits should survive contract creation"
+  );
+}
+
 async function assertManagedWorkspaceInheritsLocalNodeModules(): Promise<void> {
   const rootDir = await createVerifyTempDir("aisa-managed-workspace-node-modules-");
   await initializeGitRepo(rootDir, false);
@@ -5327,6 +5381,20 @@ async function main(): Promise<void> {
     } catch (error) {
       results.push({
         id: "explicit_pnpm_verification_plan_needs_local_node_modules",
+        status: "fail",
+        error: error instanceof Error ? error.message : String(error)
+      });
+    }
+
+    try {
+      await assertVerifierKitScopesDefaultInference();
+      results.push({
+        id: "verifier_kit_scopes_default_inference",
+        status: "pass"
+      });
+    } catch (error) {
+      results.push({
+        id: "verifier_kit_scopes_default_inference",
         status: "fail",
         error: error instanceof Error ? error.message : String(error)
       });

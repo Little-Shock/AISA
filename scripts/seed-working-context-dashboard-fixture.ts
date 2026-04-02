@@ -45,6 +45,7 @@ export type SeedWorkingContextDashboardFixtureResult = {
   expected_handoff_summary: string;
   expected_latest_runtime_status: "passed";
   expected_latest_adversarial_status: "passed";
+  expected_verifier_kit: "web";
   expected_task_focus: string;
   expected_policy_stage: "approval";
   expected_policy_approval_status: "pending";
@@ -104,6 +105,7 @@ export async function seedWorkingContextDashboardFixture(input: {
     attempt_type: "execution",
     objective: attempt.objective,
     success_criteria: attempt.success_criteria,
+    verifier_kit: "web",
     required_evidence: [
       "把 preflight 结论暴露到 run detail 顶层",
       "把 handoff 摘要暴露到 dashboard 首屏"
@@ -146,6 +148,7 @@ export async function seedWorkingContextDashboardFixture(input: {
     run_id: run.id,
     attempt_type: "execution",
     status: "passed",
+    verifier_kit: "web",
     repo_root: workspaceRoot,
     git_head: "fixture-head",
     git_status: [],
@@ -177,6 +180,7 @@ export async function seedWorkingContextDashboardFixture(input: {
       attempt_id: previousExecution.id,
       attempt_type: "execution",
       status: "passed",
+      verifier_kit: "web",
       verdict: "pass",
       summary: "Adversarial verification passed before the later preflight blocker.",
       checks: [
@@ -294,6 +298,7 @@ export async function seedWorkingContextDashboardFixture(input: {
     expected_handoff_summary: preflightFailureReason,
     expected_latest_runtime_status: "passed",
     expected_latest_adversarial_status: "passed",
+    expected_verifier_kit: "web",
     expected_task_focus: attempt.objective,
     expected_policy_stage: "approval",
     expected_policy_approval_status: "pending"

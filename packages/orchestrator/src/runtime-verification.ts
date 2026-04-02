@@ -9,6 +9,8 @@ import {
   AttemptRuntimeVerificationSchema,
   type Attempt,
   type AttemptRuntimeVerification,
+  resolveExecutionVerifierKit,
+  type ExecutionVerifierKit,
   type RuntimeVerificationFailureCode,
   type Run,
   type VerificationCommand,
@@ -162,6 +164,7 @@ export async function runAttemptRuntimeVerification(input: {
       run_id: input.run.id,
       attempt_type: input.attempt.attempt_type,
       status: "not_applicable",
+      verifier_kit: null,
       repo_root: null,
       git_head: null,
       git_status: [],
@@ -188,11 +191,13 @@ export async function runAttemptRuntimeVerification(input: {
   }
 
   const attemptContract = input.attemptContract;
+  const verifierKit = resolveExecutionVerifierKit(attemptContract);
   if (!isExecutionAttemptContractReady(attemptContract)) {
     return await buildFailedVerificationArtifact({
       run: input.run,
       attempt: input.attempt,
       attemptPaths: input.attemptPaths,
+      verifierKit,
       failureCode: "missing_contract_verification_plan",
       failureReason:
         "Execution attempt contract is missing replayable verification commands. Runtime verification only trusts commands locked in before dispatch."
@@ -204,6 +209,7 @@ export async function runAttemptRuntimeVerification(input: {
       run: input.run,
       attempt: input.attempt,
       attemptPaths: input.attemptPaths,
+      verifierKit,
       failureCode: "missing_contract_verification_plan",
       failureReason:
         "Execution attempt contract lost its replayable verification commands before runtime verification started."
@@ -216,6 +222,7 @@ export async function runAttemptRuntimeVerification(input: {
       run: input.run,
       attempt: input.attempt,
       attemptPaths: input.attemptPaths,
+      verifierKit,
       failureCode: "workspace_not_git_repo",
       failureReason:
         "Execution verification requires a git workspace so the runtime can observe real changes."
@@ -236,6 +243,7 @@ export async function runAttemptRuntimeVerification(input: {
       run_id: input.run.id,
       attempt_type: input.attempt.attempt_type,
       status: "failed",
+      verifier_kit: verifierKit,
       repo_root: repoRoot,
       git_head: gitHead,
       git_status: currentGitStatus,
@@ -263,6 +271,7 @@ export async function runAttemptRuntimeVerification(input: {
       run_id: input.run.id,
       attempt_type: input.attempt.attempt_type,
       status: "failed",
+      verifier_kit: verifierKit,
       repo_root: repoRoot,
       git_head: gitHead,
       git_status: gitStatusAfterExecution,
@@ -294,6 +303,7 @@ export async function runAttemptRuntimeVerification(input: {
         run_id: input.run.id,
         attempt_type: input.attempt.attempt_type,
         status: "failed",
+        verifier_kit: verifierKit,
         repo_root: repoRoot,
         git_head: gitHead,
         git_status: gitStatusAfterExecution,
@@ -347,6 +357,7 @@ export async function runAttemptRuntimeVerification(input: {
         run_id: input.run.id,
         attempt_type: input.attempt.attempt_type,
         status: "failed",
+        verifier_kit: verifierKit,
         repo_root: repoRoot,
         git_head: gitHead,
         git_status: currentGitStatus,
@@ -389,6 +400,7 @@ export async function runAttemptRuntimeVerification(input: {
         run_id: input.run.id,
         attempt_type: input.attempt.attempt_type,
         status: "failed",
+        verifier_kit: verifierKit,
         repo_root: repoRoot,
         git_head: gitHead,
         git_status: currentGitStatus,
@@ -417,6 +429,7 @@ export async function runAttemptRuntimeVerification(input: {
     run_id: input.run.id,
     attempt_type: input.attempt.attempt_type,
     status: "passed",
+    verifier_kit: verifierKit,
     repo_root: repoRoot,
     git_head: gitHead,
     git_status: finalGitStatus,
@@ -435,6 +448,7 @@ async function buildFailedVerificationArtifact(input: {
   run: Run;
   attempt: Attempt;
   attemptPaths: AttemptPaths;
+  verifierKit?: ExecutionVerifierKit | null;
   failureCode: RuntimeVerificationFailureCode;
   failureReason: string;
 }): Promise<AttemptRuntimeVerificationOutcome> {
@@ -443,6 +457,7 @@ async function buildFailedVerificationArtifact(input: {
     run_id: input.run.id,
     attempt_type: input.attempt.attempt_type,
     status: "failed",
+    verifier_kit: input.verifierKit ?? null,
     repo_root: null,
     git_head: null,
     git_status: [],

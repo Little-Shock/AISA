@@ -202,6 +202,7 @@ async function main(): Promise<void> {
     attempt_type: "execution",
     objective: attempt.objective,
     success_criteria: attempt.success_criteria,
+    verifier_kit: "api",
     required_evidence: [
       "git-visible workspace changes",
       "runtime replay success"
@@ -303,6 +304,7 @@ async function main(): Promise<void> {
     run_id: run.id,
     attempt_type: "execution",
     status: "passed",
+    verifier_kit: "api",
     repo_root: rootDir,
     git_head: "deadbeef",
     git_status: [" M packages/orchestrator/src/index.ts"],
@@ -339,6 +341,7 @@ async function main(): Promise<void> {
     attempt_id: attempt.id,
     attempt_type: "execution",
     status: "passed",
+    verifier_kit: "api",
     verdict: "pass",
     summary: "Adversarial verification passed after deterministic replay.",
     checks: [
@@ -369,6 +372,18 @@ async function main(): Promise<void> {
       attempt_id: attempt.id,
       attempt_type: "execution",
       status: "passed",
+      contract: {
+        has_required_evidence: true,
+        requires_adversarial_verification: true,
+        verifier_kit: "api",
+        has_done_rubric: true,
+        has_failure_modes: true,
+        has_verification_plan: true,
+        done_rubric_codes: attemptContract.done_rubric.map((item) => item.code),
+        failure_mode_codes: attemptContract.failure_modes.map((item) => item.code),
+        verification_commands:
+          attemptContract.verification_plan?.commands.map((item) => item.command) ?? []
+      },
       checks: [
         {
           code: "verification_plan",
@@ -1026,11 +1041,15 @@ async function main(): Promise<void> {
         failure_code: string | null;
         failure_reason: string | null;
         failure_class: string | null;
+        contract: {
+          verifier_kit: string | null;
+        } | null;
       } | null;
       latest_preflight_evaluation_ref: string | null;
       latest_runtime_verification: {
         attempt_id: string;
         status: string;
+        verifier_kit: string | null;
         failure_code: string | null;
         failure_reason: string | null;
         failure_class: string | null;
@@ -1040,6 +1059,7 @@ async function main(): Promise<void> {
       latest_adversarial_verification: {
         attempt_id: string;
         status: string;
+        verifier_kit: string | null;
         verdict: string | null;
         failure_code: string | null;
         failure_reason: string | null;
@@ -1126,6 +1146,7 @@ async function main(): Promise<void> {
         contract: {
           required_evidence: string[];
           adversarial_verification_required: boolean;
+          verifier_kit: string | null;
         } | null;
         context: {
           contract: { title: string };
@@ -1147,9 +1168,14 @@ async function main(): Promise<void> {
           verification_status: string;
           adversarial_verification_status: string;
         } | null;
-        runtime_verification: { status: string; changed_files: string[] } | null;
+        runtime_verification: {
+          status: string;
+          verifier_kit: string | null;
+          changed_files: string[];
+        } | null;
         adversarial_verification: {
           status: string;
+          verifier_kit: string | null;
           verdict: string | null;
           output_refs: string[];
         } | null;
@@ -1239,6 +1265,7 @@ async function main(): Promise<void> {
       completedDetail?.contract?.adversarial_verification_required,
       true
     );
+    assert.equal(completedDetail?.contract?.verifier_kit, "api");
     assert.deepEqual(completedDetail?.context, persistedContext);
     assert.equal(
       completedDetail?.failure_context,
@@ -1255,7 +1282,9 @@ async function main(): Promise<void> {
       "passed"
     );
     assert.equal(completedDetail?.runtime_verification?.status, "passed");
+    assert.equal(completedDetail?.runtime_verification?.verifier_kit, "api");
     assert.equal(completedDetail?.adversarial_verification?.status, "passed");
+    assert.equal(completedDetail?.adversarial_verification?.verifier_kit, "api");
     assert.equal(completedDetail?.adversarial_verification?.verdict, "pass");
     assert.equal(
       completedDetail?.adversarial_verification?.output_refs[0],
@@ -1327,11 +1356,13 @@ async function main(): Promise<void> {
     assert.equal(payload.latest_preflight_evaluation?.attempt_id, attempt.id);
     assert.equal(payload.latest_preflight_evaluation?.status, "passed");
     assert.equal(payload.latest_preflight_evaluation?.failure_class, null);
+    assert.equal(payload.latest_preflight_evaluation?.contract?.verifier_kit, "api");
     assert.ok(
       payload.latest_preflight_evaluation_ref?.endsWith("artifacts/preflight-evaluation.json")
     );
     assert.equal(payload.latest_runtime_verification?.attempt_id, attempt.id);
     assert.equal(payload.latest_runtime_verification?.status, "passed");
+    assert.equal(payload.latest_runtime_verification?.verifier_kit, "api");
     assert.equal(payload.latest_runtime_verification?.failure_class, null);
     assert.deepEqual(payload.latest_runtime_verification?.changed_files, [
       "packages/orchestrator/src/index.ts"
@@ -1341,6 +1372,7 @@ async function main(): Promise<void> {
     );
     assert.equal(payload.latest_adversarial_verification?.attempt_id, attempt.id);
     assert.equal(payload.latest_adversarial_verification?.status, "passed");
+    assert.equal(payload.latest_adversarial_verification?.verifier_kit, "api");
     assert.equal(payload.latest_adversarial_verification?.verdict, "pass");
     assert.equal(payload.latest_adversarial_verification?.failure_class, null);
     assert.deepEqual(payload.latest_adversarial_verification?.output_refs, [
@@ -1482,11 +1514,15 @@ async function main(): Promise<void> {
           status: string;
           failure_reason: string | null;
           failure_class: string | null;
+          contract: {
+            verifier_kit: string | null;
+          } | null;
         } | null;
         latest_preflight_evaluation_ref: string | null;
         latest_runtime_verification: {
           attempt_id: string;
           status: string;
+          verifier_kit: string | null;
           failure_reason: string | null;
           failure_class: string | null;
           changed_files: string[];
@@ -1495,6 +1531,7 @@ async function main(): Promise<void> {
         latest_adversarial_verification: {
           attempt_id: string;
           status: string;
+          verifier_kit: string | null;
           verdict: string | null;
           failure_reason: string | null;
           failure_class: string | null;
@@ -1558,11 +1595,13 @@ async function main(): Promise<void> {
     assert.equal(runSummary?.latest_preflight_evaluation?.attempt_id, attempt.id);
     assert.equal(runSummary?.latest_preflight_evaluation?.status, "passed");
     assert.equal(runSummary?.latest_preflight_evaluation?.failure_class, null);
+    assert.equal(runSummary?.latest_preflight_evaluation?.contract?.verifier_kit, "api");
     assert.ok(
       runSummary?.latest_preflight_evaluation_ref?.endsWith("artifacts/preflight-evaluation.json")
     );
     assert.equal(runSummary?.latest_runtime_verification?.attempt_id, attempt.id);
     assert.equal(runSummary?.latest_runtime_verification?.status, "passed");
+    assert.equal(runSummary?.latest_runtime_verification?.verifier_kit, "api");
     assert.equal(runSummary?.latest_runtime_verification?.failure_class, null);
     assert.deepEqual(runSummary?.latest_runtime_verification?.changed_files, [
       "packages/orchestrator/src/index.ts"
@@ -1572,6 +1611,7 @@ async function main(): Promise<void> {
     );
     assert.equal(runSummary?.latest_adversarial_verification?.attempt_id, attempt.id);
     assert.equal(runSummary?.latest_adversarial_verification?.status, "passed");
+    assert.equal(runSummary?.latest_adversarial_verification?.verifier_kit, "api");
     assert.equal(runSummary?.latest_adversarial_verification?.verdict, "pass");
     assert.equal(runSummary?.latest_adversarial_verification?.failure_class, null);
     assert.deepEqual(runSummary?.latest_adversarial_verification?.output_refs, [

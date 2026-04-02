@@ -69,6 +69,9 @@ export const BudgetSchema = z.object({
 
 export const WorkerEffortLevelValues = ["low", "medium", "high"] as const;
 export const WorkerEffortLevelSchema = z.enum(WorkerEffortLevelValues);
+export const ExecutionVerifierKitValues = ["repo", "web", "api", "cli"] as const;
+export const ExecutionVerifierKitSchema = z.enum(ExecutionVerifierKitValues);
+export const DEFAULT_EXECUTION_VERIFIER_KIT = "repo" as const;
 
 export const RunHarnessEffortPreferenceSchema = z.object({
   effort: WorkerEffortLevelSchema.default("medium")
@@ -641,6 +644,7 @@ export const AttemptContractDraftSchema = z.object({
   success_criteria: z.array(z.string().min(1)).min(1).optional(),
   required_evidence: z.array(z.string().min(1)).min(1),
   adversarial_verification_required: z.boolean().optional(),
+  verifier_kit: ExecutionVerifierKitSchema.nullable().default(null),
   done_rubric: z.array(AttemptDoneRubricItemSchema).default([]),
   failure_modes: z.array(AttemptFailureModeSchema).default([]),
   forbidden_shortcuts: z.array(z.string().min(1)).default([]),
@@ -656,6 +660,7 @@ export const AttemptContractSchema = z.object({
   success_criteria: z.array(z.string().min(1)).min(1),
   required_evidence: z.array(z.string().min(1)).min(1),
   adversarial_verification_required: z.boolean().default(false),
+  verifier_kit: ExecutionVerifierKitSchema.nullable().default(null),
   done_rubric: z.array(AttemptDoneRubricItemSchema).default([]),
   failure_modes: z.array(AttemptFailureModeSchema).default([]),
   forbidden_shortcuts: z.array(z.string().min(1)).default([]),
@@ -692,6 +697,7 @@ export const ExecutionVerificationToolchainAssessmentSchema = z.object({
 export const AttemptContractPreflightSummarySchema = z.object({
   has_required_evidence: z.boolean(),
   requires_adversarial_verification: z.boolean().default(false),
+  verifier_kit: ExecutionVerifierKitSchema.nullable().default(null),
   has_done_rubric: z.boolean(),
   has_failure_modes: z.boolean(),
   has_verification_plan: z.boolean(),
@@ -772,6 +778,7 @@ export const AttemptRuntimeVerificationSchema = z.object({
   run_id: z.string(),
   attempt_type: AttemptTypeSchema,
   status: z.enum(["passed", "failed", "not_applicable"]),
+  verifier_kit: ExecutionVerifierKitSchema.nullable().default(null),
   failure_class: RunFailureClassSchema.nullable().default(null),
   failure_policy_mode: RunFailurePolicyModeSchema.nullable().default(null),
   repo_root: z.string().nullable(),
@@ -825,6 +832,7 @@ export const AttemptAdversarialVerificationSchema = z.object({
   run_id: z.string(),
   attempt_type: AttemptTypeSchema,
   status: z.enum(["passed", "failed", "not_applicable"]),
+  verifier_kit: ExecutionVerifierKitSchema.nullable().default(null),
   failure_class: RunFailureClassSchema.nullable().default(null),
   failure_policy_mode: RunFailurePolicyModeSchema.nullable().default(null),
   verdict: AttemptAdversarialVerificationVerdictSchema.nullable().default(null),
@@ -1181,6 +1189,7 @@ export type EvalSpec = z.infer<typeof EvalSpecSchema>;
 export type VerificationCommand = z.infer<typeof VerificationCommandSchema>;
 export type ExecutionVerificationPlan = z.infer<typeof ExecutionVerificationPlanSchema>;
 export type WorkerEffortLevel = z.infer<typeof WorkerEffortLevelSchema>;
+export type ExecutionVerifierKit = z.infer<typeof ExecutionVerifierKitSchema>;
 export type RunHarnessEffortPreference = z.infer<
   typeof RunHarnessEffortPreferenceSchema
 >;
@@ -1478,6 +1487,7 @@ export function createAttemptContract(input: {
   success_criteria: string[];
   required_evidence: string[];
   adversarial_verification_required?: boolean;
+  verifier_kit?: ExecutionVerifierKit | null;
   done_rubric?: AttemptDoneRubricItem[];
   failure_modes?: AttemptFailureMode[];
   forbidden_shortcuts?: string[];
@@ -1498,6 +1508,10 @@ export function createAttemptContract(input: {
     required_evidence: input.required_evidence,
     adversarial_verification_required:
       input.adversarial_verification_required ?? input.attempt_type === "execution",
+    verifier_kit:
+      input.attempt_type === "execution"
+        ? input.verifier_kit ?? DEFAULT_EXECUTION_VERIFIER_KIT
+        : null,
     done_rubric: input.done_rubric ?? defaultDoneRubric,
     failure_modes: input.failure_modes ?? defaultFailureModes,
     forbidden_shortcuts: input.forbidden_shortcuts ?? [],
@@ -1553,6 +1567,7 @@ export function createAttemptAdversarialVerification(input: {
   attempt_id: string;
   attempt_type: AttemptType;
   status: "passed" | "failed" | "not_applicable";
+  verifier_kit?: ExecutionVerifierKit | null;
   verdict?: AttemptAdversarialVerificationVerdict | null;
   summary?: string | null;
   failure_code?: AttemptAdversarialVerificationFailureCode | null;
@@ -1580,6 +1595,10 @@ export function createAttemptAdversarialVerification(input: {
     attempt_id: input.attempt_id,
     attempt_type: input.attempt_type,
     status: input.status,
+    verifier_kit:
+      input.attempt_type === "execution"
+        ? input.verifier_kit ?? DEFAULT_EXECUTION_VERIFIER_KIT
+        : null,
     failure_class: failureSignal?.failure_class ?? null,
     failure_policy_mode: failureSignal?.policy_mode ?? null,
     verdict: input.verdict ?? null,
@@ -2043,6 +2062,20 @@ export function isExecutionAttemptContractReady(
     contract.done_rubric.length > 0 &&
     contract.failure_modes.length > 0
   );
+}
+
+export function resolveExecutionVerifierKit(
+  contract:
+    | Pick<AttemptContract, "attempt_type" | "verifier_kit">
+    | Pick<AttemptContractDraft, "attempt_type" | "verifier_kit">
+    | null
+    | undefined
+): ExecutionVerifierKit | null {
+  if (contract?.attempt_type !== "execution") {
+    return null;
+  }
+
+  return contract.verifier_kit ?? DEFAULT_EXECUTION_VERIFIER_KIT;
 }
 
 export function updateCurrentDecision(

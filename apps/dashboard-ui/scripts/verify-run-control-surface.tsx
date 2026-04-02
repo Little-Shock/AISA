@@ -5,7 +5,11 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { buildServer } from "../../control-api/src/index.ts";
 import { deriveRunOperatorState } from "../app/dashboard-helpers";
 import type { RunDetail, RunSummaryItem } from "../app/dashboard-types";
-import { RunOverviewPanel, RunPolicyPanel } from "../app/run-detail-panels";
+import {
+  RunOverviewPanel,
+  RunPolicyPanel,
+  RunVerificationPanel
+} from "../app/run-detail-panels";
 import { RunInboxPanel } from "../app/run-inbox";
 import { seedWorkingContextDashboardFixture } from "../../../scripts/seed-working-context-dashboard-fixture.ts";
 import {
@@ -83,8 +87,16 @@ async function main(): Promise<void> {
       fixture.expected_latest_runtime_status
     );
     assert.equal(
+      runDetail.latest_runtime_verification?.verifier_kit,
+      fixture.expected_verifier_kit
+    );
+    assert.equal(
       runDetail.latest_adversarial_verification?.status,
       fixture.expected_latest_adversarial_status
+    );
+    assert.equal(
+      runDetail.latest_adversarial_verification?.verifier_kit,
+      fixture.expected_verifier_kit
     );
     assert.equal(runDetail.latest_handoff_bundle?.summary, fixture.expected_handoff_summary);
     assert.equal(
@@ -115,8 +127,16 @@ async function main(): Promise<void> {
       fixture.expected_latest_runtime_status
     );
     assert.equal(
+      selectedRun?.latest_runtime_verification?.verifier_kit,
+      fixture.expected_verifier_kit
+    );
+    assert.equal(
       selectedRun?.latest_adversarial_verification?.status,
       fixture.expected_latest_adversarial_status
+    );
+    assert.equal(
+      selectedRun?.latest_adversarial_verification?.verifier_kit,
+      fixture.expected_verifier_kit
     );
     assert.equal(selectedRun?.maintenance_plane?.blocked_diagnosis.status, "attention");
     assert.equal(
@@ -186,6 +206,16 @@ async function main(): Promise<void> {
     assert.match(policyMarkup, /Policy Lane/);
     assert.match(policyMarkup, /批准 Execution/);
     assert.match(policyMarkup, /打回重规划/);
+
+    const verificationMarkup = renderToStaticMarkup(
+      <RunVerificationPanel selectedRunAttemptDetail={selectedRunAttemptDetail} />
+    );
+    assert.match(verificationMarkup, /Verification Lane/);
+    assert.match(verificationMarkup, /验证套件/);
+    assert.match(
+      verificationMarkup,
+      new RegExp(escapeRegExp(fixture.expected_verifier_kit))
+    );
 
     const inboxMarkup = renderToStaticMarkup(
       <RunInboxPanel

@@ -283,6 +283,9 @@ export type RunLatestPreflightEvaluation = {
   failure_policy_mode: string | null;
   failure_code: string | null;
   failure_reason: string | null;
+  contract: {
+    verifier_kit: string | null;
+  } | null;
   checks: Array<{
     code: string;
     status: string;
@@ -296,6 +299,7 @@ export type RunLatestRuntimeVerification = {
   attempt_id: string;
   attempt_type: string;
   status: string;
+  verifier_kit: string | null;
   failure_class: string | null;
   failure_policy_mode: string | null;
   failure_code: string | null;
@@ -309,6 +313,7 @@ export type RunLatestAdversarialVerification = {
   attempt_id: string;
   attempt_type: string;
   status: string;
+  verifier_kit: string | null;
   failure_class: string | null;
   failure_policy_mode: string | null;
   verdict: string | null;
@@ -475,6 +480,7 @@ export type RunDetail = {
       success_criteria: string[];
       required_evidence: string[];
       adversarial_verification_required: boolean;
+      verifier_kit: string | null;
       forbidden_shortcuts: string[];
       expected_artifacts: string[];
       verification_plan?: {
@@ -507,6 +513,7 @@ export type RunDetail = {
     } | null;
     runtime_verification: {
       status: string;
+      verifier_kit: string | null;
       failure_class: string | null;
       failure_policy_mode: string | null;
       failure_code: string | null;
@@ -522,6 +529,7 @@ export type RunDetail = {
     } | null;
     adversarial_verification: {
       status: string;
+      verifier_kit: string | null;
       failure_class: string | null;
       failure_policy_mode: string | null;
       verdict: string | null;

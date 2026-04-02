@@ -44,8 +44,11 @@ import {
   type AttemptRuntimeVerification,
   type Branch,
   type CurrentDecision,
+  DEFAULT_EXECUTION_VERIFIER_KIT,
+  resolveExecutionVerifierKit,
   type RunAutomationControl,
   type ExecutionVerificationPlan,
+  type ExecutionVerifierKit,
   type EvalSpec,
   type Goal,
   type ReviewPacketArtifact,
@@ -346,11 +349,14 @@ async function workspaceHasLocalNodeModules(workspaceRoot: string): Promise<bool
 
 export async function assessExecutionVerificationToolchain(input: {
   workspaceRoot: string;
+  verifierKit?: ExecutionVerifierKit | null;
   verificationPlan?: ExecutionVerificationPlan | null;
 }): Promise<ExecutionVerificationToolchainAssessment> {
   const scripts = await readWorkspacePackageScripts(input.workspaceRoot);
   const inferredCommands =
-    scripts === null ? [] : buildDefaultExecutionVerificationCommandsFromScripts(scripts);
+    scripts === null || (input.verifierKit ?? DEFAULT_EXECUTION_VERIFIER_KIT) !== "repo"
+      ? []
+      : buildDefaultExecutionVerificationCommandsFromScripts(scripts);
   const blockedPnpmCommands = (input.verificationPlan?.commands ?? [])
     .map((command: ExecutionVerificationPlan["commands"][number]) => command.command.trim())
     .filter((command: string) => command.startsWith("pnpm "));
@@ -2605,6 +2611,7 @@ export class Orchestrator {
       await saveAttemptAdversarialVerification(this.workspacePaths, verification);
       return verification;
     };
+    const verifierKit = resolveExecutionVerifierKit(input.attemptContract);
 
     if (input.attempt.attempt_type !== "execution") {
       return await persist(
@@ -2613,6 +2620,7 @@ export class Orchestrator {
           attempt_id: input.attempt.id,
           attempt_type: input.attempt.attempt_type,
           status: "not_applicable",
+          verifier_kit: verifierKit,
           summary: "Adversarial verification only applies to execution attempts."
         })
       );
@@ -2625,6 +2633,7 @@ export class Orchestrator {
           attempt_id: input.attempt.id,
           attempt_type: input.attempt.attempt_type,
           status: "not_applicable",
+          verifier_kit: verifierKit,
           summary:
             "Adversarial verification was skipped because deterministic runtime verification did not pass.",
           failure_reason: input.runtimeVerification.failure_reason
@@ -2639,6 +2648,7 @@ export class Orchestrator {
           attempt_id: input.attempt.id,
           attempt_type: input.attempt.attempt_type,
           status: "failed",
+          verifier_kit: verifierKit,
           verdict: "fail",
           summary: "Execution contract is missing the adversarial verification requirement.",
           failure_code: "missing_requirement",
@@ -2664,6 +2674,7 @@ export class Orchestrator {
           attempt_id: input.attempt.id,
           attempt_type: input.attempt.attempt_type,
           status: "failed",
+          verifier_kit: verifierKit,
           verdict: "fail",
           summary: "Execution finished without a machine-readable adversarial verification artifact.",
           failure_code: "missing_artifact",
@@ -2691,7 +2702,8 @@ export class Orchestrator {
               ? "passed"
               : raw.verdict === "fail" || raw.verdict === "partial"
                 ? "failed"
-                : "failed",
+              : "failed",
+        verifier_kit: verifierKit,
         verdict:
           raw.verdict === "pass" || raw.verdict === "fail" || raw.verdict === "partial"
             ? raw.verdict
@@ -2753,6 +2765,7 @@ export class Orchestrator {
         run_id: normalized.run_id,
         attempt_id: normalized.attempt_id,
         attempt_type: normalized.attempt_type,
+        verifier_kit: normalized.verifier_kit,
         verdict: normalized.verdict,
         summary: normalized.summary,
         checks: normalized.checks,
@@ -2850,6 +2863,7 @@ export class Orchestrator {
           attempt_id: input.attempt.id,
           attempt_type: input.attempt.attempt_type,
           status: "failed",
+          verifier_kit: verifierKit,
           verdict: "fail",
           summary: "Execution left an unreadable adversarial verification artifact.",
           failure_code: "invalid_artifact",
@@ -4289,9 +4303,14 @@ export class Orchestrator {
       const draft = isExecutionContractDraft(nextExecutionDraft)
         ? nextExecutionDraft
         : null;
+      const verifierKit =
+        resolveExecutionVerifierKit(draft) ??
+        resolveExecutionVerifierKit(reusableExecutionContract) ??
+        DEFAULT_EXECUTION_VERIFIER_KIT;
       const inferredVerificationPlan =
+        draft?.verification_plan ??
         reusableExecutionContract?.verification_plan ??
-        (await this.inferDefaultExecutionVerificationPlan(attempt.workspace_root));
+        (await this.inferDefaultExecutionVerificationPlan(attempt.workspace_root, verifierKit));
       return createAttemptContract({
         attempt_id: attempt.id,
         run_id: run.id,
@@ -4310,6 +4329,7 @@ export class Orchestrator {
           draft?.adversarial_verification_required ??
           reusableExecutionContract?.adversarial_verification_required ??
           true,
+        verifier_kit: verifierKit,
         done_rubric:
           draft && draft.done_rubric.length > 0
             ? draft.done_rubric
@@ -4332,7 +4352,7 @@ export class Orchestrator {
         expected_artifacts:
           draft?.expected_artifacts ??
           reusableExecutionContract?.expected_artifacts ?? ["changed files visible in git status"],
-        verification_plan: draft?.verification_plan ?? inferredVerificationPlan
+        verification_plan: inferredVerificationPlan
       });
     }
 
@@ -4355,8 +4375,13 @@ export class Orchestrator {
   }
 
   private async inferDefaultExecutionVerificationPlan(
-    workspaceRoot: string
+    workspaceRoot: string,
+    verifierKit: ExecutionVerifierKit = DEFAULT_EXECUTION_VERIFIER_KIT
   ): Promise<ExecutionVerificationPlan | undefined> {
+    if (verifierKit !== "repo") {
+      return undefined;
+    }
+
     const scripts = await readWorkspacePackageScripts(workspaceRoot);
     if (!scripts) {
       return undefined;
@@ -4428,6 +4453,7 @@ export class Orchestrator {
       has_required_evidence: attemptContract.required_evidence.length > 0,
       requires_adversarial_verification:
         attemptContract.adversarial_verification_required === true,
+      verifier_kit: resolveExecutionVerifierKit(attemptContract),
       has_done_rubric: attemptContract.done_rubric.length > 0,
       has_failure_modes: attemptContract.failure_modes.length > 0,
       has_verification_plan: (attemptContract.verification_plan?.commands.length ?? 0) > 0,
@@ -4470,6 +4496,7 @@ export class Orchestrator {
     });
     const assessment = await assessExecutionVerificationToolchain({
       workspaceRoot: input.attempt.workspace_root,
+      verifierKit: resolveExecutionVerifierKit(input.attemptContract),
       verificationPlan: input.attemptContract.verification_plan ?? null
     });
     const contractSummary = this.buildAttemptContractPreflightSummary(input.attemptContract);

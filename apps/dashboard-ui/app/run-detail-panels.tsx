@@ -775,10 +775,17 @@ export function RunVerificationPanel({
   selectedRunAttemptDetail: RunDetail["attempt_details"][number] | null;
 }) {
   const verification = selectedRunAttemptDetail?.runtime_verification ?? null;
+  const adversarialVerification =
+    selectedRunAttemptDetail?.adversarial_verification ?? null;
   const evaluation = selectedRunAttemptDetail?.evaluation ?? null;
   const contract = selectedRunAttemptDetail?.contract ?? null;
   const attempt = selectedRunAttemptDetail?.attempt ?? null;
   const verificationCommands = contract?.verification_plan?.commands ?? [];
+  const verifierKit =
+    contract?.verifier_kit ??
+    verification?.verifier_kit ??
+    adversarialVerification?.verifier_kit ??
+    "暂无";
   const passedCommands =
     verification?.command_results.filter((command) => command.passed).length ?? 0;
   const isExecutionAttempt = attempt?.attempt_type === "execution";
@@ -795,6 +802,7 @@ export function RunVerificationPanel({
       subtitle="把当前 attempt 的 replay readiness、运行时回放和证据缺口直接抬到 operator 面前。"
     >
       <div className="summary-grid">
+        <InfoCard label="验证套件" value={verifierKit} />
         <InfoCard label="回放状态" value={verificationStatusLabel} />
         <InfoCard label="契约命令" value={String(verificationCommands.length)} />
         <InfoCard
@@ -850,6 +858,7 @@ export function RunVerificationPanel({
             items={[
               `尝试：${attempt?.id ?? "暂无"}`,
               `类型：${attempt ? attemptTypeLabel(attempt.attempt_type) : "暂无"}`,
+              `验证套件：${verifierKit}`,
               `回放状态：${verificationStatusLabel}`,
               `失败码：${verification?.failure_code ?? "暂无"}`,
               `改动文件：${String(verification?.changed_files.length ?? 0)}`,
