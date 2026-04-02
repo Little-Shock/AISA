@@ -1,6 +1,6 @@
 import { constants as fsConstants } from "node:fs";
 import { createWriteStream } from "node:fs";
-import { access, cp, mkdir, readFile } from "node:fs/promises";
+import { access, cp, mkdir, readFile, stat } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import {
@@ -28,6 +28,19 @@ export interface AttemptRuntimeVerificationOutcome {
   verification: AttemptRuntimeVerification;
   artifact_path: string;
 }
+
+export type VerificationCommandReadiness =
+  | {
+      ok: true;
+      cwd: string;
+      executable: string;
+    }
+  | {
+      ok: false;
+      cwd: string | null;
+      executable: string | null;
+      reason: string;
+    };
 
 interface GitCheckpointPreflightArtifact {
   status: "ready" | "not_git_repo";
@@ -498,7 +511,87 @@ function buildGitStatusDelta(input: {
   };
 }
 
-function resolveVerificationCwd(
+export async function probeVerificationCommandReadiness(input: {
+  workspaceRoot: string;
+  command: VerificationCommand;
+}): Promise<VerificationCommandReadiness> {
+  const resolvedCwd = resolveVerificationCwd(input.workspaceRoot, input.command);
+  if (!resolvedCwd.ok) {
+    return {
+      ok: false,
+      cwd: null,
+      executable: null,
+      reason: resolvedCwd.reason
+    };
+  }
+
+  try {
+    const cwdStat = await stat(resolvedCwd.cwd);
+    if (!cwdStat.isDirectory()) {
+      return {
+        ok: false,
+        cwd: resolvedCwd.cwd,
+        executable: null,
+        reason: `Verification command "${input.command.purpose}" uses cwd "${input.command.cwd ?? "."}" but that path is not a directory.`
+      };
+    }
+  } catch {
+    return {
+      ok: false,
+      cwd: resolvedCwd.cwd,
+      executable: null,
+      reason: `Verification command "${input.command.purpose}" uses cwd "${input.command.cwd ?? "."}" but that path is missing or unreadable.`
+    };
+  }
+
+  const executable = extractVerificationCommandExecutable(input.command.command);
+  if (!executable) {
+    return {
+      ok: false,
+      cwd: resolvedCwd.cwd,
+      executable: null,
+      reason: `Verification command "${input.command.purpose}" does not expose a runnable executable token.`
+    };
+  }
+
+  if (isPathLikeExecutable(executable)) {
+    const resolvedExecutable = isAbsolute(executable)
+      ? executable
+      : resolve(resolvedCwd.cwd, executable);
+    try {
+      await access(resolvedExecutable, fsConstants.X_OK);
+      return {
+        ok: true,
+        cwd: resolvedCwd.cwd,
+        executable: resolvedExecutable
+      };
+    } catch {
+      return {
+        ok: false,
+        cwd: resolvedCwd.cwd,
+        executable: resolvedExecutable,
+        reason: `Verification command "${input.command.purpose}" cannot execute "${executable}" from cwd "${relative(input.workspaceRoot, resolvedCwd.cwd) || "."}".`
+      };
+    }
+  }
+
+  if (await shellCanResolveExecutable(executable, resolvedCwd.cwd)) {
+    return {
+      ok: true,
+      cwd: resolvedCwd.cwd,
+      executable
+    };
+  }
+
+  return {
+    ok: false,
+    cwd: resolvedCwd.cwd,
+    executable,
+    reason: `Verification command "${input.command.purpose}" cannot resolve executable "${executable}" from cwd "${relative(input.workspaceRoot, resolvedCwd.cwd) || "."}".`
+  };
+}
+
+export function resolveVerificationCwd(
   workspaceRoot: string,
   command: VerificationCommand
 ):
@@ -531,6 +624,61 @@ function resolveVerificationCwd(
     ok: true,
     cwd
   };
+}
+
+function extractVerificationCommandExecutable(command: string): string | null {
+  const tokens = command.match(/'[^']*'|"[^"]*"|\S+/g) ?? [];
+
+  for (const token of tokens) {
+    const normalizedToken = stripShellTokenQuotes(token);
+    if (normalizedToken.length === 0) {
+      continue;
+    }
+
+    if (/^[A-Za-z_][A-Za-z0-9_]*=.*/u.test(normalizedToken)) {
+      continue;
+    }
+
+    return normalizedToken;
+  }
+
+  return null;
+}
+
+function stripShellTokenQuotes(token: string): string {
+  if (
+    (token.startsWith('"') && token.endsWith('"')) ||
+    (token.startsWith("'") && token.endsWith("'"))
+  ) {
+    return token.slice(1, -1);
+  }
+
+  return token;
+}
+
+function isPathLikeExecutable(token: string): boolean {
+  return isAbsolute(token) || token.includes("/");
+}
+
+function shellEscapeSingleQuoted(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+async function shellCanResolveExecutable(executable: string, cwd: string): Promise<boolean> {
+  const shell = await resolveVerificationShell();
+
+  return await new Promise<boolean>((resolve) => {
+    const child = spawn(
+      shell,
+      ["-lc", `command -v ${shellEscapeSingleQuoted(executable)} >/dev/null 2>&1`],
+      {
+        cwd,
+        stdio: "ignore"
+      }
+    );
+    child.on("error", () => resolve(false));
+    child.on("close", (code) => resolve(code === 0));
+  });
 }
 
 function isSelfBootstrapVerificationCommand(command: string): boolean {

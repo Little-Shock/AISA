@@ -84,6 +84,9 @@ type ScenarioDriver =
   | "execution_dirty_workspace_without_new_changes_fails_verification"
   | "execution_missing_verification_plan"
   | "execution_missing_local_toolchain_blocks_dispatch"
+  | "execution_workspace_not_git_repo_blocks_dispatch"
+  | "execution_missing_verification_cwd_blocks_dispatch"
+  | "execution_unrunnable_verification_command_blocks_dispatch"
   | "execution_parse_failure"
   | "orphaned_running_attempt"
   | "execution_retry_after_recovery_preserves_contract"
@@ -534,6 +537,17 @@ class ScenarioAdapter {
       throw new Error("Missing-toolchain case must be blocked before worker dispatch.");
     }
 
+    if (
+      [
+        "execution_workspace_not_git_repo_blocks_dispatch",
+        "execution_missing_verification_cwd_blocks_dispatch",
+        "execution_unrunnable_verification_command_blocks_dispatch"
+      ].includes(this.driver) &&
+      input.attempt.attempt_type === "execution"
+    ) {
+      throw new Error("Shadow dispatch case must be blocked before worker dispatch.");
+    }
+
     const key = input.run.id;
     const nextCount = (this.counts.get(key) ?? 0) + 1;
     this.counts.set(key, nextCount);
@@ -616,6 +630,9 @@ class ScenarioAdapter {
       this.driver === "execution_dirty_workspace_without_new_changes_fails_verification" ||
       this.driver === "execution_missing_verification_plan" ||
       this.driver === "execution_missing_local_toolchain_blocks_dispatch" ||
+      this.driver === "execution_workspace_not_git_repo_blocks_dispatch" ||
+      this.driver === "execution_missing_verification_cwd_blocks_dispatch" ||
+      this.driver === "execution_unrunnable_verification_command_blocks_dispatch" ||
       this.driver === "execution_retry_after_recovery_preserves_contract"
         ? this.buildHappyPathWriteback(input.attempt, nextCount)
         : this.buildStuckWriteback(nextCount);
@@ -636,6 +653,25 @@ class ScenarioAdapter {
       const nextAttemptVerificationPlan =
         this.driver === "execution_missing_local_toolchain_blocks_dispatch"
           ? undefined
+          : this.driver === "execution_missing_verification_cwd_blocks_dispatch"
+            ? {
+                commands: [
+                  {
+                    purpose: "probe a missing verification cwd before dispatch",
+                    command: this.buildExecutionVerificationCommand(),
+                    cwd: "missing-preflight-cwd"
+                  }
+                ]
+              }
+            : this.driver === "execution_unrunnable_verification_command_blocks_dispatch"
+              ? {
+                  commands: [
+                    {
+                      purpose: "probe a missing verifier binary before dispatch",
+                      command: "shadow-dispatch-missing-binary --version"
+                    }
+                  ]
+                }
           : {
               commands: [
                 {
@@ -977,6 +1013,9 @@ function shouldAutoApprovePendingExecution(driver: ScenarioDriver): boolean {
     "execution_dirty_workspace_without_new_changes_fails_verification",
     "execution_missing_verification_plan",
     "execution_missing_local_toolchain_blocks_dispatch",
+    "execution_workspace_not_git_repo_blocks_dispatch",
+    "execution_missing_verification_cwd_blocks_dispatch",
+    "execution_unrunnable_verification_command_blocks_dispatch",
     "execution_parse_failure",
     "execution_retry_after_recovery_preserves_contract"
   ].includes(driver);
@@ -3606,6 +3645,9 @@ async function runCase(scenario: ScenarioCase): Promise<ScenarioObservation> {
     scenario.driver === "execution_verified_next_step_continues" ||
     scenario.driver === "execution_runtime_source_drift_requires_restart" ||
     scenario.driver === "execution_missing_verification_plan" ||
+    scenario.driver === "execution_parse_failure" ||
+    scenario.driver === "execution_missing_verification_cwd_blocks_dispatch" ||
+    scenario.driver === "execution_unrunnable_verification_command_blocks_dispatch" ||
     scenario.driver === "execution_retry_after_recovery_preserves_contract"
   ) {
     if (scenario.driver === "execution_runtime_source_drift_requires_restart") {
@@ -4783,6 +4825,65 @@ function assertCase(scenario: ScenarioCase, observation: ScenarioObservation): v
       executionPacket.attempt_contract_verification_commands,
       [],
       `${scenario.id}: execution attempt contract should stay free of inferred pnpm commands`
+    );
+  }
+
+  if (scenario.driver === "execution_workspace_not_git_repo_blocks_dispatch") {
+    const executionPacket = observation.review_packets.find(
+      (packet) => packet.attempt_status === "failed"
+    );
+    assert.ok(executionPacket, `${scenario.id}: expected a failed execution review packet`);
+    assert.equal(executionPacket.attempt_started_at, null);
+    assert.equal(executionPacket.has_result, false);
+    assert.equal(executionPacket.has_runtime_verification, false);
+    assert.equal(executionPacket.has_preflight_evaluation, true);
+    assert.equal(executionPacket.preflight_evaluation_status, "failed");
+    assert.equal(executionPacket.preflight_evaluation_failure_code, "workspace_not_git_repo");
+    assert.ok(
+      executionPacket.preflight_evaluation_failure_reason?.includes("not a git repository"),
+      `${scenario.id}: preflight should explain that no git baseline can be captured`
+    );
+  }
+
+  if (scenario.driver === "execution_missing_verification_cwd_blocks_dispatch") {
+    const executionPacket = observation.review_packets.find(
+      (packet) => packet.attempt_status === "failed"
+    );
+    assert.ok(executionPacket, `${scenario.id}: expected a failed execution review packet`);
+    assert.equal(executionPacket.attempt_started_at, null);
+    assert.equal(executionPacket.has_result, false);
+    assert.equal(executionPacket.has_runtime_verification, false);
+    assert.equal(executionPacket.has_preflight_evaluation, true);
+    assert.equal(executionPacket.preflight_evaluation_status, "failed");
+    assert.equal(
+      executionPacket.preflight_evaluation_failure_code,
+      "verification_command_not_runnable"
+    );
+    assert.ok(
+      executionPacket.preflight_evaluation_failure_reason?.includes("missing or unreadable"),
+      `${scenario.id}: preflight should surface the missing verification cwd`
+    );
+  }
+
+  if (scenario.driver === "execution_unrunnable_verification_command_blocks_dispatch") {
+    const executionPacket = observation.review_packets.find(
+      (packet) => packet.attempt_status === "failed"
+    );
+    assert.ok(executionPacket, `${scenario.id}: expected a failed execution review packet`);
+    assert.equal(executionPacket.attempt_started_at, null);
+    assert.equal(executionPacket.has_result, false);
+    assert.equal(executionPacket.has_runtime_verification, false);
+    assert.equal(executionPacket.has_preflight_evaluation, true);
+    assert.equal(executionPacket.preflight_evaluation_status, "failed");
+    assert.equal(
+      executionPacket.preflight_evaluation_failure_code,
+      "verification_command_not_runnable"
+    );
+    assert.ok(
+      executionPacket.preflight_evaluation_failure_reason?.includes(
+        "cannot resolve executable"
+      ),
+      `${scenario.id}: preflight should fail before dispatch when the verifier binary is missing`
     );
   }
 }

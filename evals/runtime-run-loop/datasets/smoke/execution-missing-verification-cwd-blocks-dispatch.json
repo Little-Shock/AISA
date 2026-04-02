@@ -1,0 +1,22 @@
+{
+  "id": "execution-missing-verification-cwd-blocks-dispatch",
+  "description": "A replay command whose declared cwd is missing must fail preflight before dispatch and leave no fake worker start.",
+  "driver": "execution_missing_verification_cwd_blocks_dispatch",
+  "max_ticks": 6,
+  "expected": {
+    "run_status": "waiting_steer",
+    "waiting_for_human": true,
+    "recommended_next_action": "wait_for_human",
+    "attempt_types": ["research", "execution"],
+    "attempt_statuses": ["completed", "failed"],
+    "verification_statuses": ["not_applicable"],
+    "required_journal_types": ["attempt.completed", "attempt.preflight.failed", "attempt.failed"],
+    "required_journal_counts": {
+      "attempt.started": 1,
+      "attempt.preflight.failed": 1,
+      "attempt.completed": 1,
+      "attempt.failed": 1
+    },
+    "blocking_reason_includes": "missing or unreadable"
+  }
+}

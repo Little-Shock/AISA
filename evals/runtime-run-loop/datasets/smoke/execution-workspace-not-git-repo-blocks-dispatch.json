@@ -1,0 +1,22 @@
+{
+  "id": "execution-workspace-not-git-repo-blocks-dispatch",
+  "description": "An execution workspace that is not a git repository must fail preflight before dispatch so runtime never starts without a baseline.",
+  "driver": "execution_workspace_not_git_repo_blocks_dispatch",
+  "max_ticks": 6,
+  "expected": {
+    "run_status": "waiting_steer",
+    "waiting_for_human": true,
+    "recommended_next_action": "wait_for_human",
+    "attempt_types": ["research", "execution"],
+    "attempt_statuses": ["completed", "failed"],
+    "verification_statuses": ["not_applicable"],
+    "required_journal_types": ["attempt.completed", "attempt.preflight.failed", "attempt.failed"],
+    "required_journal_counts": {
+      "attempt.started": 1,
+      "attempt.preflight.failed": 1,
+      "attempt.completed": 1,
+      "attempt.failed": 1
+    },
+    "blocking_reason_includes": "not a git repository"
+  }
+}

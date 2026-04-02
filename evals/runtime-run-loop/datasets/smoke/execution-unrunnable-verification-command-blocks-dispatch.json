@@ -1,0 +1,22 @@
+{
+  "id": "execution-unrunnable-verification-command-blocks-dispatch",
+  "description": "A replay command whose executable cannot be resolved must fail preflight before dispatch instead of dying during runtime verification.",
+  "driver": "execution_unrunnable_verification_command_blocks_dispatch",
+  "max_ticks": 6,
+  "expected": {
+    "run_status": "waiting_steer",
+    "waiting_for_human": true,
+    "recommended_next_action": "wait_for_human",
+    "attempt_types": ["research", "execution"],
+    "attempt_statuses": ["completed", "failed"],
+    "verification_statuses": ["not_applicable"],
+    "required_journal_types": ["attempt.completed", "attempt.preflight.failed", "attempt.failed"],
+    "required_journal_counts": {
+      "attempt.started": 1,
+      "attempt.preflight.failed": 1,
+      "attempt.completed": 1,
+      "attempt.failed": 1
+    },
+    "blocking_reason_includes": "cannot resolve executable"
+  }
+}

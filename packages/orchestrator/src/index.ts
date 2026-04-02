@@ -160,6 +160,7 @@ import {
 } from "./governance.js";
 import {
   detectLiveRuntimeSourceDrift,
+  probeVerificationCommandReadiness,
   runAttemptRuntimeVerification,
   type AttemptRuntimeVerificationOutcome
 } from "./runtime-verification.js";
@@ -275,6 +276,12 @@ export type ExecutionVerificationToolchainAssessment = {
   has_local_node_modules: boolean;
   inferred_pnpm_commands: string[];
   blocked_pnpm_commands: string[];
+  unrunnable_verification_commands: Array<{
+    purpose: string;
+    command: string;
+    cwd: string | null;
+    reason: string;
+  }>;
 };
 
 type AttemptDispatchPreflightOutcome = {
@@ -348,6 +355,30 @@ export async function assessExecutionVerificationToolchain(input: {
     .map((command: ExecutionVerificationPlan["commands"][number]) => command.command.trim())
     .filter((command: string) => command.startsWith("pnpm "));
   const hasLocalNodeModules = await workspaceHasLocalNodeModules(input.workspaceRoot);
+  const unrunnableVerificationCommands = (
+    await Promise.all(
+      (input.verificationPlan?.commands ?? []).map(async (command) => {
+        const readiness = await probeVerificationCommandReadiness({
+          workspaceRoot: input.workspaceRoot,
+          command
+        });
+
+        if (readiness.ok) {
+          return null;
+        }
+
+        return {
+          purpose: command.purpose,
+          command: command.command,
+          cwd: command.cwd ?? null,
+          reason: readiness.reason
+        };
+      })
+    )
+  ).filter(
+    (entry): entry is NonNullable<ExecutionVerificationToolchainAssessment["unrunnable_verification_commands"][number]> =>
+      entry !== null
+  );
 
   return {
     has_package_json: scripts !== null,
@@ -355,7 +386,8 @@ export async function assessExecutionVerificationToolchain(input: {
     inferred_pnpm_commands: inferredCommands.map(
       (command: ExecutionVerificationPlan["commands"][number]) => command.command
     ),
-    blocked_pnpm_commands: blockedPnpmCommands
+    blocked_pnpm_commands: blockedPnpmCommands,
+    unrunnable_verification_commands: unrunnableVerificationCommands
   };
 }
 
@@ -4530,6 +4562,44 @@ export class Orchestrator {
         "not_applicable",
         "verification_plan check was skipped after an earlier preflight failure."
       );
+    }
+
+    if (checkpointPreflight?.status === "ready" && checkpointPreflight.repo_root) {
+      addCheck(
+        "workspace_is_git_repo",
+        "passed",
+        "Execution workspace is a git repository and can capture a real preflight baseline."
+      );
+    } else if (!failureReason) {
+      failureCode = "workspace_not_git_repo";
+      failureReason = `Execution attempt ${input.attempt.id} is blocked before dispatch because ${input.attempt.workspace_root} is not a git repository, so the runtime cannot capture a preflight baseline.`;
+      addCheck("workspace_is_git_repo", "failed", failureReason);
+    } else {
+      addCheck(
+        "workspace_is_git_repo",
+        "not_applicable",
+        "git baseline check was skipped after an earlier preflight failure."
+      );
+    }
+
+    const unrunnableVerificationCommand =
+      assessment.unrunnable_verification_commands[0] ?? null;
+    if (failureReason) {
+      addCheck(
+        "verification_commands_runnable",
+        "not_applicable",
+        "verification command probe was skipped after an earlier preflight failure."
+      );
+    } else if (!unrunnableVerificationCommand) {
+      addCheck(
+        "verification_commands_runnable",
+        "passed",
+        "Replay commands resolved to runnable executables in the declared workspace cwd."
+      );
+    } else {
+      failureCode = "verification_command_not_runnable";
+      failureReason = unrunnableVerificationCommand.reason;
+      addCheck("verification_commands_runnable", "failed", failureReason);
     }
 
     const blockedPnpmMessage = this.buildBlockedPnpmVerificationMessage(

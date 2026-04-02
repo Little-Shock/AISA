@@ -676,7 +676,17 @@ export const ExecutionVerificationToolchainAssessmentSchema = z.object({
   has_package_json: z.boolean(),
   has_local_node_modules: z.boolean(),
   inferred_pnpm_commands: z.array(z.string().min(1)).default([]),
-  blocked_pnpm_commands: z.array(z.string().min(1)).default([])
+  blocked_pnpm_commands: z.array(z.string().min(1)).default([]),
+  unrunnable_verification_commands: z
+    .array(
+      z.object({
+        purpose: z.string().min(1),
+        command: z.string().min(1),
+        cwd: z.string().min(1).nullable().default(null),
+        reason: z.string().min(1)
+      })
+    )
+    .default([])
 });
 
 export const AttemptContractPreflightSummarySchema = z.object({
@@ -708,7 +718,9 @@ export const AttemptPreflightFailureCodeSchema = z.enum([
   "missing_done_rubric",
   "missing_failure_modes",
   "missing_contract_verification_plan",
-  "blocked_pnpm_verification_plan"
+  "blocked_pnpm_verification_plan",
+  "workspace_not_git_repo",
+  "verification_command_not_runnable"
 ]);
 
 export const AttemptPreflightEvaluationSchema = z.object({
@@ -1275,6 +1287,14 @@ function buildDefaultExecutionFailureModes(): AttemptFailureMode[] {
     {
       code: "missing_local_verifier_toolchain",
       description: "Do not dispatch when pnpm replay depends on local node_modules that are missing."
+    },
+    {
+      code: "workspace_not_git_repo",
+      description: "Do not dispatch execution when the workspace is not a git repository and no baseline can be captured."
+    },
+    {
+      code: "verification_command_not_runnable",
+      description: "Do not dispatch when replay commands point at a missing cwd or an executable that cannot be resolved."
     },
     {
       code: "unchanged_workspace_state",

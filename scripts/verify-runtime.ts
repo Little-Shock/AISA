@@ -241,6 +241,19 @@ async function assertRunLoopReplay(): Promise<RunLoopReport> {
     "execution preflight fail-closed smoke 必须通过。"
   );
 
+  const shadowDispatchCase = report.results.find(
+    (entry) => entry.id === "execution-unrunnable-verification-command-blocks-dispatch"
+  );
+  assert.ok(
+    shadowDispatchCase,
+    "run-loop 回归必须包含 execution-unrunnable-verification-command-blocks-dispatch。"
+  );
+  assert.equal(
+    shadowDispatchCase.status,
+    "pass",
+    "shadow dispatch smoke 必须在 dispatch 前拦住坏的 verifier 命令。"
+  );
+
   return report;
 }
 
