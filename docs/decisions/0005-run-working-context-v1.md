@@ -29,6 +29,7 @@ AISA 已经有 `current.json`、`automation.json`、`governance.json`、attempt 
 
 写入策略先收紧到少数主链时机。
 
+- attempt 创建并落下 contract 后
 - attempt 真正启动后
 - attempt settled 后
 - `current.json` 或 `automation.json` 被直接改写且不会经过上面两个主钩子时
@@ -45,10 +46,11 @@ dashboard 第一版只在 run detail 顶部读这套数据。
 
 读面不允许在 working context 缺失或落后时静默猜测。
 
-第一版明确暴露两种 degraded。
+第一版明确暴露三种 degraded。
 
 - `context_missing`
 - `context_stale`
+- `context_write_failed`
 
 写入失败继续按 fail-closed 处理，不靠 fallback 掩盖。
 
@@ -58,4 +60,4 @@ active run 终于有了一份 run 级现场工件。
 
 operator 不需要再先拼 `current`、journal 和 attempt 工件，才能知道当前焦点、卡点和最近证据。
 
-自动续跑恢复链继续只认 `handoff_bundle`，避免 active scene 和 settled recovery 混线。
+自动续跑恢复链继续只认 `handoff_bundle`，但 active run 如果读到 degraded 的 working context，会先停下修现场，不假装上下文完整。

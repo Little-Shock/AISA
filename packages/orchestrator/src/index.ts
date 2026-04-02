@@ -187,6 +187,7 @@ import {
   type SelfBootstrapNextTaskActiveEntry
 } from "./self-bootstrap-next-task.js";
 import { refreshRunOperatorSurface } from "./maintenance-plane.js";
+import { readRunWorkingContextView } from "./working-context.js";
 import {
   deriveFailureSignalFromAdversarialVerification,
   deriveFailureSignalFromPreflight,
@@ -1552,6 +1553,7 @@ export class Orchestrator {
           }
         })
       );
+      await refreshRunOperatorSurface(this.workspacePaths, run.id);
     });
   }
 
@@ -4817,6 +4819,31 @@ export class Orchestrator {
       return {
         reason: "workspace_scope_blocked",
         message: workspaceScopeMessage
+      };
+    }
+
+    const workingContextView = await readRunWorkingContextView(
+      this.workspacePaths,
+      input.runId
+    );
+    const latestAttemptIsSettled =
+      input.latestAttempt?.status === "completed" || input.latestAttempt?.status === "failed";
+    const canRecoverFromSettledHandoff =
+      latestAttemptIsSettled && input.latestHandoffBundle !== null;
+    if (
+      workingContextView.working_context_degraded.is_degraded &&
+      !canRecoverFromSettledHandoff &&
+      (input.latestAttempt !== null ||
+        workingContextView.working_context_degraded.reason_code !== "context_missing")
+    ) {
+      return {
+        reason: "working_context_degraded",
+        message:
+          workingContextView.working_context_degraded.summary ??
+          "Working context is degraded, so automatic resume stays blocked.",
+        failureClass: "working_context_degraded",
+        failurePolicyMode: "fail_closed",
+        failureCode: workingContextView.working_context_degraded.reason_code ?? null
       };
     }
 
