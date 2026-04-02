@@ -32,6 +32,7 @@ import type {
   EvalSpec,
   Goal,
   RunMaintenancePlane,
+  RunPolicyRuntime,
   RunGovernanceState,
   RunAutomationControl,
   RunBrief,
@@ -67,6 +68,7 @@ import {
   GoalSchema,
   RunAutomationControlSchema,
   RunBriefSchema,
+  RunPolicyRuntimeSchema,
   RunGovernanceStateSchema,
   RunMaintenancePlaneSchema,
   RunWorkingContextSchema,
@@ -116,6 +118,7 @@ export interface RunPaths {
   contractFile: string;
   currentFile: string;
   automationFile: string;
+  policyFile: string;
   runBriefFile: string;
   workingContextFile: string;
   governanceFile: string;
@@ -171,6 +174,7 @@ export function resolveRunPaths(paths: WorkspacePaths, runId: string): RunPaths 
     contractFile: join(runDir, "contract.json"),
     currentFile: join(runDir, "current.json"),
     automationFile: join(runDir, "automation.json"),
+    policyFile: join(runDir, "policy-runtime.json"),
     runBriefFile: join(runDir, "run-brief.json"),
     workingContextFile: join(runDir, "working-context.json"),
     governanceFile: join(runDir, "governance.json"),
@@ -566,6 +570,38 @@ export async function saveRunGovernanceState(
 ): Promise<void> {
   const runPaths = await ensureRunDirectories(paths, governanceState.run_id);
   await writeJsonFile(runPaths.governanceFile, governanceState);
+}
+
+export async function saveRunPolicyRuntime(
+  paths: WorkspacePaths,
+  policyRuntime: RunPolicyRuntime
+): Promise<void> {
+  const runPaths = await ensureRunDirectories(paths, policyRuntime.run_id);
+  await writeJsonFile(runPaths.policyFile, policyRuntime);
+}
+
+export async function getRunPolicyRuntime(
+  paths: WorkspacePaths,
+  runId: string
+): Promise<RunPolicyRuntime | null> {
+  try {
+    const policyRuntime = await readJsonFile<RunPolicyRuntime>(
+      resolveRunPaths(paths, runId).policyFile
+    );
+    return RunPolicyRuntimeSchema.parse(policyRuntime);
+  } catch {
+    return null;
+  }
+}
+
+export async function readRunPolicyRuntimeStrict(
+  paths: WorkspacePaths,
+  runId: string
+): Promise<RunPolicyRuntime> {
+  const policyRuntime = await readJsonFile<RunPolicyRuntime>(
+    resolveRunPaths(paths, runId).policyFile
+  );
+  return RunPolicyRuntimeSchema.parse(policyRuntime);
 }
 
 export async function getRunGovernanceState(

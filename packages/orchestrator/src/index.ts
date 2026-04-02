@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { open, readFile, stat, unlink } from "node:fs/promises";
 import { join, relative, resolve } from "node:path";
 import {
@@ -13,6 +13,7 @@ import {
   createEvent,
   createRunGovernanceState,
   createRunJournalEntry,
+  createRunPolicyRuntime,
   createWorkerRun,
   finishWorkerRun,
   updateAttempt,
@@ -22,6 +23,7 @@ import {
   updateRunAutomationControl,
   updateGoal,
   updateRunGovernanceState,
+  updateRunPolicyRuntime,
   updateRunSteer,
   updateSteer,
   resolveRunHarnessProfile,
@@ -49,6 +51,7 @@ import {
   type ReviewPacketArtifact,
   type Run,
   type RunGovernanceState,
+  type RunPolicyRuntime,
   type VerificationCommand,
   type WorkerEffortLevel,
   type WorkerWriteback
@@ -92,6 +95,7 @@ import {
   getRun,
   getRunAutomationControl,
   getRunGovernanceState,
+  getRunPolicyRuntime,
   getRunRuntimeHealthSnapshot,
   listAttempts,
   listAttemptReviewOpinions,
@@ -105,6 +109,7 @@ import {
   resolveAttemptPaths,
   resolveBranchArtifactPaths,
   resolveRunPaths,
+  readRunPolicyRuntimeStrict,
   saveAttempt,
   saveAttemptContract,
   saveAttemptContext,
@@ -127,6 +132,7 @@ import {
   saveRun,
   saveRunAutomationControl,
   saveRunGovernanceState,
+  saveRunPolicyRuntime,
   saveRunReport,
   saveRunSteer,
   saveSteer,
@@ -482,6 +488,54 @@ function isExecutionContractDraft(
   contract: AttemptContractDraft | null | undefined
 ): contract is AttemptContractDraft {
   return contract?.attempt_type === "execution";
+}
+
+type RunPolicyProposal = {
+  signature: string;
+  attemptType: Attempt["attempt_type"];
+  objective: string;
+  successCriteria: string[];
+  permissionProfile: RunPolicyRuntime["permission_profile"];
+  hookPolicy: RunPolicyRuntime["hook_policy"];
+  dangerMode: RunPolicyRuntime["danger_mode"];
+  sourceAttemptId: string | null;
+};
+
+function buildRunPolicyProposal(input: {
+  attemptType: Attempt["attempt_type"];
+  objective: string;
+  successCriteria: string[];
+  sourceAttemptId?: string | null;
+}): RunPolicyProposal {
+  return {
+    signature: createHash("sha256")
+      .update(
+        JSON.stringify({
+          attempt_type: input.attemptType,
+          objective: input.objective,
+          success_criteria: input.successCriteria
+        })
+      )
+      .digest("hex")
+      .slice(0, 20),
+    attemptType: input.attemptType,
+    objective: input.objective,
+    successCriteria: input.successCriteria,
+    permissionProfile:
+      input.attemptType === "execution" ? "workspace_write" : "read_only",
+    hookPolicy:
+      input.attemptType === "execution"
+        ? "enforce_runtime_contract"
+        : "not_required",
+    dangerMode: "forbid",
+    sourceAttemptId: input.sourceAttemptId ?? null
+  };
+}
+
+function buildPendingApprovalSummary(proposal: RunPolicyProposal): string {
+  return proposal.attemptType === "execution"
+    ? "Execution plan is ready, but dispatch is blocked pending leader approval."
+    : "Attempt plan is waiting for explicit approval.";
 }
 
 export class Orchestrator {
@@ -1164,6 +1218,285 @@ export class Orchestrator {
     });
   }
 
+  private async persistRunPolicyPlanning(runId: string): Promise<void> {
+    const policyGate = await this.readRunPolicyGate({
+      runId
+    });
+    if (policyGate.status === "invalid") {
+      return;
+    }
+
+    const existingPolicy =
+      policyGate.status === "ready" ? policyGate.policy : null;
+    if (
+      existingPolicy?.approval_required === true &&
+      existingPolicy.approval_status === "approved" &&
+      existingPolicy.proposed_attempt_type === "execution"
+    ) {
+      return;
+    }
+
+    const nextPolicy = existingPolicy
+      ? updateRunPolicyRuntime(existingPolicy, {
+          stage: "planning",
+          approval_status: "not_required",
+          approval_required: false,
+          proposed_signature: null,
+          proposed_attempt_type: null,
+          proposed_objective: null,
+          proposed_success_criteria: [],
+          permission_profile: "read_only",
+          hook_policy: "not_required",
+          danger_mode: "forbid",
+          blocking_reason: null,
+          last_decision: "planning",
+          approval_requested_at: null,
+          approval_decided_at: null,
+          approval_actor: null,
+          approval_note: null,
+          source_ref: null
+        })
+      : createRunPolicyRuntime({
+          run_id: runId,
+          stage: "planning",
+          last_decision: "planning"
+        });
+
+    await saveRunPolicyRuntime(this.workspacePaths, nextPolicy);
+  }
+
+  private async persistRunPolicyReadyForDispatch(input: {
+    runId: string;
+    proposal: RunPolicyProposal;
+  }): Promise<void> {
+    const existingPolicy = await getRunPolicyRuntime(this.workspacePaths, input.runId);
+    const approvalRequired = input.proposal.attemptType === "execution";
+    const nextPolicy = existingPolicy
+      ? updateRunPolicyRuntime(existingPolicy, {
+          stage: "execution",
+          approval_status:
+            approvalRequired && existingPolicy.approval_status === "approved"
+              ? "approved"
+              : "not_required",
+          approval_required: approvalRequired,
+          proposed_signature: input.proposal.signature,
+          proposed_attempt_type: input.proposal.attemptType,
+          proposed_objective: input.proposal.objective,
+          proposed_success_criteria: input.proposal.successCriteria,
+          permission_profile: input.proposal.permissionProfile,
+          hook_policy: input.proposal.hookPolicy,
+          danger_mode: input.proposal.dangerMode,
+          blocking_reason: null,
+          last_decision: "dispatch_ready",
+          source_attempt_id: input.proposal.sourceAttemptId
+        })
+      : createRunPolicyRuntime({
+          run_id: input.runId,
+          stage: "execution",
+          approval_status: approvalRequired ? "approved" : "not_required",
+          approval_required: approvalRequired,
+          proposed_signature: input.proposal.signature,
+          proposed_attempt_type: input.proposal.attemptType,
+          proposed_objective: input.proposal.objective,
+          proposed_success_criteria: input.proposal.successCriteria,
+          permission_profile: input.proposal.permissionProfile,
+          hook_policy: input.proposal.hookPolicy,
+          danger_mode: input.proposal.dangerMode,
+          last_decision: "dispatch_ready",
+          source_attempt_id: input.proposal.sourceAttemptId
+        });
+
+    await saveRunPolicyRuntime(this.workspacePaths, nextPolicy);
+  }
+
+  private async readRunPolicyGate(input: {
+    runId: string;
+  }): Promise<
+    | { status: "missing" }
+    | { status: "ready"; policy: RunPolicyRuntime }
+    | { status: "invalid"; message: string }
+  > {
+    try {
+      return {
+        status: "ready",
+        policy: await readRunPolicyRuntimeStrict(this.workspacePaths, input.runId)
+      };
+    } catch (error) {
+      const err = error as NodeJS.ErrnoException;
+      if (err?.code === "ENOENT") {
+        return {
+          status: "missing"
+        };
+      }
+
+      return {
+        status: "invalid",
+        message: error instanceof Error ? error.message : String(error)
+      };
+    }
+  }
+
+  private async persistRunPolicyApprovalRequested(input: {
+    runId: string;
+    current: CurrentDecision;
+    proposal: RunPolicyProposal;
+  }): Promise<void> {
+    const existingPolicy = await getRunPolicyRuntime(this.workspacePaths, input.runId);
+    const now = new Date().toISOString();
+    const message = buildPendingApprovalSummary(input.proposal);
+    const nextPolicy = existingPolicy
+      ? updateRunPolicyRuntime(existingPolicy, {
+          stage: "approval",
+          approval_status: "pending",
+          approval_required: true,
+          proposed_signature: input.proposal.signature,
+          proposed_attempt_type: input.proposal.attemptType,
+          proposed_objective: input.proposal.objective,
+          proposed_success_criteria: input.proposal.successCriteria,
+          permission_profile: input.proposal.permissionProfile,
+          hook_policy: input.proposal.hookPolicy,
+          danger_mode: input.proposal.dangerMode,
+          blocking_reason: message,
+          last_decision: "approval_requested",
+          approval_requested_at:
+            existingPolicy.proposed_signature === input.proposal.signature &&
+            existingPolicy.approval_status === "pending"
+              ? existingPolicy.approval_requested_at ?? now
+              : now,
+          approval_decided_at: null,
+          approval_actor: null,
+          approval_note: null,
+          source_attempt_id: input.proposal.sourceAttemptId
+        })
+      : createRunPolicyRuntime({
+          run_id: input.runId,
+          stage: "approval",
+          approval_status: "pending",
+          approval_required: true,
+          proposed_signature: input.proposal.signature,
+          proposed_attempt_type: input.proposal.attemptType,
+          proposed_objective: input.proposal.objective,
+          proposed_success_criteria: input.proposal.successCriteria,
+          permission_profile: input.proposal.permissionProfile,
+          hook_policy: input.proposal.hookPolicy,
+          danger_mode: input.proposal.dangerMode,
+          blocking_reason: message,
+          last_decision: "approval_requested",
+          approval_requested_at: now,
+          source_attempt_id: input.proposal.sourceAttemptId
+        });
+
+    await saveRunPolicyRuntime(this.workspacePaths, nextPolicy);
+
+    const nextCurrent = updateCurrentDecision(input.current, {
+      run_status: "waiting_steer",
+      recommended_next_action: "wait_for_human",
+      recommended_attempt_type: input.proposal.attemptType,
+      summary: message,
+      blocking_reason: message,
+      waiting_for_human: true
+    });
+
+    const currentAlreadyBlocked =
+      input.current.run_status === nextCurrent.run_status &&
+      input.current.recommended_next_action ===
+        nextCurrent.recommended_next_action &&
+      input.current.summary === nextCurrent.summary &&
+      input.current.blocking_reason === nextCurrent.blocking_reason &&
+      input.current.waiting_for_human === nextCurrent.waiting_for_human;
+
+    if (!currentAlreadyBlocked) {
+      await saveCurrentDecision(this.workspacePaths, nextCurrent);
+    }
+
+    const journal = await listRunJournal(this.workspacePaths, input.runId);
+    const latestEntry = journal.at(-1);
+    if (
+      latestEntry?.type !== "run.policy.approval_requested" ||
+      latestEntry.payload.proposed_signature !== input.proposal.signature
+    ) {
+      await appendRunJournal(
+        this.workspacePaths,
+        createRunJournalEntry({
+          run_id: input.runId,
+          attempt_id: input.proposal.sourceAttemptId,
+          type: "run.policy.approval_requested",
+          payload: {
+            proposed_signature: input.proposal.signature,
+            attempt_type: input.proposal.attemptType,
+            objective: input.proposal.objective
+          }
+        })
+      );
+    }
+
+    await refreshRunOperatorSurface(this.workspacePaths, input.runId);
+  }
+
+  private async persistRunPolicyDispatchBlocked(input: {
+    runId: string;
+    current: CurrentDecision;
+    policy: RunPolicyRuntime | null;
+    proposal: RunPolicyProposal;
+    message: string;
+    reason: string;
+  }): Promise<void> {
+    if (input.policy) {
+      await saveRunPolicyRuntime(
+        this.workspacePaths,
+        updateRunPolicyRuntime(input.policy, {
+          blocking_reason: input.message,
+          last_decision: "dispatch_blocked"
+        })
+      );
+    }
+
+    const nextCurrent = updateCurrentDecision(input.current, {
+      run_status: "waiting_steer",
+      recommended_next_action: "wait_for_human",
+      recommended_attempt_type: input.proposal.attemptType,
+      summary: input.message,
+      blocking_reason: input.message,
+      waiting_for_human: true
+    });
+
+    const currentAlreadyBlocked =
+      input.current.run_status === nextCurrent.run_status &&
+      input.current.recommended_next_action ===
+        nextCurrent.recommended_next_action &&
+      input.current.summary === nextCurrent.summary &&
+      input.current.blocking_reason === nextCurrent.blocking_reason &&
+      input.current.waiting_for_human === nextCurrent.waiting_for_human;
+
+    if (!currentAlreadyBlocked) {
+      await saveCurrentDecision(this.workspacePaths, nextCurrent);
+    }
+
+    const journal = await listRunJournal(this.workspacePaths, input.runId);
+    const latestEntry = journal.at(-1);
+    if (
+      latestEntry?.type !== "run.policy.dispatch_blocked" ||
+      latestEntry.payload.message !== input.message
+    ) {
+      await appendRunJournal(
+        this.workspacePaths,
+        createRunJournalEntry({
+          run_id: input.runId,
+          attempt_id: input.proposal.sourceAttemptId,
+          type: "run.policy.dispatch_blocked",
+          payload: {
+            reason: input.reason,
+            message: input.message,
+            proposed_signature: input.proposal.signature,
+            attempt_type: input.proposal.attemptType
+          }
+        })
+      );
+    }
+
+    await refreshRunOperatorSurface(this.workspacePaths, input.runId);
+  }
+
   private async createNextAttemptIfNeeded(runId: string): Promise<void> {
     await this.withRunDispatchLease(runId, "plan_next_attempt", async () => {
       const [run, current, attempts] = await Promise.all([
@@ -1183,6 +1516,8 @@ export class Orchestrator {
         return;
       }
 
+      await this.persistRunPolicyPlanning(run.id);
+
       let nextAttempt: { attempt: Attempt; contract: AttemptContract } | null;
       try {
         nextAttempt = await this.planNextAttempt(runId, current, attempts);
@@ -1196,6 +1531,15 @@ export class Orchestrator {
 
       await saveAttempt(this.workspacePaths, nextAttempt.attempt);
       await saveAttemptContract(this.workspacePaths, nextAttempt.contract);
+      await this.persistRunPolicyReadyForDispatch({
+        runId: run.id,
+        proposal: buildRunPolicyProposal({
+          attemptType: nextAttempt.attempt.attempt_type,
+          objective: nextAttempt.attempt.objective,
+          successCriteria: nextAttempt.attempt.success_criteria,
+          sourceAttemptId: current.latest_attempt_id
+        })
+      });
       await appendRunJournal(
         this.workspacePaths,
         createRunJournalEntry({
@@ -1402,19 +1746,101 @@ export class Orchestrator {
             reusableExecutionContract: null
           };
     nextExecutionDraft = executionPlanningState.draft;
+    let successCriteria =
+      attemptType === "execution" && nextExecutionDraft?.success_criteria
+        ? nextExecutionDraft.success_criteria
+        : attemptType === "execution" &&
+            executionPlanningState.reusableExecutionContract?.success_criteria.length
+          ? executionPlanningState.reusableExecutionContract.success_criteria
+          : run.success_criteria;
+    let proposal = buildRunPolicyProposal({
+      attemptType,
+      objective,
+      successCriteria,
+      sourceAttemptId: latestAttempt?.id ?? null
+    });
+
+    if (attemptType === "execution") {
+      const policyGate = await this.readRunPolicyGate({
+        runId
+      });
+      if (
+        policyGate.status === "ready" &&
+        policyGate.policy.approval_status === "approved" &&
+        policyGate.policy.approval_required === true &&
+        policyGate.policy.proposed_attempt_type === "execution" &&
+        policyGate.policy.proposed_objective
+      ) {
+        objective = policyGate.policy.proposed_objective;
+        successCriteria =
+          policyGate.policy.proposed_success_criteria.length > 0
+            ? policyGate.policy.proposed_success_criteria
+            : successCriteria;
+        proposal = buildRunPolicyProposal({
+          attemptType,
+          objective,
+          successCriteria,
+          sourceAttemptId: latestAttempt?.id ?? null
+        });
+      }
+
+      if (policyGate.status === "invalid") {
+        await this.persistRunPolicyDispatchBlocked({
+          runId,
+          current,
+          policy: null,
+          proposal,
+          message:
+            "Execution plan cannot dispatch because the policy runtime file is unreadable.",
+          reason: "invalid_policy_runtime"
+        });
+        return null;
+      }
+
+      if (policyGate.status === "missing") {
+        await this.persistRunPolicyApprovalRequested({
+          runId,
+          current,
+          proposal
+        });
+        return null;
+      }
+
+      const approvedPolicy = policyGate.policy;
+      if (approvedPolicy.killswitch_active) {
+        await this.persistRunPolicyDispatchBlocked({
+          runId,
+          current,
+          policy: approvedPolicy,
+          proposal,
+          message:
+            approvedPolicy.killswitch_reason ??
+            "Execution plan cannot dispatch because the policy killswitch is active.",
+          reason: "killswitch_active"
+        });
+        return null;
+      }
+
+      if (
+        approvedPolicy.approval_status !== "approved" ||
+        approvedPolicy.approval_required !== true ||
+        approvedPolicy.proposed_signature !== proposal.signature
+      ) {
+        await this.persistRunPolicyApprovalRequested({
+          runId,
+          current,
+          proposal
+        });
+        return null;
+      }
+    }
 
     const attempt = createAttempt({
       run_id: run.id,
       attempt_type: attemptType,
       worker: this.adapter.type,
       objective,
-      success_criteria:
-        attemptType === "execution" && nextExecutionDraft?.success_criteria
-          ? nextExecutionDraft.success_criteria
-          : attemptType === "execution" &&
-              executionPlanningState.reusableExecutionContract?.success_criteria.length
-            ? executionPlanningState.reusableExecutionContract.success_criteria
-          : run.success_criteria,
+      success_criteria: successCriteria,
       workspace_root: getEffectiveRunWorkspaceRoot(run)
     });
     return {
@@ -2012,6 +2438,12 @@ export class Orchestrator {
         runtimeVerification
       });
     await saveRunGovernanceState(this.workspacePaths, governanceSnapshot);
+    if (
+      input.currentSnapshot?.run_status === "running" &&
+      input.currentSnapshot.waiting_for_human === false
+    ) {
+      await this.persistRunPolicyPlanning(input.runId);
+    }
     await refreshRunOperatorSurface(this.workspacePaths, input.runId);
   }
 
@@ -2184,9 +2616,10 @@ export class Orchestrator {
 
     const sourceArtifactPath =
       input.result.artifacts.find(
-        (artifact) => artifact.path === ADVERSARIAL_VERIFICATION_ARTIFACT_RELATIVE_PATH
+        (artifact: WorkerWriteback["artifacts"][number]) =>
+          artifact.path === ADVERSARIAL_VERIFICATION_ARTIFACT_RELATIVE_PATH
       )?.path ??
-      input.result.artifacts.find((artifact) =>
+      input.result.artifacts.find((artifact: WorkerWriteback["artifacts"][number]) =>
         artifact.path.endsWith("/adversarial-verification.json")
       )?.path ??
       null;
@@ -2244,7 +2677,7 @@ export class Orchestrator {
         failure_reason: typeof raw.failure_reason === "string" ? raw.failure_reason : null,
         checks: Array.isArray(raw.checks) ? raw.checks : [],
         commands: Array.isArray(raw.commands)
-          ? raw.commands.map((command) =>
+          ? raw.commands.map((command: unknown) =>
               typeof command === "object" && command !== null
                 ? {
                     ...command,
@@ -2262,8 +2695,11 @@ export class Orchestrator {
           : [],
         output_refs: Array.isArray(raw.output_refs)
           ? raw.output_refs
-              .filter((value): value is string => typeof value === "string" && value.length > 0)
-              .map((value) => resolve(input.attempt.workspace_root, value))
+              .filter(
+                (value: unknown): value is string =>
+                  typeof value === "string" && value.length > 0
+              )
+              .map((value: string) => resolve(input.attempt.workspace_root, value))
           : [],
         source_artifact_path: resolvedSourceArtifactPath
       });
@@ -2271,8 +2707,12 @@ export class Orchestrator {
       const effectiveOutputRefs = [
         ...normalized.output_refs,
         ...normalized.commands
-          .map((command) => command.output_ref)
-          .filter((value): value is string => Boolean(value))
+          .map(
+            (
+              command: AttemptAdversarialVerification["commands"][number]
+            ) => command.output_ref
+          )
+          .filter((value: string | null): value is string => Boolean(value))
       ];
       const uniqueOutputRefs = [...new Set(effectiveOutputRefs)];
       const base = {
@@ -4319,6 +4759,53 @@ export class Orchestrator {
         reason: "governance_repeated_blocker",
         message:
           governance.context_summary.blocker_summary ?? governance.context_summary.headline
+      };
+    }
+
+    const policyGate = await this.readRunPolicyGate({
+      runId: input.runId
+    });
+    if (policyGate.status === "invalid") {
+      return {
+        reason: "policy_runtime_invalid",
+        message: "Policy runtime is unreadable, so automatic resume stays blocked."
+      };
+    }
+
+    const policyRuntime =
+      policyGate.status === "ready" ? policyGate.policy : null;
+    if (
+      policyRuntime?.approval_required === true &&
+      policyRuntime.proposed_attempt_type === "execution" &&
+      policyRuntime.approval_status === "pending"
+    ) {
+      return {
+        reason: "policy_approval_pending",
+        message:
+          policyRuntime.blocking_reason ??
+          "Execution plan is still pending leader approval."
+      };
+    }
+
+    if (
+      policyRuntime?.approval_required === true &&
+      policyRuntime.proposed_attempt_type === "execution" &&
+      policyRuntime.approval_status === "rejected"
+    ) {
+      return {
+        reason: "policy_approval_rejected",
+        message:
+          policyRuntime.blocking_reason ??
+          "Execution plan was rejected and must be replanned before auto-resume."
+      };
+    }
+
+    if (policyRuntime?.killswitch_active) {
+      return {
+        reason: "policy_killswitch_active",
+        message:
+          policyRuntime.killswitch_reason ??
+          "Execution is paused because the policy killswitch is active."
       };
     }
 

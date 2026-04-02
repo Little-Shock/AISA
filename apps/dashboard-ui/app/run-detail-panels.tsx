@@ -42,6 +42,34 @@ function automationModeLabel(mode: string | null | undefined): string {
   }
 }
 
+function policyStageLabel(stage: string | null | undefined): string {
+  switch (stage) {
+    case "planning":
+      return "规划中";
+    case "approval":
+      return "等待审批";
+    case "execution":
+      return "执行边界";
+    default:
+      return "未建立";
+  }
+}
+
+function policyApprovalStatusLabel(status: string | null | undefined): string {
+  switch (status) {
+    case "not_required":
+      return "无需审批";
+    case "pending":
+      return "待批准";
+    case "approved":
+      return "已批准";
+    case "rejected":
+      return "已拒绝";
+    default:
+      return "未建立";
+  }
+}
+
 function workingContextDegradedReasonLabel(reasonCode: string | null | undefined): string {
   switch (reasonCode) {
     case "context_missing":
@@ -89,6 +117,7 @@ export function RunOverviewPanel({
   const signalBadges = deriveRunSignalBadges(selectedRun, nowTs);
   const operatorChecklist = deriveRunOperatorChecklist(selectedRun, nowTs);
   const governance = runDetail.governance;
+  const policyRuntime = runDetail.policy_runtime;
   const runHealth = runDetail.run_health;
   const automation = runDetail.automation;
   const runBrief = runDetail.run_brief;
@@ -158,6 +187,11 @@ export function RunOverviewPanel({
           label="下一动作"
           value={nextActionLabel(runDetail.current?.recommended_next_action)}
         />
+        <InfoCard label="策略阶段" value={policyStageLabel(policyRuntime?.stage)} />
+        <InfoCard
+          label="审批状态"
+          value={policyApprovalStatusLabel(policyRuntime?.approval_status)}
+        />
         <InfoCard label="治理状态" value={governanceStatus} />
         <InfoCard label="运行健康" value={healthStatus} />
         <InfoCard label="自动化模式" value={automationModeLabel(automation?.mode)} />
@@ -203,6 +237,34 @@ export function RunOverviewPanel({
             governance.context_summary.blocker_summary ??
               governance.active_problem_summary ??
               governance.context_summary.headline
+          )}
+        </Callout>
+      ) : null}
+
+      {policyRuntime?.approval_status === "pending" ? (
+        <Callout tone="rose" title="执行审批待处理">
+          {localizeUiText(
+            policyRuntime.blocking_reason ??
+              policyRuntime.proposed_objective ??
+              "当前 execution 计划已生成，但还不能直接发车。"
+          )}
+        </Callout>
+      ) : null}
+
+      {policyRuntime?.approval_status === "rejected" ? (
+        <Callout tone="amber" title="执行计划已拒绝">
+          {localizeUiText(
+            policyRuntime.blocking_reason ??
+              "上一版 execution 计划被拒绝，先补 steer 或重开研究。"
+          )}
+        </Callout>
+      ) : null}
+
+      {policyRuntime?.killswitch_active ? (
+        <Callout tone="rose" title="策略熔断已开启">
+          {localizeUiText(
+            policyRuntime.killswitch_reason ??
+              "当前 execution 已被策略熔断，需要人工处理后再恢复。"
           )}
         </Callout>
       ) : null}
@@ -285,7 +347,8 @@ export function RunOverviewPanel({
               `创建时间：${formatDateTime(selectedRunAttemptDetail?.attempt.created_at)}`,
               `契约回放命令：${String(selectedRunAttemptDetail?.contract?.verification_plan?.commands.length ?? 0)}`,
               `working context：${runDetail.working_context_ref ?? "未落盘"}`,
-              `现场更新时间：${formatDateTime(workingContext?.updated_at)}`
+              `现场更新时间：${formatDateTime(workingContext?.updated_at)}`,
+              `policy ref：${runDetail.policy_runtime_ref ?? "未落盘"}`
             ]}
           />
           <SectionList
@@ -298,7 +361,10 @@ export function RunOverviewPanel({
               `计划锚点：${workingContext?.plan_ref ?? "暂无"}`,
               `来源尝试：${workingContext?.source_attempt_id ?? "暂无"}`,
               `下一注意点：${localizeUiText(workingContext?.next_operator_attention ?? "暂无")}`,
-              `自动化模式：${automationModeLabel(workingContext?.automation.mode ?? automation?.mode)}`
+              `自动化模式：${automationModeLabel(workingContext?.automation.mode ?? automation?.mode)}`,
+              `策略阶段：${policyStageLabel(policyRuntime?.stage)}`,
+              `策略决议：${localizeUiText(policyRuntime?.last_decision ?? "暂无")}`,
+              `待批目标：${localizeUiText(policyRuntime?.proposed_objective ?? "暂无")}`
             ]}
           />
           <SectionList
@@ -602,6 +668,89 @@ export function RunSteerPanel({
             return `[${statusLabel(steer.status)}]${attemptPart} ${steer.content}`;
           })}
       />
+    </Panel>
+  );
+}
+
+export function RunPolicyPanel({
+  runDetail,
+  note,
+  onNoteChange,
+  onApprove,
+  onReject,
+  approveBusy,
+  rejectBusy
+}: {
+  runDetail: RunDetail;
+  note: string;
+  onNoteChange: (value: string) => void;
+  onApprove: () => void;
+  onReject: () => void;
+  approveBusy: boolean;
+  rejectBusy: boolean;
+}) {
+  const policyRuntime = runDetail.policy_runtime;
+  const canApprove = policyRuntime?.approval_status === "pending";
+  const canReject = policyRuntime?.approval_status === "pending";
+
+  return (
+    <Panel
+      title="Policy Lane"
+      subtitle="这里单独处理 planning、approval、execution 的边界。execution 进入待批以后，只能在这块放行或打回。"
+    >
+      <div className="summary-grid">
+        <InfoCard label="策略阶段" value={policyStageLabel(policyRuntime?.stage)} />
+        <InfoCard
+          label="审批状态"
+          value={policyApprovalStatusLabel(policyRuntime?.approval_status)}
+        />
+        <InfoCard label="权限档位" value={policyRuntime?.permission_profile ?? "暂无"} />
+        <InfoCard label="Hook 策略" value={policyRuntime?.hook_policy ?? "暂无"} />
+        <InfoCard label="危险模式" value={policyRuntime?.danger_mode ?? "暂无"} />
+        <InfoCard
+          label="批准人"
+          value={policyRuntime?.approval_actor ?? "暂无"}
+        />
+      </div>
+
+      <SectionList
+        title="当前策略判断"
+        items={[
+          `目标：${localizeUiText(policyRuntime?.proposed_objective ?? "暂无")}`,
+          `待批类型：${attemptTypeLabel(policyRuntime?.proposed_attempt_type ?? "暂无")}`,
+          `来源尝试：${policyRuntime?.source_attempt_id ?? "暂无"}`,
+          `阻塞原因：${localizeUiText(policyRuntime?.blocking_reason ?? "暂无")}`,
+          `最后决议：${localizeUiText(policyRuntime?.last_decision ?? "暂无")}`,
+          `更新时间：${formatDateTime(policyRuntime?.updated_at)}`
+        ]}
+      />
+
+      <Textarea
+        value={note}
+        onChange={(event) => onNoteChange(event.target.value)}
+        placeholder="可选。留下批准理由，或写清楚为什么这版 execution 需要打回。"
+        className="mt-3 min-h-[110px] border-emerald-900/12 bg-emerald-900/6 text-sm text-[var(--text-primary)]"
+      />
+
+      <div className="action-row mt-3">
+        <Button
+          type="button"
+          className="h-10 flex-1 font-pixel text-[10px] tracking-[0.16em]"
+          onClick={onApprove}
+          disabled={!canApprove || approveBusy}
+        >
+          {approveBusy ? "批准中..." : "批准 Execution"}
+        </Button>
+        <Button
+          type="button"
+          variant="outline"
+          className="h-10 flex-1 border-amber-900/16 bg-amber-900/8 font-pixel text-[10px] tracking-[0.16em] text-[var(--amber)]"
+          onClick={onReject}
+          disabled={!canReject || rejectBusy}
+        >
+          {rejectBusy ? "打回中..." : "打回重规划"}
+        </Button>
+      </div>
     </Panel>
   );
 }

@@ -7,7 +7,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { buildServer } from "../../control-api/src/index.ts";
 import { deriveRunOperatorState } from "../app/dashboard-helpers";
 import type { RunDetail, RunSummaryItem } from "../app/dashboard-types";
-import { RunOverviewPanel } from "../app/run-detail-panels";
+import { RunOverviewPanel, RunPolicyPanel } from "../app/run-detail-panels";
 import { RunInboxPanel } from "../app/run-inbox";
 import { seedWorkingContextDashboardFixture } from "../../../scripts/seed-working-context-dashboard-fixture.ts";
 
@@ -53,6 +53,11 @@ async function main(): Promise<void> {
       fixture.expected_working_context_reason
     );
     assert.equal(runDetail.automation?.mode, fixture.expected_automation_mode);
+    assert.equal(runDetail.policy_runtime?.stage, fixture.expected_policy_stage);
+    assert.equal(
+      runDetail.policy_runtime?.approval_status,
+      fixture.expected_policy_approval_status
+    );
     assert.equal(runDetail.failure_signal?.failure_class, fixture.expected_failure_class);
     assert.equal(
       runDetail.failure_signal?.policy_mode,
@@ -91,6 +96,10 @@ async function main(): Promise<void> {
     assert.equal(selectedRun?.task_focus, fixture.expected_task_focus);
     assert.equal(selectedRun?.failure_signal?.failure_class, fixture.expected_failure_class);
     assert.equal(selectedRun?.maintenance_plane?.blocked_diagnosis.status, "attention");
+    assert.equal(
+      selectedRun?.policy_runtime?.approval_status,
+      fixture.expected_policy_approval_status
+    );
 
     const selectedRunAttemptDetail =
       runDetail.attempt_details.find(
@@ -136,6 +145,22 @@ async function main(): Promise<void> {
     assert.match(overviewMarkup, /维护平面输出/);
     assert.match(overviewMarkup, /信号来源/);
     assert.match(overviewMarkup, /建议先读/);
+    assert.match(overviewMarkup, /执行审批待处理/);
+
+    const policyMarkup = renderToStaticMarkup(
+      <RunPolicyPanel
+        runDetail={runDetail}
+        note=""
+        onNoteChange={() => {}}
+        onApprove={() => {}}
+        onReject={() => {}}
+        approveBusy={false}
+        rejectBusy={false}
+      />
+    );
+    assert.match(policyMarkup, /Policy Lane/);
+    assert.match(policyMarkup, /批准 Execution/);
+    assert.match(policyMarkup, /打回重规划/);
 
     const inboxMarkup = renderToStaticMarkup(
       <RunInboxPanel

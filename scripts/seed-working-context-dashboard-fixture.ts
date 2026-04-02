@@ -10,6 +10,7 @@ import {
   createRun,
   createRunAutomationControl,
   createRunJournalEntry,
+  createRunPolicyRuntime,
   updateAttempt
 } from "../packages/domain/src/index.ts";
 import {
@@ -22,7 +23,8 @@ import {
   saveAttemptPreflightEvaluation,
   saveCurrentDecision,
   saveRun,
-  saveRunAutomationControl
+  saveRunAutomationControl,
+  saveRunPolicyRuntime
 } from "../packages/state-store/src/index.ts";
 import { refreshRunOperatorSurface } from "../packages/orchestrator/src/index.ts";
 
@@ -39,6 +41,8 @@ export type SeedWorkingContextDashboardFixtureResult = {
   expected_preflight_failure_reason: string;
   expected_handoff_summary: string;
   expected_task_focus: string;
+  expected_policy_stage: "approval";
+  expected_policy_approval_status: "pending";
 };
 
 export async function seedWorkingContextDashboardFixture(input: {
@@ -125,6 +129,24 @@ export async function seedWorkingContextDashboardFixture(input: {
       imposed_by: "fixture"
     })
   );
+  await saveRunPolicyRuntime(
+    workspacePaths,
+    createRunPolicyRuntime({
+      run_id: run.id,
+      stage: "approval",
+      approval_status: "pending",
+      approval_required: true,
+      proposed_signature: "fixture-policy-signature",
+      proposed_attempt_type: "execution",
+      proposed_objective: attempt.objective,
+      proposed_success_criteria: attempt.success_criteria,
+      permission_profile: "workspace_write",
+      hook_policy: "enforce_runtime_contract",
+      blocking_reason: "Execution plan is waiting for operator approval.",
+      last_decision: "approval_requested",
+      source_attempt_id: attempt.id
+    })
+  );
   const preflightEvaluation = createAttemptPreflightEvaluation({
     run_id: run.id,
     attempt_id: attempt.id,
@@ -198,7 +220,9 @@ export async function seedWorkingContextDashboardFixture(input: {
     expected_run_brief_summary: initialCurrent.summary,
     expected_preflight_failure_reason: preflightFailureReason,
     expected_handoff_summary: preflightFailureReason,
-    expected_task_focus: attempt.objective
+    expected_task_focus: attempt.objective,
+    expected_policy_stage: "approval",
+    expected_policy_approval_status: "pending"
   };
 }
 

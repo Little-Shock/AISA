@@ -108,6 +108,8 @@ const TEXT_REPLACEMENTS: Array<[RegExp, string]> = [
 const STATUS_LABELS: Record<string, string> = {
   draft: "草稿",
   planned: "已规划",
+  planning: "规划中",
+  approval: "等待审批",
   running: "运行中",
   waiting_steer: "等待指令",
   reviewing: "评审中",
@@ -137,6 +139,9 @@ const STATUS_LABELS: Record<string, string> = {
   complete: "完成",
   wait_human: "等待人工",
   wait_for_human: "等待人工",
+  not_required: "无需审批",
+  approved: "已批准",
+  rejected: "已拒绝",
   passed: "通过",
   not_applicable: "不适用",
   execution: "执行",

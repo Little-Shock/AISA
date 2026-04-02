@@ -11,7 +11,9 @@ import {
   createRun,
   createRunJournalEntry,
   updateRun,
+  updateCurrentDecision,
   updateAttempt,
+  updateRunPolicyRuntime,
   AttemptHandoffBundleSchema,
   WorkerWritebackSchema,
   type Attempt,
@@ -44,6 +46,7 @@ import {
   getAttemptReviewPacket,
   getCurrentDecision,
   getRun,
+  getRunPolicyRuntime,
   listAttempts,
   listAttemptReviewOpinions,
   listRunJournal,
@@ -56,6 +59,7 @@ import {
   saveAttemptRuntimeVerification,
   saveCurrentDecision,
   saveRun,
+  saveRunPolicyRuntime,
   saveRunRuntimeHealthSnapshot,
   saveRunSteer
 } from "../packages/state-store/src/index.js";
@@ -941,16 +945,103 @@ async function settle(input: {
   workspacePaths: ReturnType<typeof resolveWorkspacePaths>;
   runId: string;
   iterations: number;
+  autoApprovePendingExecution?: boolean;
 }): Promise<void> {
   for (let index = 0; index < input.iterations; index += 1) {
     await input.orchestrator.tick();
     await sleep(50);
     await waitForRunningAttemptsToSettle(input.workspacePaths, input.runId);
+    if (
+      input.autoApprovePendingExecution &&
+      (await maybeApprovePendingExecutionPolicy({
+        workspacePaths: input.workspacePaths,
+        runId: input.runId
+      }))
+    ) {
+      await sleep(50);
+      continue;
+    }
     if (await isRunQuiescent(input.workspacePaths, input.runId)) {
       return;
     }
     await sleep(50);
   }
+}
+
+function shouldAutoApprovePendingExecution(driver: ScenarioDriver): boolean {
+  return [
+    "happy_path",
+    "execution_verified_next_step_continues",
+    "execution_runtime_source_drift_requires_restart",
+    "execution_checkpoint_blocked_dirty_workspace",
+    "execution_dirty_workspace_without_new_changes_fails_verification",
+    "execution_missing_verification_plan",
+    "execution_missing_local_toolchain_blocks_dispatch",
+    "execution_parse_failure",
+    "execution_retry_after_recovery_preserves_contract"
+  ].includes(driver);
+}
+
+async function maybeApprovePendingExecutionPolicy(input: {
+  workspacePaths: ReturnType<typeof resolveWorkspacePaths>;
+  runId: string;
+}): Promise<boolean> {
+  const [current, policyRuntime] = await Promise.all([
+    getCurrentDecision(input.workspacePaths, input.runId),
+    getRunPolicyRuntime(input.workspacePaths, input.runId)
+  ]);
+
+  if (!current || !policyRuntime) {
+    return false;
+  }
+
+  if (
+    policyRuntime.approval_required !== true ||
+    policyRuntime.approval_status !== "pending" ||
+    policyRuntime.proposed_attempt_type !== "execution"
+  ) {
+    return false;
+  }
+
+  const approvedPolicy = updateRunPolicyRuntime(policyRuntime, {
+    stage: "execution",
+    approval_status: "approved",
+    blocking_reason: null,
+    last_decision: "approved",
+    approval_decided_at: new Date().toISOString(),
+    approval_actor: "verify-run-loop",
+    approval_note:
+      "Auto-approved by the smoke harness so execution downstream assertions can run."
+  });
+  const resumedCurrent = updateCurrentDecision(current, {
+    run_status: "running",
+    waiting_for_human: false,
+    blocking_reason: null,
+    recommended_next_action: "continue_execution",
+    recommended_attempt_type: "execution",
+    summary:
+      "Execution plan approved by the smoke harness so downstream execution assertions can continue."
+  });
+
+  await Promise.all([
+    saveRunPolicyRuntime(input.workspacePaths, approvedPolicy),
+    saveCurrentDecision(input.workspacePaths, resumedCurrent)
+  ]);
+  await appendRunJournal(
+    input.workspacePaths,
+    createRunJournalEntry({
+      run_id: input.runId,
+      attempt_id: approvedPolicy.source_attempt_id,
+      type: "run.policy.approved",
+      payload: {
+        actor: approvedPolicy.approval_actor,
+        note: approvedPolicy.approval_note,
+        proposed_signature: approvedPolicy.proposed_signature
+      }
+    })
+  );
+
+  return true;
 }
 
 async function waitForRunningAttemptsToSettle(
@@ -3557,7 +3648,8 @@ async function runCase(scenario: ScenarioCase): Promise<ScenarioObservation> {
     orchestrator,
     workspacePaths,
     runId: run.id,
-    iterations: scenario.max_ticks
+    iterations: scenario.max_ticks,
+    autoApprovePendingExecution: shouldAutoApprovePendingExecution(scenario.driver)
   });
   const persistedRun = await getRun(workspacePaths, run.id);
 

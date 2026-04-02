@@ -37,6 +37,8 @@ const fixtureRunDetail: RunDetail = {
   },
   automation: null,
   governance: null,
+  policy_runtime: null,
+  policy_runtime_ref: null,
   failure_signal: null,
   latest_preflight_evaluation: null,
   latest_preflight_evaluation_ref: null,

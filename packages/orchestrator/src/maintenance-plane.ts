@@ -14,6 +14,7 @@ import {
   type RunMaintenanceOutput,
   type RunMaintenancePlane,
   type RunMaintenanceSource,
+  type RunPolicyRuntime,
   type RunWorkingContext
 } from "@autoresearch/domain";
 import {
@@ -28,6 +29,7 @@ import {
   getCurrentDecision,
   getRunGovernanceState,
   getRunMaintenancePlane,
+  getRunPolicyRuntime,
   getRunRuntimeHealthSnapshot,
   listAttempts,
   resolveAttemptPaths,
@@ -76,6 +78,10 @@ function buildRunCurrentRef(paths: WorkspacePaths, runId: string): string {
 
 function buildRunGovernanceRef(paths: WorkspacePaths, runId: string): string {
   return buildRelativeRef(paths, resolveRunPaths(paths, runId).governanceFile);
+}
+
+function buildRunPolicyRef(paths: WorkspacePaths, runId: string): string {
+  return buildRelativeRef(paths, resolveRunPaths(paths, runId).policyFile);
 }
 
 function buildRunMaintenancePlaneRef(paths: WorkspacePaths, runId: string): string {
@@ -218,6 +224,31 @@ function buildRunBriefOutput(runBriefView: RunBriefView): RunMaintenanceOutput {
   };
 }
 
+function buildRunPolicyOutput(input: {
+  policyRuntime: RunPolicyRuntime | null;
+  policyRuntimeRef: string | null;
+}): RunMaintenanceOutput {
+  const policyRuntime = input.policyRuntime;
+  return {
+    key: "policy_runtime",
+    label: "策略边界",
+    plane: "maintenance",
+    status: !policyRuntime
+      ? "not_available"
+      : policyRuntime.killswitch_active ||
+          policyRuntime.approval_status === "pending" ||
+          policyRuntime.approval_status === "rejected"
+        ? "attention"
+        : "ready",
+    ref: input.policyRuntimeRef,
+    summary:
+      policyRuntime?.blocking_reason ??
+      policyRuntime?.proposed_objective ??
+      policyRuntime?.last_decision ??
+      null
+  };
+}
+
 function buildRunHealthOutput(runHealth: RunHealthAssessment): RunMaintenanceOutput {
   return {
     key: "run_health",
@@ -356,8 +387,10 @@ function buildBlockedDiagnosis(input: {
       [
         input.workingContext?.current_blocker?.ref ?? null,
         input.latestHandoffRef,
-        ...((input.runBrief?.evidence_refs ?? []).map((item) => item.ref))
-      ].filter((value): value is string => Boolean(value))
+        ...((input.runBrief?.evidence_refs ?? []).map(
+          (item: NonNullable<RunBrief>["evidence_refs"][number]) => item.ref
+        ))
+      ].filter((value: string | null): value is string => Boolean(value))
     )
   ).slice(0, 5);
 
@@ -410,6 +443,8 @@ function buildSignalSources(input: {
   runId: string;
   current: CurrentDecision | null;
   governance: RunGovernanceState | null;
+  policyRuntime: RunPolicyRuntime | null;
+  policyRuntimeRef: string | null;
   workingContextView: RunWorkingContextView;
   runBriefView: RunBriefView;
   runHealth: RunHealthAssessment;
@@ -438,6 +473,18 @@ function buildSignalSources(input: {
       summary:
         input.governance.context_summary.blocker_summary ??
         input.governance.context_summary.headline
+    });
+  }
+  if (input.policyRuntime) {
+    sources.push({
+      key: "policy_runtime",
+      label: "策略边界",
+      plane: "mainline",
+      ref: input.policyRuntimeRef,
+      summary:
+        input.policyRuntime.blocking_reason ??
+        input.policyRuntime.proposed_objective ??
+        input.policyRuntime.last_decision
     });
   }
   if (input.latestEvidence.latestPreflight && input.latestEvidence.evidenceAttempt) {
@@ -537,10 +584,19 @@ export async function buildRunMaintenancePlane(
   runId: string,
   options: RefreshRunMaintenancePlaneOptions
 ): Promise<RunMaintenancePlane> {
-  const [current, governance, attempts, workingContextView, runBriefView, runtimeHealthSnapshot] =
+  const [
+    current,
+    governance,
+    policyRuntime,
+    attempts,
+    workingContextView,
+    runBriefView,
+    runtimeHealthSnapshot
+  ] =
     await Promise.all([
       getCurrentDecision(paths, runId),
       getRunGovernanceState(paths, runId),
+      getRunPolicyRuntime(paths, runId),
       listAttempts(paths, runId),
       readRunWorkingContextView(paths, runId),
       readRunBriefView(paths, runId),
@@ -610,6 +666,10 @@ export async function buildRunMaintenancePlane(
     run_id: runId,
     run_health: runHealth,
     outputs: [
+      buildRunPolicyOutput({
+        policyRuntime,
+        policyRuntimeRef: policyRuntime ? buildRunPolicyRef(paths, runId) : null
+      }),
       buildWorkingContextOutput(workingContextView),
       buildRunBriefOutput(runBriefView),
       buildRunHealthOutput(runHealth),
@@ -622,6 +682,8 @@ export async function buildRunMaintenancePlane(
       runId,
       current,
       governance,
+      policyRuntime,
+      policyRuntimeRef: policyRuntime ? buildRunPolicyRef(paths, runId) : null,
       workingContextView,
       runBriefView,
       runHealth,

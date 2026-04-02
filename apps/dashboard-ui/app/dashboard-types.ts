@@ -140,6 +140,31 @@ export type RunAutomationControlView = {
   updated_at: string;
 } | null;
 
+export type RunPolicyRuntime = {
+  run_id: string;
+  stage: string;
+  approval_status: string;
+  approval_required: boolean;
+  proposed_signature: string | null;
+  proposed_attempt_type: string | null;
+  proposed_objective: string | null;
+  proposed_success_criteria: string[];
+  permission_profile: string;
+  hook_policy: string;
+  danger_mode: string;
+  killswitch_active: boolean;
+  killswitch_reason: string | null;
+  blocking_reason: string | null;
+  last_decision: string | null;
+  approval_requested_at: string | null;
+  approval_decided_at: string | null;
+  approval_actor: string | null;
+  approval_note: string | null;
+  source_attempt_id: string | null;
+  source_ref: string | null;
+  updated_at: string;
+} | null;
+
 export type RunWorkingContextTaskRef = {
   task_id: string;
   title: string;
@@ -313,6 +338,8 @@ export type RunSummaryItem = {
   } | null;
   automation: RunAutomationControlView;
   governance: RunGovernanceState;
+  policy_runtime: RunPolicyRuntime;
+  policy_runtime_ref: string | null;
   failure_signal: RunFailureSignal;
   latest_preflight_evaluation: RunLatestPreflightEvaluation;
   latest_preflight_evaluation_ref: string | null;
@@ -368,6 +395,8 @@ export type RunDetail = {
   } | null;
   automation: RunAutomationControlView;
   governance: RunGovernanceState;
+  policy_runtime: RunPolicyRuntime;
+  policy_runtime_ref: string | null;
   failure_signal: RunFailureSignal;
   latest_preflight_evaluation: RunLatestPreflightEvaluation;
   latest_preflight_evaluation_ref: string | null;

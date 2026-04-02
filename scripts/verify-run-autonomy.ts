@@ -10,7 +10,9 @@ import {
   createCurrentDecision,
   createRun,
   createRunJournalEntry,
+  updateCurrentDecision,
   updateAttempt,
+  updateRunPolicyRuntime,
   type Attempt,
   type Run,
   type WorkerWriteback
@@ -28,6 +30,7 @@ import {
   getAttemptReviewPacket,
   getRunAutomationControl,
   getCurrentDecision,
+  getRunPolicyRuntime,
   listAttempts,
   listRunJournal,
   resolveAttemptPaths,
@@ -38,7 +41,8 @@ import {
   saveAttemptRuntimeVerification,
   saveCurrentDecision,
   saveRun,
-  saveRunAutomationControl
+  saveRunAutomationControl,
+  saveRunPolicyRuntime
 } from "../packages/state-store/src/index.js";
 
 type CaseResult = {
@@ -317,9 +321,28 @@ async function wait(ms: number): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function settle(orchestrator: Orchestrator, iterations: number, delayMs = 40): Promise<void> {
-  for (let index = 0; index < iterations; index += 1) {
+async function settle(
+  orchestrator: Orchestrator,
+  input: {
+    workspacePaths: ReturnType<typeof resolveWorkspacePaths>;
+    runId: string;
+    iterations: number;
+    delayMs?: number;
+  }
+): Promise<void> {
+  const delayMs = input.delayMs ?? 40;
+
+  for (let index = 0; index < input.iterations; index += 1) {
     await orchestrator.tick();
+    if (
+      await maybeApprovePendingExecutionPolicyFromAutonomyLoop({
+        workspacePaths: input.workspacePaths,
+        runId: input.runId,
+        delayMs
+      })
+    ) {
+      continue;
+    }
     await wait(delayMs);
   }
 }
@@ -340,6 +363,15 @@ async function settleUntil(
 
   while (Date.now() < deadline) {
     await orchestrator.tick();
+    if (
+      await maybeApprovePendingExecutionPolicyFromAutonomyLoop({
+        workspacePaths: input.workspacePaths,
+        runId: input.runId,
+        delayMs
+      })
+    ) {
+      continue;
+    }
     const current = await getCurrentDecision(input.workspacePaths, input.runId);
     if (input.predicate(current?.run_status ?? null, current?.waiting_for_human ?? false)) {
       return;
@@ -370,6 +402,15 @@ async function settleUntilSnapshot(
 
   while (Date.now() < deadline) {
     await orchestrator.tick();
+    if (
+      await maybeApprovePendingExecutionPolicyFromAutonomyLoop({
+        workspacePaths: input.workspacePaths,
+        runId: input.runId,
+        delayMs
+      })
+    ) {
+      continue;
+    }
     const [current, attempts] = await Promise.all([
       getCurrentDecision(input.workspacePaths, input.runId),
       listAttempts(input.workspacePaths, input.runId)
@@ -387,6 +428,95 @@ async function settleUntilSnapshot(
   }
 
   throw new Error(`Timed out while waiting for run ${input.runId} to reach the expected snapshot.`);
+}
+
+async function maybeApprovePendingExecutionPolicyFromAutonomyLoop(
+  input: {
+    workspacePaths: ReturnType<typeof resolveWorkspacePaths>;
+    runId: string;
+    delayMs: number;
+  }
+): Promise<boolean> {
+  const approved = await maybeApprovePendingExecutionPolicy(
+    input.workspacePaths,
+    input.runId
+  );
+  if (approved) {
+    await wait(input.delayMs);
+  }
+  return approved;
+}
+
+async function maybeApprovePendingExecutionPolicy(
+  workspacePaths: ReturnType<typeof resolveWorkspacePaths>,
+  runId: string
+): Promise<boolean> {
+  const [current, policyRuntime, journal] = await Promise.all([
+    getCurrentDecision(workspacePaths, runId),
+    getRunPolicyRuntime(workspacePaths, runId),
+    listRunJournal(workspacePaths, runId)
+  ]);
+
+  if (!current || !policyRuntime) {
+    return false;
+  }
+
+  if (
+    policyRuntime.approval_required !== true ||
+    policyRuntime.approval_status !== "pending" ||
+    policyRuntime.proposed_attempt_type !== "execution"
+  ) {
+    return false;
+  }
+
+  const latestAutoResumeEntry = [...journal]
+    .reverse()
+    .find((entry) => entry.type === "run.auto_resume.scheduled");
+  const nextAction =
+    latestAutoResumeEntry?.payload.next_action === "retry_attempt" ||
+    latestAutoResumeEntry?.payload.next_action === "continue_execution" ||
+    latestAutoResumeEntry?.payload.next_action === "start_execution"
+      ? latestAutoResumeEntry.payload.next_action
+      : "continue_execution";
+
+  const approvedPolicy = updateRunPolicyRuntime(policyRuntime, {
+    stage: "execution",
+    approval_status: "approved",
+    blocking_reason: null,
+    last_decision: "approved",
+    approval_decided_at: new Date().toISOString(),
+    approval_actor: "verify-run-autonomy",
+    approval_note:
+      "Auto-approved by verify-run-autonomy so execution auto-resume checks can continue."
+  });
+  const resumedCurrent = updateCurrentDecision(current, {
+    run_status: "running",
+    waiting_for_human: false,
+    blocking_reason: null,
+    recommended_next_action: nextAction,
+    recommended_attempt_type: "execution",
+    summary: current.summary
+  });
+
+  await Promise.all([
+    saveRunPolicyRuntime(workspacePaths, approvedPolicy),
+    saveCurrentDecision(workspacePaths, resumedCurrent)
+  ]);
+  await appendRunJournal(
+    workspacePaths,
+    createRunJournalEntry({
+      run_id: runId,
+      attempt_id: approvedPolicy.source_attempt_id,
+      type: "run.policy.approved",
+      payload: {
+        actor: approvedPolicy.approval_actor,
+        note: approvedPolicy.approval_note,
+        proposed_signature: approvedPolicy.proposed_signature
+      }
+    })
+  );
+
+  return true;
 }
 
 async function bootstrapRun(title: string, runTitle?: string): Promise<{
@@ -837,7 +967,11 @@ async function verifyRepeatedAutoResumeExhausts(): Promise<void> {
     }
   );
 
-  await settle(orchestrator, 24);
+  await settle(orchestrator, {
+    workspacePaths,
+    runId: run.id,
+    iterations: 24
+  });
 
   const current = await getCurrentDecision(workspacePaths, run.id);
   const attempts = await listAttempts(workspacePaths, run.id);
@@ -1099,7 +1233,12 @@ async function verifyNoGitChangesBlocksAutoResume(): Promise<void> {
   );
 
   await wait(40);
-  await settle(orchestrator, 8, 80);
+  await settle(orchestrator, {
+    workspacePaths,
+    runId: run.id,
+    iterations: 8,
+    delayMs: 80
+  });
 
   const current = await getCurrentDecision(workspacePaths, run.id);
   const attempts = await listAttempts(workspacePaths, run.id);
@@ -1332,7 +1471,12 @@ async function verifyRecoveryAutoResumesExecution(): Promise<void> {
 
   await orchestrator.tick();
   await wait(60);
-  await settle(orchestrator, 18, 60);
+  await settle(orchestrator, {
+    workspacePaths,
+    runId: run.id,
+    iterations: 18,
+    delayMs: 60
+  });
 
   const current = await getCurrentDecision(workspacePaths, run.id);
   const attempts = await listAttempts(workspacePaths, run.id);
@@ -1902,7 +2046,12 @@ async function verifySupersededSelfBootstrapRunDoesNotAutoResume(): Promise<void
     }
   );
 
-  await settle(orchestrator, 6, 40);
+  await settle(orchestrator, {
+    workspacePaths,
+    runId: run.id,
+    iterations: 6,
+    delayMs: 40
+  });
 
   const [current, attempts, journal, automation] = await Promise.all([
     getCurrentDecision(workspacePaths, run.id),
@@ -2216,7 +2365,12 @@ async function verifyRuntimeSourceDriftBlocksAutoResume(): Promise<void> {
   );
 
   await wait(40);
-  await settle(orchestrator, 6, 80);
+  await settle(orchestrator, {
+    workspacePaths,
+    runId: run.id,
+    iterations: 6,
+    delayMs: 80
+  });
 
   const current = await getCurrentDecision(workspacePaths, run.id);
   const attempts = await listAttempts(workspacePaths, run.id);

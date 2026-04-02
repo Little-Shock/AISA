@@ -1,8 +1,19 @@
 import {
+  createRunJournalEntry,
+  updateCurrentDecision,
+  updateRunPolicyRuntime,
+  type CurrentDecision
+} from "../packages/domain/src/index.ts";
+import {
+  appendRunJournal,
+  getAttemptHeartbeat,
   getCurrentDecision,
   getRun,
+  getRunPolicyRuntime,
   listAttempts,
   resolveWorkspacePaths,
+  saveCurrentDecision,
+  saveRunPolicyRuntime,
   type WorkspacePaths
 } from "../packages/state-store/src/index.ts";
 import {
@@ -67,6 +78,7 @@ export async function driveRun(input: {
   maxPolls?: number;
   stopAfterCompletedAttempts?: number | null;
   orchestratorOptions?: OrchestratorOptions;
+  autoApprovePendingExecution?: boolean;
 }): Promise<DriveRunResult> {
   const workspacePaths = resolveWorkspacePaths(input.workspaceRoot);
   const repositoryRoot = input.repositoryRoot ?? process.cwd();
@@ -105,7 +117,10 @@ export async function driveRun(input: {
       latestSnapshot = await readRunSnapshot(workspacePaths, input.runId);
 
       const completedAttemptCount = countCompletedAttempts(latestSnapshot.attempts);
-      if (completedAttemptCount >= stopAfterCompletedAttempts) {
+      if (
+        completedAttemptCount >= stopAfterCompletedAttempts &&
+        !(await hasActiveAttemptHeartbeats(workspacePaths, input.runId, latestSnapshot.attempts))
+      ) {
         return {
           ...latestSnapshot,
           stopReason: "completed_attempt_limit",
@@ -126,11 +141,22 @@ export async function driveRun(input: {
     await orchestrator.tick();
     await sleep(input.pollIntervalMs ?? 1500);
     latestSnapshot = await readRunSnapshot(workspacePaths, input.runId);
+    if (
+      input.autoApprovePendingExecution &&
+      (await maybeApprovePendingExecutionPolicy({
+        workspacePaths,
+        runId: input.runId,
+        current: latestSnapshot.current
+      }))
+    ) {
+      latestSnapshot = await readRunSnapshot(workspacePaths, input.runId);
+    }
 
     const completedAttemptCount = countCompletedAttempts(latestSnapshot.attempts);
     if (
       stopAfterCompletedAttempts !== null &&
-      completedAttemptCount >= stopAfterCompletedAttempts
+      completedAttemptCount >= stopAfterCompletedAttempts &&
+      !(await hasActiveAttemptHeartbeats(workspacePaths, input.runId, latestSnapshot.attempts))
     ) {
       return {
         ...latestSnapshot,
@@ -143,7 +169,8 @@ export async function driveRun(input: {
     if (
       latestSnapshot.current &&
       (latestSnapshot.current.run_status !== "running" ||
-        latestSnapshot.current.waiting_for_human)
+        latestSnapshot.current.waiting_for_human) &&
+      !(await hasActiveAttemptHeartbeats(workspacePaths, input.runId, latestSnapshot.attempts))
     ) {
       return {
         ...latestSnapshot,
@@ -156,7 +183,14 @@ export async function driveRun(input: {
 
   let latestSnapshotAfterDrain = latestSnapshot;
   let drainPollCount = 0;
-  while (hasInFlightAttempts(latestSnapshotAfterDrain.attempts)) {
+  while (
+    hasInFlightAttempts(latestSnapshotAfterDrain.attempts) ||
+    (await hasActiveAttemptHeartbeats(
+      workspacePaths,
+      input.runId,
+      latestSnapshotAfterDrain.attempts
+    ))
+  ) {
     drainPollCount += 1;
     await orchestrator.tick();
     await sleep(input.pollIntervalMs ?? 1500);
@@ -195,6 +229,68 @@ export async function driveRun(input: {
     pollCount: maxPolls + drainPollCount,
     completedAttemptCount: countCompletedAttempts(latestSnapshotAfterDrain.attempts)
   };
+}
+
+async function maybeApprovePendingExecutionPolicy(input: {
+  workspacePaths: WorkspacePaths;
+  runId: string;
+  current: CurrentDecision | null;
+}): Promise<boolean> {
+  if (!input.current) {
+    return false;
+  }
+
+  const policyRuntime = await getRunPolicyRuntime(input.workspacePaths, input.runId);
+  if (!policyRuntime) {
+    return false;
+  }
+
+  if (
+    policyRuntime.approval_required !== true ||
+    policyRuntime.approval_status !== "pending" ||
+    policyRuntime.proposed_attempt_type !== "execution"
+  ) {
+    return false;
+  }
+
+  const approvedPolicy = updateRunPolicyRuntime(policyRuntime, {
+    stage: "execution",
+    approval_status: "approved",
+    blocking_reason: null,
+    last_decision: "approved",
+    approval_decided_at: new Date().toISOString(),
+    approval_actor: "drive-run",
+    approval_note:
+      "Auto-approved by the verification harness so execution downstream checks can continue."
+  });
+  const resumedCurrent = updateCurrentDecision(input.current, {
+    run_status: "running",
+    waiting_for_human: false,
+    blocking_reason: null,
+    recommended_next_action: "continue_execution",
+    recommended_attempt_type: "execution",
+    summary: input.current.summary
+  });
+
+  await Promise.all([
+    saveRunPolicyRuntime(input.workspacePaths, approvedPolicy),
+    saveCurrentDecision(input.workspacePaths, resumedCurrent)
+  ]);
+  await appendRunJournal(
+    input.workspacePaths,
+    createRunJournalEntry({
+      run_id: input.runId,
+      attempt_id: approvedPolicy.source_attempt_id,
+      type: "run.policy.approved",
+      payload: {
+        actor: approvedPolicy.approval_actor,
+        note: approvedPolicy.approval_note,
+        proposed_signature: approvedPolicy.proposed_signature
+      }
+    })
+  );
+
+  return true;
 }
 
 function parseArgs(argv: string[]): CliOptions {
@@ -265,6 +361,18 @@ async function readRunSnapshot(
 
 function countCompletedAttempts(attempts: Awaited<ReturnType<typeof listAttempts>>): number {
   return attempts.filter((attempt) => attempt.status === "completed").length;
+}
+
+async function hasActiveAttemptHeartbeats(
+  workspacePaths: WorkspacePaths,
+  runId: string,
+  attempts: Awaited<ReturnType<typeof listAttempts>>
+): Promise<boolean> {
+  const heartbeats = await Promise.all(
+    attempts.map((attempt) => getAttemptHeartbeat(workspacePaths, runId, attempt.id))
+  );
+
+  return heartbeats.some((heartbeat) => heartbeat?.status === "active");
 }
 
 function hasInFlightAttempts(

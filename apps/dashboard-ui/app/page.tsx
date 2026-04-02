@@ -43,6 +43,7 @@ import type {
 import {
   RunJournalPanel,
   RunOverviewPanel,
+  RunPolicyPanel,
   RunReportPanel,
   RunSteerPanel,
   RunVerificationPanel
@@ -117,6 +118,7 @@ export default function Page() {
   const [runSteerAttemptId, setRunSteerAttemptId] = useState(
     defaultRunSteerAttemptId(null)
   );
+  const [runPolicyNote, setRunPolicyNote] = useState("");
   const refreshInFlightRef = useRef(false);
 
   useEffect(() => {
@@ -142,6 +144,7 @@ export default function Page() {
   useEffect(() => {
     setRunSteerText("");
     setRunSteerAttemptId(defaultRunSteerAttemptId(runDetail?.current?.latest_attempt_id));
+    setRunPolicyNote("");
   }, [runDetail?.run.id, runDetail?.current?.latest_attempt_id]);
 
   const selectedGoal = useMemo(
@@ -331,6 +334,8 @@ export default function Page() {
                 : null,
               automation: nextDetail.automation,
               governance: nextDetail.governance,
+              policy_runtime: nextDetail.policy_runtime,
+              policy_runtime_ref: nextDetail.policy_runtime_ref,
               latest_preflight_evaluation: nextDetail.latest_preflight_evaluation,
               latest_preflight_evaluation_ref: nextDetail.latest_preflight_evaluation_ref,
               latest_handoff_bundle: nextDetail.latest_handoff_bundle,
@@ -634,6 +639,66 @@ export default function Page() {
     }
   }
 
+  async function approveRunPolicy(runId: string) {
+    setBusy(`policy-approve:${runId}`);
+    setError(null);
+
+    try {
+      const response = await fetch(`${apiBaseUrl}/runs/${runId}/policy/approve`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          actor: "dashboard-ui",
+          note: runPolicyNote.trim() || undefined
+        })
+      });
+
+      if (!response.ok) {
+        throw new Error(await readErrorMessage(response, "批准执行计划失败"));
+      }
+
+      setRunPolicyNote("");
+      await refreshDashboard({
+        goalId: selectedGoalId,
+        runId
+      });
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function rejectRunPolicy(runId: string) {
+    setBusy(`policy-reject:${runId}`);
+    setError(null);
+
+    try {
+      const response = await fetch(`${apiBaseUrl}/runs/${runId}/policy/reject`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          actor: "dashboard-ui",
+          note: runPolicyNote.trim() || undefined
+        })
+      });
+
+      if (!response.ok) {
+        throw new Error(await readErrorMessage(response, "拒绝执行计划失败"));
+      }
+
+      setRunPolicyNote("");
+      await refreshDashboard({
+        goalId: selectedGoalId,
+        runId
+      });
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setBusy(null);
+    }
+  }
+
   return (
     <main className="dashboard-shell">
       <div className="dashboard-frame space-y-6">
@@ -735,6 +800,19 @@ export default function Page() {
 
                   {runDetail ? (
                     <>
+                      <RunPolicyPanel
+                        runDetail={runDetail}
+                        note={runPolicyNote}
+                        onNoteChange={setRunPolicyNote}
+                        onApprove={() => {
+                          void approveRunPolicy(runDetail.run.id);
+                        }}
+                        onReject={() => {
+                          void rejectRunPolicy(runDetail.run.id);
+                        }}
+                        approveBusy={busy === `policy-approve:${runDetail.run.id}`}
+                        rejectBusy={busy === `policy-reject:${runDetail.run.id}`}
+                      />
                       <RunVerificationPanel selectedRunAttemptDetail={selectedRunAttemptDetail} />
                       <RunSteerPanel
                         runDetail={runDetail}

@@ -14,13 +14,16 @@ import {
   createAttemptRuntimeState,
   createRun,
   createRunJournalEntry,
+  createRunPolicyRuntime,
   updateAttempt
 } from "../packages/domain/src/index.ts";
 import {
   appendRunJournal,
   appendAttemptRuntimeEvent,
   ensureWorkspace,
+  getCurrentDecision,
   getRunAutomationControl,
+  getRunPolicyRuntime,
   listAttempts,
   resolveRunPaths,
   resolveAttemptPaths,
@@ -39,7 +42,8 @@ import {
   saveAttemptRuntimeVerification,
   saveCurrentDecision,
   saveRun,
-  saveRunAutomationControl
+  saveRunAutomationControl,
+  saveRunPolicyRuntime
 } from "../packages/state-store/src/index.ts";
 import { buildServer } from "../apps/control-api/src/index.ts";
 import {
@@ -167,6 +171,24 @@ async function main(): Promise<void> {
       recommended_next_action: current.recommended_next_action,
       recommended_attempt_type: current.recommended_attempt_type,
       summary: current.summary
+    })
+  );
+  await saveRunPolicyRuntime(
+    workspacePaths,
+    createRunPolicyRuntime({
+      run_id: run.id,
+      stage: "execution",
+      approval_status: "approved",
+      approval_required: true,
+      proposed_signature: "verify-run-detail-policy",
+      proposed_attempt_type: "execution",
+      proposed_objective: attempt.objective,
+      proposed_success_criteria: attempt.success_criteria,
+      permission_profile: "workspace_write",
+      hook_policy: "enforce_runtime_contract",
+      last_decision: "dispatch_ready",
+      approval_actor: "verify-run-detail-api",
+      source_attempt_id: attempt.id
     })
   );
   await saveAttempt(workspacePaths, attempt);
@@ -804,9 +826,14 @@ async function main(): Promise<void> {
     );
     await launchOrchestrator.tick();
     const resumedAttempts = await listAttempts(workspacePaths, resumableRun.id);
-    assert.equal(resumedAttempts.length, 2);
-    assert.equal(resumedAttempts[1]?.attempt_type, "execution");
-    assert.equal(resumedAttempts[1]?.status, "created");
+    assert.equal(resumedAttempts.length, 1);
+    const resumedCurrent = await getCurrentDecision(workspacePaths, resumableRun.id);
+    assert.equal(resumedCurrent?.run_status, "waiting_steer");
+    assert.equal(resumedCurrent?.waiting_for_human, true);
+    const resumedPolicy = await getRunPolicyRuntime(workspacePaths, resumableRun.id);
+    assert.equal(resumedPolicy?.stage, "approval");
+    assert.equal(resumedPolicy?.approval_status, "pending");
+    assert.equal(resumedPolicy?.proposed_attempt_type, "execution");
 
     const staleRun = createRun({
       title: "Stale run health verification",
@@ -975,6 +1002,13 @@ async function main(): Promise<void> {
         mode: string;
         reason_code: string | null;
       } | null;
+      policy_runtime: {
+        stage: string;
+        approval_status: string;
+        proposed_attempt_type: string | null;
+        proposed_objective: string | null;
+      } | null;
+      policy_runtime_ref: string | null;
       failure_signal: {
         failure_class: string;
         policy_mode: string;
@@ -1259,6 +1293,11 @@ async function main(): Promise<void> {
     assert.equal(payload.worker_effort.synthesizer.requested_effort, "medium");
     assert.equal(payload.worker_effort.synthesizer.status, "unsupported");
     assert.equal(payload.automation?.mode, "active");
+    assert.equal(payload.policy_runtime?.stage, "execution");
+    assert.equal(payload.policy_runtime?.approval_status, "approved");
+    assert.equal(payload.policy_runtime?.proposed_attempt_type, "execution");
+    assert.equal(payload.policy_runtime?.proposed_objective, attempt.objective);
+    assert.ok(payload.policy_runtime_ref?.endsWith("policy-runtime.json"));
     assert.equal(payload.failure_signal, null);
     assert.equal(payload.latest_preflight_evaluation?.attempt_id, attempt.id);
     assert.equal(payload.latest_preflight_evaluation?.status, "passed");
@@ -1296,6 +1335,11 @@ async function main(): Promise<void> {
     assert.ok(
       payload.maintenance_plane?.outputs.some(
         (item) => item.key === "run_brief" && item.plane === "maintenance"
+      )
+    );
+    assert.ok(
+      payload.maintenance_plane?.outputs.some(
+        (item) => item.key === "policy_runtime" && item.plane === "maintenance"
       )
     );
     assert.ok(
@@ -1418,6 +1462,11 @@ async function main(): Promise<void> {
           } | null;
         } | null;
         run_brief_ref: string | null;
+        policy_runtime: {
+          stage: string;
+          approval_status: string;
+        } | null;
+        policy_runtime_ref: string | null;
         maintenance_plane: {
           blocked_diagnosis: {
             status: string;
@@ -1436,6 +1485,9 @@ async function main(): Promise<void> {
     assert.equal(runSummary?.worker_effort.execution.requested_effort, "high");
     assert.equal(runSummary?.worker_effort.execution.status, "applied");
     assert.equal(runSummary?.latest_attempt_runtime_state, null);
+    assert.equal(runSummary?.policy_runtime?.stage, "execution");
+    assert.equal(runSummary?.policy_runtime?.approval_status, "approved");
+    assert.ok(runSummary?.policy_runtime_ref?.endsWith("policy-runtime.json"));
     assert.equal(runSummary?.run_health.status, "waiting_steer");
     assert.equal(runSummary?.working_context_degraded.is_degraded, false);
     assert.equal(runSummary?.failure_signal, null);
@@ -1468,6 +1520,11 @@ async function main(): Promise<void> {
     assert.ok(
       runSummary?.maintenance_plane?.outputs.some(
         (item) => item.key === "run_brief" && item.plane === "maintenance"
+      )
+    );
+    assert.ok(
+      runSummary?.maintenance_plane?.outputs.some(
+        (item) => item.key === "policy_runtime" && item.plane === "maintenance"
       )
     );
     assert.equal(runSummary?.task_focus, blockerAttempt.objective);

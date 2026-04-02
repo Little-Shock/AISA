@@ -72,6 +72,17 @@ type GovernanceReport = {
   }>;
 };
 
+type PolicyRuntimeReport = {
+  suite: string;
+  passed: number;
+  failed: number;
+  results: Array<{
+    id: string;
+    status: "pass" | "fail";
+    error?: string;
+  }>;
+};
+
 type RunLoopReport = {
   suite: string;
   passed: number;
@@ -180,6 +191,31 @@ function formatScriptFailure(label: string, result: ScriptResult): string {
   ].join("\n\n");
 }
 
+function parseScriptJsonReport<T>(label: string, stdout: string): T {
+  const trimmed = stdout.trim();
+
+  try {
+    return JSON.parse(trimmed) as T;
+  } catch {
+    const candidateIndices = Array.from(
+      trimmed.matchAll(/(?:^|\n)(\{)/g),
+      (match) => (match.index ?? 0) + match[0].length - 1
+    ).reverse();
+
+    for (const index of candidateIndices) {
+      try {
+        return JSON.parse(trimmed.slice(index)) as T;
+      } catch {
+        continue;
+      }
+    }
+  }
+
+  throw new SyntaxError(
+    `${label} did not end with a parseable JSON report.\n\nstdout:\n${stdout}`
+  );
+}
+
 async function assertRunLoopReplay(): Promise<RunLoopReport> {
   const result = await runTsxScript("scripts/verify-run-loop.ts");
   assert.equal(
@@ -188,7 +224,10 @@ async function assertRunLoopReplay(): Promise<RunLoopReport> {
     formatScriptFailure("scripts/verify-run-loop.ts", result)
   );
 
-  const report = JSON.parse(result.stdout) as RunLoopReport;
+  const report = parseScriptJsonReport<RunLoopReport>(
+    "scripts/verify-run-loop.ts",
+    result.stdout
+  );
   const preflightFailClosedCase = report.results.find(
     (entry) => entry.id === "execution-missing-local-toolchain-blocks-dispatch"
   );
@@ -250,6 +289,15 @@ async function assertDashboardControlSurfaceReplay(): Promise<void> {
   );
 }
 
+async function assertDashboardRunSteerReplay(): Promise<void> {
+  const result = await runCommand("pnpm", ["verify:dashboard-run-steer"]);
+  assert.equal(
+    result.exitCode,
+    0,
+    formatScriptFailure("pnpm verify:dashboard-run-steer", result)
+  );
+}
+
 async function assertRunStreamReplay(): Promise<void> {
   const result = await runTsxScript("scripts/verify-run-stream.ts");
   assert.equal(
@@ -267,7 +315,10 @@ async function assertDriveRunReplay(): Promise<VerifyDriveRunReport> {
     formatScriptFailure("scripts/verify-drive-run.ts", result)
   );
 
-  return JSON.parse(result.stdout) as VerifyDriveRunReport;
+  return parseScriptJsonReport<VerifyDriveRunReport>(
+    "scripts/verify-drive-run.ts",
+    result.stdout
+  );
 }
 
 async function assertRunAutonomyReplay(): Promise<RunAutonomyReport> {
@@ -278,7 +329,10 @@ async function assertRunAutonomyReplay(): Promise<RunAutonomyReport> {
     formatScriptFailure("scripts/verify-run-autonomy.ts", result)
   );
 
-  const report = JSON.parse(result.stdout) as RunAutonomyReport;
+  const report = parseScriptJsonReport<RunAutonomyReport>(
+    "scripts/verify-run-autonomy.ts",
+    result.stdout
+  );
   const stalledResearchCase = report.results.find(
     (entry) => entry.id === "worker_stalled_research_retries_quickly"
   );
@@ -304,7 +358,10 @@ async function assertWorkerAdapterReplay(): Promise<WorkerAdapterReport> {
     formatScriptFailure("scripts/verify-worker-adapter.ts", result)
   );
 
-  const report = JSON.parse(result.stdout) as WorkerAdapterReport;
+  const report = parseScriptJsonReport<WorkerAdapterReport>(
+    "scripts/verify-worker-adapter.ts",
+    result.stdout
+  );
   assert.equal(report.status, "passed", "worker adapter 回放应该明确回报 passed。");
   return report;
 }
@@ -317,7 +374,38 @@ async function assertGovernanceReplay(): Promise<GovernanceReport> {
     formatScriptFailure("scripts/verify-governance.ts", result)
   );
 
-  return JSON.parse(result.stdout) as GovernanceReport;
+  return parseScriptJsonReport<GovernanceReport>(
+    "scripts/verify-governance.ts",
+    result.stdout
+  );
+}
+
+async function assertPolicyRuntimeReplay(): Promise<PolicyRuntimeReport> {
+  const result = await runTsxScript("scripts/verify-policy-runtime.ts");
+  assert.equal(
+    result.exitCode,
+    0,
+    formatScriptFailure("scripts/verify-policy-runtime.ts", result)
+  );
+
+  const report = parseScriptJsonReport<PolicyRuntimeReport>(
+    "scripts/verify-policy-runtime.ts",
+    result.stdout
+  );
+  const approvalCase = report.results.find(
+    (entry) => entry.id === "execution_requires_approval"
+  );
+  assert.ok(
+    approvalCase,
+    "policy runtime 回归必须包含 execution_requires_approval。"
+  );
+  assert.equal(
+    approvalCase.status,
+    "pass",
+    "execution approval gate 回放必须通过。"
+  );
+
+  return report;
 }
 
 async function assertRuntimeLaneReplay(): Promise<void> {
@@ -359,7 +447,10 @@ async function assertHistoryContractDriftClean(): Promise<HistoryContractDriftRe
       formatScriptFailure("scripts/verify-history-contract-drift.ts", result)
   );
 
-  const report = JSON.parse(result.stdout) as HistoryContractDriftReport;
+  const report = parseScriptJsonReport<HistoryContractDriftReport>(
+    "scripts/verify-history-contract-drift.ts",
+    result.stdout
+  );
   assert.equal(
     report.status,
     "ok",
@@ -382,11 +473,13 @@ async function main(): Promise<void> {
   await assertWorkingContextReplay();
   await assertMaintenancePlaneReplay();
   await assertDashboardControlSurfaceReplay();
+  await assertDashboardRunSteerReplay();
   await assertRunStreamReplay();
   const workerAdapter = await assertWorkerAdapterReplay();
   const driveRun = await assertDriveRunReplay();
   const runAutonomy = await assertRunAutonomyReplay();
   const governance = await assertGovernanceReplay();
+  const policyRuntime = await assertPolicyRuntimeReplay();
   const skipSelfBootstrapReplay = process.env[SKIP_SELF_BOOTSTRAP_ENV] === "1";
 
   if (!skipSelfBootstrapReplay) {
@@ -435,6 +528,11 @@ async function main(): Promise<void> {
           status: "passed",
           passed: governance.passed,
           failed: governance.failed
+        },
+        policy_runtime: {
+          status: "passed",
+          passed: policyRuntime.passed,
+          failed: policyRuntime.failed
         },
         self_bootstrap: skipSelfBootstrapReplay
           ? {

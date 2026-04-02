@@ -235,6 +235,59 @@ export const RunAutomationControlSchema = z.object({
   updated_at: z.string().datetime()
 });
 
+export const RunPolicyStageSchema = z.enum([
+  "planning",
+  "approval",
+  "execution"
+]);
+
+export const RunPolicyApprovalStatusSchema = z.enum([
+  "not_required",
+  "pending",
+  "approved",
+  "rejected"
+]);
+
+export const RunPolicyPermissionProfileSchema = z.enum([
+  "read_only",
+  "workspace_write"
+]);
+
+export const RunPolicyHookPolicySchema = z.enum([
+  "not_required",
+  "enforce_runtime_contract"
+]);
+
+export const RunPolicyDangerModeSchema = z.enum([
+  "forbid",
+  "manual_only"
+]);
+
+export const RunPolicyRuntimeSchema = z.object({
+  run_id: z.string(),
+  stage: RunPolicyStageSchema,
+  approval_status: RunPolicyApprovalStatusSchema,
+  approval_required: z.boolean().default(false),
+  proposed_signature: z.string().nullable().default(null),
+  proposed_attempt_type: AttemptTypeSchema.nullable().default(null),
+  proposed_objective: z.string().nullable().default(null),
+  proposed_success_criteria: z.array(z.string().min(1)).default([]),
+  permission_profile: RunPolicyPermissionProfileSchema.default("read_only"),
+  hook_policy: RunPolicyHookPolicySchema.default("not_required"),
+  danger_mode: RunPolicyDangerModeSchema.default("forbid"),
+  killswitch_active: z.boolean().default(false),
+  killswitch_reason: z.string().nullable().default(null),
+  blocking_reason: z.string().nullable().default(null),
+  last_decision: z.string().nullable().default(null),
+  approval_requested_at: z.string().datetime().nullable().default(null),
+  approval_decided_at: z.string().datetime().nullable().default(null),
+  approval_actor: z.string().nullable().default(null),
+  approval_note: z.string().nullable().default(null),
+  source_attempt_id: z.string().nullable().default(null),
+  source_ref: z.string().nullable().default(null),
+  updated_at: z.string().datetime()
+});
+
 export const RunWorkingContextTaskRefSchema = z.object({
   task_id: z.string().min(1),
   title: z.string().min(1),
@@ -1062,6 +1115,14 @@ export type CurrentDecision = z.infer<typeof CurrentDecisionSchema>;
 export type RunAutomationMode = z.infer<typeof RunAutomationModeSchema>;
 export type RunAutomationReasonCode = z.infer<typeof RunAutomationReasonCodeSchema>;
 export type RunAutomationControl = z.infer<typeof RunAutomationControlSchema>;
+export type RunPolicyStage = z.infer<typeof RunPolicyStageSchema>;
+export type RunPolicyApprovalStatus = z.infer<typeof RunPolicyApprovalStatusSchema>;
+export type RunPolicyPermissionProfile = z.infer<
+  typeof RunPolicyPermissionProfileSchema
+>;
+export type RunPolicyHookPolicy = z.infer<typeof RunPolicyHookPolicySchema>;
+export type RunPolicyDangerMode = z.infer<typeof RunPolicyDangerModeSchema>;
+export type RunPolicyRuntime = z.infer<typeof RunPolicyRuntimeSchema>;
 export type RunWorkingContextTaskRef = z.infer<typeof RunWorkingContextTaskRefSchema>;
 export type RunWorkingContextEvidenceRef = z.infer<
   typeof RunWorkingContextEvidenceRefSchema
@@ -1887,6 +1948,57 @@ export function createRunGovernanceState(input: {
   });
 }
 
+export function createRunPolicyRuntime(input: {
+  run_id: string;
+  stage?: RunPolicyStage;
+  approval_status?: RunPolicyApprovalStatus;
+  approval_required?: boolean;
+  proposed_signature?: string | null;
+  proposed_attempt_type?: AttemptType | null;
+  proposed_objective?: string | null;
+  proposed_success_criteria?: string[];
+  permission_profile?: RunPolicyPermissionProfile;
+  hook_policy?: RunPolicyHookPolicy;
+  danger_mode?: RunPolicyDangerMode;
+  killswitch_active?: boolean;
+  killswitch_reason?: string | null;
+  blocking_reason?: string | null;
+  last_decision?: string | null;
+  approval_requested_at?: string | null;
+  approval_decided_at?: string | null;
+  approval_actor?: string | null;
+  approval_note?: string | null;
+  source_attempt_id?: string | null;
+  source_ref?: string | null;
+}): RunPolicyRuntime {
+  const now = new Date().toISOString();
+
+  return RunPolicyRuntimeSchema.parse({
+    run_id: input.run_id,
+    stage: input.stage ?? "planning",
+    approval_status: input.approval_status ?? "not_required",
+    approval_required: input.approval_required ?? false,
+    proposed_signature: input.proposed_signature ?? null,
+    proposed_attempt_type: input.proposed_attempt_type ?? null,
+    proposed_objective: input.proposed_objective ?? null,
+    proposed_success_criteria: input.proposed_success_criteria ?? [],
+    permission_profile: input.permission_profile ?? "read_only",
+    hook_policy: input.hook_policy ?? "not_required",
+    danger_mode: input.danger_mode ?? "forbid",
+    killswitch_active: input.killswitch_active ?? false,
+    killswitch_reason: input.killswitch_reason ?? null,
+    blocking_reason: input.blocking_reason ?? null,
+    last_decision: input.last_decision ?? null,
+    approval_requested_at: input.approval_requested_at ?? null,
+    approval_decided_at: input.approval_decided_at ?? null,
+    approval_actor: input.approval_actor ?? null,
+    approval_note: input.approval_note ?? null,
+    source_attempt_id: input.source_attempt_id ?? null,
+    source_ref: input.source_ref ?? null,
+    updated_at: now
+  });
+}
+
 export function isExecutionContractDraftReady(
   contract: AttemptContractDraft | null | undefined
 ): contract is AttemptContractDraft {
@@ -1930,6 +2042,17 @@ export function updateRunAutomationControl(
 ): RunAutomationControl {
   return RunAutomationControlSchema.parse({
     ...automationControl,
+    ...patch,
+    updated_at: new Date().toISOString()
+  });
+}
+
+export function updateRunPolicyRuntime(
+  policyRuntime: RunPolicyRuntime,
+  patch: Partial<RunPolicyRuntime>
+): RunPolicyRuntime {
+  return RunPolicyRuntimeSchema.parse({
+    ...policyRuntime,
     ...patch,
     updated_at: new Date().toISOString()
   });

@@ -10,9 +10,11 @@ import {
   createRun,
   createRunGovernanceState,
   createRunJournalEntry,
+  updateCurrentDecision,
   type Attempt,
   type Run,
-  type WorkerWriteback
+  type WorkerWriteback,
+  updateRunPolicyRuntime
 } from "../packages/domain/src/index.js";
 import { maybeCreateVerifiedExecutionCheckpoint } from "../packages/orchestrator/src/git-checkpoint.js";
 import {
@@ -25,6 +27,7 @@ import {
   appendRunJournal,
   ensureWorkspace,
   getCurrentDecision,
+  getRunPolicyRuntime,
   getRunGovernanceState,
   listAttempts,
   listRunJournal,
@@ -35,7 +38,8 @@ import {
   saveAttemptResult,
   saveCurrentDecision,
   saveRun,
-  saveRunGovernanceState
+  saveRunGovernanceState,
+  saveRunPolicyRuntime
 } from "../packages/state-store/src/index.js";
 
 type CaseResult = {
@@ -309,7 +313,10 @@ async function verifyGovernancePreservesExecutionMainline(): Promise<void> {
   );
   orchestrator.start();
   try {
-    await waitFor(async () => (await listAttempts(workspacePaths, run.id)).length >= 2);
+    await waitFor(async () => {
+      await maybeApprovePendingExecutionPolicy(workspacePaths, run.id);
+      return (await listAttempts(workspacePaths, run.id)).length >= 2;
+    });
   } finally {
     orchestrator.stop();
   }
@@ -413,6 +420,67 @@ async function verifyExcludedPlanBlocksReuse(): Promise<void> {
     journal.some((entry) => entry.type === "run.governance.dispatch_blocked"),
     "dispatch blocker should be recorded in journal"
   );
+}
+
+async function maybeApprovePendingExecutionPolicy(
+  workspacePaths: ReturnType<typeof resolveWorkspacePaths>,
+  runId: string
+): Promise<boolean> {
+  const [current, policyRuntime] = await Promise.all([
+    getCurrentDecision(workspacePaths, runId),
+    getRunPolicyRuntime(workspacePaths, runId)
+  ]);
+
+  if (!current || !policyRuntime) {
+    return false;
+  }
+
+  if (
+    policyRuntime.approval_required !== true ||
+    policyRuntime.approval_status !== "pending" ||
+    policyRuntime.proposed_attempt_type !== "execution"
+  ) {
+    return false;
+  }
+
+  const approvedPolicy = updateRunPolicyRuntime(policyRuntime, {
+    stage: "execution",
+    approval_status: "approved",
+    blocking_reason: null,
+    last_decision: "approved",
+    approval_decided_at: new Date().toISOString(),
+    approval_actor: "verify-governance",
+    approval_note:
+      "Auto-approved by verify-governance so execution mainline checks can continue."
+  });
+  const resumedCurrent = updateCurrentDecision(current, {
+    run_status: "running",
+    waiting_for_human: false,
+    blocking_reason: null,
+    recommended_next_action: "continue_execution",
+    recommended_attempt_type: "execution",
+    summary: current.summary
+  });
+
+  await Promise.all([
+    saveRunPolicyRuntime(workspacePaths, approvedPolicy),
+    saveCurrentDecision(workspacePaths, resumedCurrent)
+  ]);
+  await appendRunJournal(
+    workspacePaths,
+    createRunJournalEntry({
+      run_id: runId,
+      attempt_id: approvedPolicy.source_attempt_id,
+      type: "run.policy.approved",
+      payload: {
+        actor: approvedPolicy.approval_actor,
+        note: approvedPolicy.approval_note,
+        proposed_signature: approvedPolicy.proposed_signature
+      }
+    })
+  );
+
+  return true;
 }
 
 async function verifyMissingArtifactReferenceBlocksDispatch(): Promise<void> {

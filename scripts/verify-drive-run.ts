@@ -11,7 +11,9 @@ import {
   createRun,
   createRunJournalEntry,
   createRunSteer,
+  updateCurrentDecision,
   updateAttempt,
+  updateRunPolicyRuntime,
   type Attempt,
   type Run,
   type WorkerWriteback
@@ -27,6 +29,7 @@ import {
   getAttemptRuntimeState,
   getCurrentDecision,
   getAttemptRuntimeVerification,
+  getRunPolicyRuntime,
   listAttempts,
   listRunJournal,
   resolveAttemptPaths,
@@ -37,6 +40,7 @@ import {
   saveCurrentDecision,
   saveAttemptRuntimeState,
   saveRun,
+  saveRunPolicyRuntime,
   saveRunSteer
 } from "../packages/state-store/src/index.ts";
 import { Orchestrator } from "../packages/orchestrator/src/index.ts";
@@ -588,7 +592,8 @@ async function main(hostJudgeConfig: HostJudgeConfigSnapshot): Promise<void> {
     runId: run.id,
     adapter: adapter as never,
     pollIntervalMs: 50,
-    maxPolls: 200
+    maxPolls: 200,
+    autoApprovePendingExecution: true
   });
 
   const checkpointEntry = await waitForCheckpointEntry(workspacePaths, run.id);
@@ -1358,6 +1363,11 @@ async function assertSteeredExecutionDoesNotReuseMismatchedContract(): Promise<v
     60_000
   );
   await orchestrator.tick();
+  await maybeApprovePendingExecutionPolicy(workspacePaths, run.id, {
+    nextAction: "apply_steer",
+    summary: "Steer queued. Loop will use it in the next attempt."
+  });
+  await orchestrator.tick();
 
   const attempts = await listAttempts(workspacePaths, run.id);
   const freshExecutionAttempt = attempts.at(-1);
@@ -1683,6 +1693,71 @@ async function waitForStableDecisionForAttempt(
   }
 
   throw new Error(`Timed out waiting for stable decision after attempt ${attemptId}`);
+}
+
+async function maybeApprovePendingExecutionPolicy(
+  workspacePaths: ReturnType<typeof resolveWorkspacePaths>,
+  runId: string,
+  options?: {
+    nextAction?: "apply_steer" | "continue_execution" | "retry_attempt";
+    summary?: string;
+  }
+): Promise<boolean> {
+  const [current, policyRuntime] = await Promise.all([
+    getCurrentDecision(workspacePaths, runId),
+    getRunPolicyRuntime(workspacePaths, runId)
+  ]);
+
+  if (!current || !policyRuntime) {
+    return false;
+  }
+
+  if (
+    policyRuntime.approval_required !== true ||
+    policyRuntime.approval_status !== "pending" ||
+    policyRuntime.proposed_attempt_type !== "execution"
+  ) {
+    return false;
+  }
+
+  const approvedPolicy = updateRunPolicyRuntime(policyRuntime, {
+    stage: "execution",
+    approval_status: "approved",
+    blocking_reason: null,
+    last_decision: "approved",
+    approval_decided_at: new Date().toISOString(),
+    approval_actor: "verify-drive-run",
+    approval_note:
+      "Auto-approved by verify-drive-run so execution downstream assertions can continue."
+  });
+  const resumedCurrent = updateCurrentDecision(current, {
+    run_status: "running",
+    waiting_for_human: false,
+    blocking_reason: null,
+    recommended_next_action: options?.nextAction ?? "continue_execution",
+    recommended_attempt_type: "execution",
+    summary: options?.summary ?? current.summary
+  });
+
+  await Promise.all([
+    saveRunPolicyRuntime(workspacePaths, approvedPolicy),
+    saveCurrentDecision(workspacePaths, resumedCurrent)
+  ]);
+  await appendRunJournal(
+    workspacePaths,
+    createRunJournalEntry({
+      run_id: runId,
+      attempt_id: approvedPolicy.source_attempt_id,
+      type: "run.policy.approved",
+      payload: {
+        actor: approvedPolicy.approval_actor,
+        note: approvedPolicy.approval_note,
+        proposed_signature: approvedPolicy.proposed_signature
+      }
+    })
+  );
+
+  return true;
 }
 
 async function waitForFile(filePath: string): Promise<void> {

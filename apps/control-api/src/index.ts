@@ -12,11 +12,13 @@ import {
   createEvent,
     createGoal,
     createRunAutomationControl,
+    createRunPolicyRuntime,
     createRun,
   createRunJournalEntry,
   createRunSteer,
   createSteer,
   updateCurrentDecision,
+  updateRunPolicyRuntime,
   updateBranch,
   updateGoal
 } from "@autoresearch/domain";
@@ -65,6 +67,7 @@ import {
   getRun,
     getRunGovernanceState,
     getRunAutomationControl,
+    getRunPolicyRuntime,
     getRunReport,
   getWriteback,
   listAttemptRuntimeEvents,
@@ -79,10 +82,12 @@ import {
   resolveAttemptPaths,
   resolveRunPaths,
   resolveWorkspacePaths,
+  readRunPolicyRuntimeStrict,
   saveCurrentDecision,
   saveBranch,
   saveGoal,
   savePlanArtifacts,
+    saveRunPolicyRuntime,
     saveRun,
     saveRunAutomationControl,
     saveRunSteer,
@@ -135,6 +140,24 @@ function inferLaunchNextAction(input: {
   return inferLaunchAttemptType(input) === "execution"
     ? "continue_execution"
     : "continue_research";
+}
+
+function isExecutionApprovalPending(
+  policyRuntime: Awaited<ReturnType<typeof getRunPolicyRuntime>> | null
+): boolean {
+  return (
+    policyRuntime?.approval_required === true &&
+    policyRuntime.proposed_attempt_type === "execution" &&
+    policyRuntime.approval_status === "pending"
+  );
+}
+
+function buildPlanningPolicyRuntime(runId: string) {
+  return createRunPolicyRuntime({
+    run_id: runId,
+    stage: "planning",
+    last_decision: "planning"
+  });
 }
 
 export async function buildServer(
@@ -403,11 +426,12 @@ export async function buildServer(
   };
 
   const buildRunDetailPayload = async (runId: string) => {
-    const [run, current, automation, governance, attempts, steers, journal, report, workingContextView, runBriefView, maintenancePlaneView] = await Promise.all([
+    const [run, current, automation, governance, policyRuntime, attempts, steers, journal, report, workingContextView, runBriefView, maintenancePlaneView] = await Promise.all([
       getRun(workspacePaths, runId),
       getCurrentDecision(workspacePaths, runId),
       getRunAutomationControl(workspacePaths, runId),
       getRunGovernanceState(workspacePaths, runId),
+      getRunPolicyRuntime(workspacePaths, runId),
       listAttempts(workspacePaths, runId),
       listRunSteers(workspacePaths, runId),
       listRunJournal(workspacePaths, runId),
@@ -456,6 +480,10 @@ export async function buildServer(
       current,
       automation: automationView,
       governance,
+      policy_runtime: policyRuntime,
+      policy_runtime_ref: policyRuntime
+        ? relative(workspacePaths.rootDir, resolveRunPaths(workspacePaths, runId).policyFile)
+        : null,
       failure_signal:
         runBriefView.run_brief?.failure_signal ??
         latestAttemptSurface.latest_handoff_bundle?.failure_signal ??
@@ -482,10 +510,11 @@ export async function buildServer(
   };
 
   const buildRunSummaryItem = async (run: Awaited<ReturnType<typeof listRuns>>[number]) => {
-    const [current, automation, governance, attempts, workingContextView, runBriefView, maintenancePlaneView] = await Promise.all([
+    const [current, automation, governance, policyRuntime, attempts, workingContextView, runBriefView, maintenancePlaneView] = await Promise.all([
       getCurrentDecision(workspacePaths, run.id),
       getRunAutomationControl(workspacePaths, run.id),
       getRunGovernanceState(workspacePaths, run.id),
+      getRunPolicyRuntime(workspacePaths, run.id),
       listAttempts(workspacePaths, run.id),
       readRunWorkingContextView(workspacePaths, run.id),
       readRunBriefView(workspacePaths, run.id),
@@ -531,6 +560,10 @@ export async function buildServer(
       current,
       automation: automationView,
       governance,
+      policy_runtime: policyRuntime,
+      policy_runtime_ref: policyRuntime
+        ? relative(workspacePaths.rootDir, resolveRunPaths(workspacePaths, run.id).policyFile)
+        : null,
       failure_signal:
         runBriefView.run_brief?.failure_signal ??
         latestAttemptSurface.latest_handoff_bundle?.failure_signal ??
@@ -865,6 +898,7 @@ export async function buildServer(
         summary: "Self-bootstrap run launched. Loop will create the first attempt."
       });
       await saveCurrentDecision(workspacePaths, current);
+      await saveRunPolicyRuntime(workspacePaths, buildPlanningPolicyRuntime(run.id));
       await appendRunJournal(
         workspacePaths,
         createRunJournalEntry({
@@ -902,6 +936,36 @@ export async function buildServer(
           run_id: runId,
           run_status: "draft"
         });
+      let policyRuntime = await getRunPolicyRuntime(workspacePaths, runId);
+      if (policyRuntime === null) {
+        try {
+          policyRuntime = await readRunPolicyRuntimeStrict(workspacePaths, runId);
+        } catch (error) {
+          const err = error as NodeJS.ErrnoException;
+          if (err?.code !== "ENOENT") {
+            return reply.code(409).send({
+              message:
+                error instanceof Error
+                  ? error.message
+                  : "Policy runtime is unreadable."
+            });
+          }
+        }
+      }
+      if (isExecutionApprovalPending(policyRuntime)) {
+        return reply.code(409).send({
+          message:
+            policyRuntime?.blocking_reason ??
+            "Execution plan is blocked pending leader approval."
+        });
+      }
+      if (policyRuntime?.killswitch_active) {
+        return reply.code(409).send({
+          message:
+            policyRuntime.killswitch_reason ??
+            "Execution is paused because the policy killswitch is active."
+        });
+      }
       const nextAction = inferLaunchNextAction({
         current,
         attempts
@@ -924,6 +988,39 @@ export async function buildServer(
       });
 
       await saveCurrentDecision(workspacePaths, nextCurrent);
+      await saveRunPolicyRuntime(
+        workspacePaths,
+        policyRuntime &&
+          policyRuntime.approval_required === true &&
+          policyRuntime.approval_status === "approved" &&
+          policyRuntime.proposed_attempt_type === "execution"
+          ? updateRunPolicyRuntime(policyRuntime, {
+              stage: "execution",
+              blocking_reason: null,
+              last_decision: "approved"
+            })
+          : policyRuntime
+          ? updateRunPolicyRuntime(policyRuntime, {
+              stage: "planning",
+              approval_status: "not_required",
+              approval_required: false,
+              proposed_signature: null,
+              proposed_attempt_type: null,
+              proposed_objective: null,
+              proposed_success_criteria: [],
+              permission_profile: "read_only",
+              hook_policy: "not_required",
+              danger_mode: "forbid",
+              blocking_reason: null,
+              last_decision: "planning",
+              approval_requested_at: null,
+              approval_decided_at: null,
+              approval_actor: null,
+              approval_note: null,
+              source_ref: null
+            })
+          : buildPlanningPolicyRuntime(runId)
+      );
       await activateRunAutomation(runId, "control-api");
       await appendRunJournal(
         workspacePaths,
@@ -941,6 +1038,162 @@ export async function buildServer(
         return reply.code(400).send({ message: error.message });
       }
       return reply.code(404).send({ message: `Run ${runId} not found` });
+    }
+  });
+
+  app.post("/runs/:runId/policy/approve", async (request, reply) => {
+    const { runId } = request.params as { runId: string };
+    const body =
+      (request.body as
+        | {
+            actor?: string;
+            note?: string;
+          }
+        | undefined) ?? {};
+
+    try {
+      const policyRuntime = await readRunPolicyRuntimeStrict(workspacePaths, runId);
+      if (
+        policyRuntime.approval_required !== true ||
+        policyRuntime.proposed_attempt_type !== "execution"
+      ) {
+        return reply.code(409).send({
+          message: "There is no execution plan waiting for approval."
+        });
+      }
+
+      const current =
+        (await getCurrentDecision(workspacePaths, runId)) ??
+        createCurrentDecision({
+          run_id: runId,
+          run_status: "draft"
+        });
+      const nextPolicy = updateRunPolicyRuntime(policyRuntime, {
+        stage: "execution",
+        approval_status: "approved",
+        blocking_reason: null,
+        last_decision: "approved",
+        approval_decided_at: new Date().toISOString(),
+        approval_actor: body.actor?.trim() || "control-api",
+        approval_note: body.note?.trim() || null
+      });
+      const nextCurrent = updateCurrentDecision(current, {
+        run_status: "running",
+        waiting_for_human: false,
+        blocking_reason: null,
+        recommended_next_action: "continue_execution",
+        recommended_attempt_type: "execution",
+        summary: "Execution plan approved. Loop will dispatch the approved attempt."
+      });
+
+      await saveRunPolicyRuntime(workspacePaths, nextPolicy);
+      await saveCurrentDecision(workspacePaths, nextCurrent);
+      await activateRunAutomation(runId, "control-api");
+      await appendRunJournal(
+        workspacePaths,
+        createRunJournalEntry({
+          run_id: runId,
+          attempt_id: policyRuntime.source_attempt_id,
+          type: "run.policy.approved",
+          payload: {
+            actor: nextPolicy.approval_actor,
+            note: nextPolicy.approval_note,
+            proposed_signature: nextPolicy.proposed_signature
+          }
+        })
+      );
+      await refreshRunOperatorSurface(workspacePaths, runId);
+
+      return {
+        current: nextCurrent,
+        policy_runtime: nextPolicy
+      };
+    } catch (error) {
+      return reply.code(409).send({
+        message:
+          error instanceof Error
+            ? error.message
+            : "Policy runtime is missing or unreadable."
+      });
+    }
+  });
+
+  app.post("/runs/:runId/policy/reject", async (request, reply) => {
+    const { runId } = request.params as { runId: string };
+    const body =
+      (request.body as
+        | {
+            actor?: string;
+            note?: string;
+          }
+        | undefined) ?? {};
+
+    try {
+      const policyRuntime = await readRunPolicyRuntimeStrict(workspacePaths, runId);
+      if (
+        policyRuntime.approval_required !== true ||
+        policyRuntime.proposed_attempt_type !== "execution"
+      ) {
+        return reply.code(409).send({
+          message: "There is no execution plan waiting for rejection."
+        });
+      }
+
+      const current =
+        (await getCurrentDecision(workspacePaths, runId)) ??
+        createCurrentDecision({
+          run_id: runId,
+          run_status: "draft"
+        });
+      const rejectionMessage =
+        body.note?.trim() ||
+        "Execution plan was rejected. Relaunch to gather more research first.";
+      const nextPolicy = updateRunPolicyRuntime(policyRuntime, {
+        stage: "approval",
+        approval_status: "rejected",
+        blocking_reason: rejectionMessage,
+        last_decision: "rejected",
+        approval_decided_at: new Date().toISOString(),
+        approval_actor: body.actor?.trim() || "control-api",
+        approval_note: body.note?.trim() || null
+      });
+      const nextCurrent = updateCurrentDecision(current, {
+        run_status: "waiting_steer",
+        waiting_for_human: true,
+        blocking_reason: rejectionMessage,
+        recommended_next_action: "continue_research",
+        recommended_attempt_type: "research",
+        summary: rejectionMessage
+      });
+
+      await saveRunPolicyRuntime(workspacePaths, nextPolicy);
+      await saveCurrentDecision(workspacePaths, nextCurrent);
+      await appendRunJournal(
+        workspacePaths,
+        createRunJournalEntry({
+          run_id: runId,
+          attempt_id: policyRuntime.source_attempt_id,
+          type: "run.policy.rejected",
+          payload: {
+            actor: nextPolicy.approval_actor,
+            note: nextPolicy.approval_note,
+            proposed_signature: nextPolicy.proposed_signature
+          }
+        })
+      );
+      await refreshRunOperatorSurface(workspacePaths, runId);
+
+      return {
+        current: nextCurrent,
+        policy_runtime: nextPolicy
+      };
+    } catch (error) {
+      return reply.code(409).send({
+        message:
+          error instanceof Error
+            ? error.message
+            : "Policy runtime is missing or unreadable."
+      });
     }
   });
 

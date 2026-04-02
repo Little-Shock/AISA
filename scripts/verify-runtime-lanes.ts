@@ -595,6 +595,7 @@ async function verifyCheckpointPromotionUpdatesRuntimeRepo(): Promise<{
     pollIntervalMs: 20,
     maxPolls: 240,
     stopAfterCompletedAttempts: 2,
+    autoApprovePendingExecution: true,
     orchestratorOptions: {
       runtimeLayout: layout.runtimeLayout,
       runWorkspaceScopePolicy,

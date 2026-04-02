@@ -7,6 +7,8 @@ import type {
   RunHealthStatus
 } from "@autoresearch/domain";
 
+export type { RunHealthAssessment, RunHealthStatus } from "@autoresearch/domain";
+
 function ageMs(ts: string | null, nowMs: number): number | null {
   if (!ts) {
     return null;
