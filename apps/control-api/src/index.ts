@@ -30,6 +30,7 @@ import {
   loadSelfBootstrapNextTaskActiveEntry,
   Orchestrator,
   readRunBriefView,
+  readRunMaintenancePlaneView,
   readRunWorkingContextView,
   repairRunManagedWorkspace,
   ensureRunManagedWorkspace,
@@ -402,7 +403,7 @@ export async function buildServer(
   };
 
   const buildRunDetailPayload = async (runId: string) => {
-    const [run, current, automation, governance, attempts, steers, journal, report, workingContextView, runBriefView] = await Promise.all([
+    const [run, current, automation, governance, attempts, steers, journal, report, workingContextView, runBriefView, maintenancePlaneView] = await Promise.all([
       getRun(workspacePaths, runId),
       getCurrentDecision(workspacePaths, runId),
       getRunAutomationControl(workspacePaths, runId),
@@ -412,7 +413,10 @@ export async function buildServer(
       listRunJournal(workspacePaths, runId),
       getRunReport(workspacePaths, runId),
       readRunWorkingContextView(workspacePaths, runId),
-      readRunBriefView(workspacePaths, runId)
+      readRunBriefView(workspacePaths, runId),
+      readRunMaintenancePlaneView(workspacePaths, runId, {
+        staleAfterMs: runHealthStaleMs
+      })
     ]);
     const latestAttemptSurface = await buildLatestAttemptSurface({
       runId,
@@ -436,13 +440,15 @@ export async function buildServer(
     const latestAttempt = latestAttemptSurface.latestAttempt;
     const latestAttemptDetail =
       attemptDetails.find((detail) => detail.attempt.id === latestAttempt?.id) ?? null;
-    const runHealth = assessRunHealth({
-      current,
-      latestAttempt,
-      latestRuntimeState: latestAttemptDetail?.runtime_state ?? null,
-      latestHeartbeat: latestAttemptDetail?.heartbeat ?? null,
-      staleAfterMs: runHealthStaleMs
-    });
+    const runHealth =
+      maintenancePlaneView.maintenance_plane?.run_health ??
+      assessRunHealth({
+        current,
+        latestAttempt,
+        latestRuntimeState: latestAttemptDetail?.runtime_state ?? null,
+        latestHeartbeat: latestAttemptDetail?.heartbeat ?? null,
+        staleAfterMs: runHealthStaleMs
+      });
     const workerEffort = orchestrator.describeRunWorkerEffort(run);
 
     return {
@@ -460,6 +466,8 @@ export async function buildServer(
       latest_handoff_bundle_ref: latestAttemptSurface.latest_handoff_bundle_ref,
       run_brief: runBriefView.run_brief,
       run_brief_ref: runBriefView.run_brief_ref,
+      maintenance_plane: maintenancePlaneView.maintenance_plane,
+      maintenance_plane_ref: maintenancePlaneView.maintenance_plane_ref,
       working_context: workingContextView.working_context,
       working_context_ref: workingContextView.working_context_ref,
       working_context_degraded: workingContextView.working_context_degraded,
@@ -474,13 +482,16 @@ export async function buildServer(
   };
 
   const buildRunSummaryItem = async (run: Awaited<ReturnType<typeof listRuns>>[number]) => {
-    const [current, automation, governance, attempts, workingContextView, runBriefView] = await Promise.all([
+    const [current, automation, governance, attempts, workingContextView, runBriefView, maintenancePlaneView] = await Promise.all([
       getCurrentDecision(workspacePaths, run.id),
       getRunAutomationControl(workspacePaths, run.id),
       getRunGovernanceState(workspacePaths, run.id),
       listAttempts(workspacePaths, run.id),
       readRunWorkingContextView(workspacePaths, run.id),
-      readRunBriefView(workspacePaths, run.id)
+      readRunBriefView(workspacePaths, run.id),
+      readRunMaintenancePlaneView(workspacePaths, run.id, {
+        staleAfterMs: runHealthStaleMs
+      })
     ]);
     const latestAttemptSurface = await buildLatestAttemptSurface({
       runId: run.id,
@@ -505,6 +516,16 @@ export async function buildServer(
         : Promise.resolve(null)
     ]);
 
+    const runHealth =
+      maintenancePlaneView.maintenance_plane?.run_health ??
+      assessRunHealth({
+        current,
+        latestAttempt,
+        latestRuntimeState,
+        latestHeartbeat,
+        staleAfterMs: runHealthStaleMs
+      });
+
     return {
       run,
       current,
@@ -520,17 +541,13 @@ export async function buildServer(
       latest_handoff_bundle_ref: latestAttemptSurface.latest_handoff_bundle_ref,
       run_brief: runBriefView.run_brief,
       run_brief_ref: runBriefView.run_brief_ref,
+      maintenance_plane: maintenancePlaneView.maintenance_plane,
+      maintenance_plane_ref: maintenancePlaneView.maintenance_plane_ref,
       working_context: workingContextView.working_context,
       working_context_ref: workingContextView.working_context_ref,
       working_context_degraded: workingContextView.working_context_degraded,
       worker_effort: orchestrator.describeRunWorkerEffort(run),
-      run_health: assessRunHealth({
-        current,
-        latestAttempt,
-        latestRuntimeState,
-        latestHeartbeat,
-        staleAfterMs: runHealthStaleMs
-      }),
+      run_health: runHealth,
       attempt_count: attempts.length,
       latest_attempt: latestAttempt
         ? {

@@ -134,6 +134,41 @@ function runTsxScript(
   });
 }
 
+function runCommand(
+  command: string,
+  args: string[],
+  extraEnv?: NodeJS.ProcessEnv
+): Promise<ScriptResult> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        ...extraEnv
+      }
+    });
+    let stdout = "";
+    let stderr = "";
+
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk;
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk;
+    });
+    child.on("error", reject);
+    child.on("close", (exitCode) => {
+      resolve({
+        exitCode,
+        stdout,
+        stderr
+      });
+    });
+  });
+}
+
 function formatScriptFailure(label: string, result: ScriptResult): string {
   const stdout = result.stdout.trim();
   const stderr = result.stderr.trim();
@@ -185,6 +220,33 @@ async function assertRunDetailApiReplay(): Promise<void> {
     result.exitCode,
     0,
     formatScriptFailure("scripts/verify-run-detail-api.ts", result)
+  );
+}
+
+async function assertWorkingContextReplay(): Promise<void> {
+  const result = await runTsxScript("scripts/verify-working-context.ts");
+  assert.equal(
+    result.exitCode,
+    0,
+    formatScriptFailure("scripts/verify-working-context.ts", result)
+  );
+}
+
+async function assertMaintenancePlaneReplay(): Promise<void> {
+  const result = await runTsxScript("scripts/verify-maintenance-plane.ts");
+  assert.equal(
+    result.exitCode,
+    0,
+    formatScriptFailure("scripts/verify-maintenance-plane.ts", result)
+  );
+}
+
+async function assertDashboardControlSurfaceReplay(): Promise<void> {
+  const result = await runCommand("pnpm", ["verify:dashboard-control-surface"]);
+  assert.equal(
+    result.exitCode,
+    0,
+    formatScriptFailure("pnpm verify:dashboard-control-surface", result)
   );
 }
 
@@ -317,6 +379,9 @@ async function main(): Promise<void> {
   await assertControlApiSupervisorReplay();
   await assertRuntimeLaneReplay();
   await assertRunDetailApiReplay();
+  await assertWorkingContextReplay();
+  await assertMaintenancePlaneReplay();
+  await assertDashboardControlSurfaceReplay();
   await assertRunStreamReplay();
   const workerAdapter = await assertWorkerAdapterReplay();
   const driveRun = await assertDriveRunReplay();
@@ -334,8 +399,8 @@ async function main(): Promise<void> {
     JSON.stringify(
       {
         summary: skipSelfBootstrapReplay
-          ? "runtime 回放通过，worker adapter、drive-run、run autonomy 主链通过，嵌套 self-bootstrap 回放已按防递归保护跳过，历史 contract 漂移修复与体检都通过了。"
-          : "runtime 回放通过，worker adapter、drive-run、run autonomy、self-bootstrap 主链和历史 contract 漂移修复都通过了。",
+          ? "runtime 回放通过，主链、maintenance plane、working context、dashboard control surface 都通过，嵌套 self-bootstrap 回放已按防递归保护跳过，历史 contract 漂移修复与体检都通过了。"
+          : "runtime 回放通过，主链、maintenance plane、working context、dashboard control surface、self-bootstrap 和历史 contract 漂移修复都通过了。",
         run_loop: {
           status: "passed"
         },

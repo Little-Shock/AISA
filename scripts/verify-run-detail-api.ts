@@ -1018,6 +1018,27 @@ async function main(): Promise<void> {
         }>;
       } | null;
       run_brief_ref: string | null;
+      maintenance_plane: {
+        blocked_diagnosis: {
+          status: string;
+          summary: string | null;
+          recommended_next_action: string | null;
+        };
+        outputs: Array<{
+          key: string;
+          plane: string;
+          status: string;
+          ref: string | null;
+          summary: string | null;
+        }>;
+        signal_sources: Array<{
+          key: string;
+          plane: string;
+          ref: string | null;
+          summary: string | null;
+        }>;
+      } | null;
+      maintenance_plane_ref: string | null;
       working_context: {
         plan_ref: string | null;
         current_focus: string | null;
@@ -1262,6 +1283,26 @@ async function main(): Promise<void> {
     assert.equal(payload.run_brief?.primary_focus, blockerAttempt.objective);
     assert.equal(payload.run_brief?.failure_signal, null);
     assert.ok(payload.run_brief_ref?.endsWith("run-brief.json"));
+    assert.ok(payload.maintenance_plane_ref?.endsWith("artifacts/maintenance-plane.json"));
+    assert.equal(payload.maintenance_plane?.blocked_diagnosis.status, "attention");
+    assert.equal(
+      payload.maintenance_plane?.blocked_diagnosis.summary,
+      blockerFailureContext.message
+    );
+    assert.equal(
+      payload.maintenance_plane?.blocked_diagnosis.recommended_next_action,
+      "wait_for_human"
+    );
+    assert.ok(
+      payload.maintenance_plane?.outputs.some(
+        (item) => item.key === "run_brief" && item.plane === "maintenance"
+      )
+    );
+    assert.ok(
+      payload.maintenance_plane?.signal_sources.some(
+        (item) => item.key === "handoff_bundle" && item.plane === "mainline"
+      )
+    );
     assert.ok(
       payload.run_brief?.evidence_refs.some(
         (item) => item.kind === "handoff_bundle" && item.ref.endsWith("handoff_bundle.json")
@@ -1377,6 +1418,16 @@ async function main(): Promise<void> {
           } | null;
         } | null;
         run_brief_ref: string | null;
+        maintenance_plane: {
+          blocked_diagnosis: {
+            status: string;
+          };
+          outputs: Array<{
+            key: string;
+            plane: string;
+          }>;
+        } | null;
+        maintenance_plane_ref: string | null;
         task_focus: string;
         latest_attempt_runtime_state: { session_id: string | null } | null;
       }>;
@@ -1412,6 +1463,13 @@ async function main(): Promise<void> {
     assert.equal(runSummary?.run_brief?.primary_focus, blockerAttempt.objective);
     assert.equal(runSummary?.run_brief?.failure_signal, null);
     assert.ok(runSummary?.run_brief_ref?.endsWith("run-brief.json"));
+    assert.ok(runSummary?.maintenance_plane_ref?.endsWith("artifacts/maintenance-plane.json"));
+    assert.equal(runSummary?.maintenance_plane?.blocked_diagnosis.status, "attention");
+    assert.ok(
+      runSummary?.maintenance_plane?.outputs.some(
+        (item) => item.key === "run_brief" && item.plane === "maintenance"
+      )
+    );
     assert.equal(runSummary?.task_focus, blockerAttempt.objective);
 
     const healthResponse = await app.inject({

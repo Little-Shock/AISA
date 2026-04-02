@@ -621,7 +621,7 @@ async function verifyCheckpointPromotionUpdatesRuntimeRepo(): Promise<{
   );
   assert.equal(executionAttempt?.status, "completed");
   assert.equal(driveResult.completedAttemptCount, 2);
-  await sleep(20);
+  await waitForRestartRequests(restartRequests, 1, 2_000);
 
   const journal = await listRunJournal(workspacePaths, run.id);
   assert.ok(
@@ -971,6 +971,21 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolveDelay) => {
     setTimeout(resolveDelay, ms);
   });
+}
+
+async function waitForRestartRequests(
+  restartRequests: RuntimeRestartRequest[],
+  expectedCount: number,
+  timeoutMs: number
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+
+  while (Date.now() < deadline) {
+    if (restartRequests.length >= expectedCount) {
+      return;
+    }
+    await sleep(25);
+  }
 }
 
 main().catch((error) => {

@@ -92,6 +92,7 @@ export function RunOverviewPanel({
   const runHealth = runDetail.run_health;
   const automation = runDetail.automation;
   const runBrief = runDetail.run_brief;
+  const maintenancePlane = runDetail.maintenance_plane;
   const failureSignal = runDetail.failure_signal ?? runBrief?.failure_signal ?? null;
   const latestPreflight = runDetail.latest_preflight_evaluation;
   const latestHandoff = runDetail.latest_handoff_bundle;
@@ -249,6 +250,22 @@ export function RunOverviewPanel({
         </Callout>
       ) : null}
 
+      {maintenancePlane?.blocked_diagnosis.status === "attention" ? (
+        <Callout tone="amber" title="维护面诊断">
+          <strong>
+            {localizeUiText(
+              maintenancePlane.blocked_diagnosis.summary ?? "维护平面检测到当前需要排查。"
+            )}
+          </strong>
+          <br />
+          {localizeUiText(
+            maintenancePlane.blocked_diagnosis.recommended_next_action
+              ? `建议动作 ${maintenancePlane.blocked_diagnosis.recommended_next_action}`
+              : "当前没有额外建议动作。"
+          )}
+        </Callout>
+      ) : null}
+
       <div className="dual-grid">
         <SubPanel title="当前分配任务" accent="emerald">
           <p className="body-copy">
@@ -276,6 +293,7 @@ export function RunOverviewPanel({
             items={[
               `run brief：${localizeUiText(runBrief?.headline ?? "暂无")}`,
               `run brief ref：${runDetail.run_brief_ref ?? "未落盘"}`,
+              `维护平面：${runDetail.maintenance_plane_ref ?? "未落盘"}`,
               `当前焦点：${localizeUiText(workingContext?.current_focus ?? "暂无")}`,
               `计划锚点：${workingContext?.plan_ref ?? "暂无"}`,
               `来源尝试：${workingContext?.source_attempt_id ?? "暂无"}`,
@@ -307,6 +325,15 @@ export function RunOverviewPanel({
               `handoff：${localizeUiText(latestHandoff?.summary ?? "暂无")}`,
               `handoff ref：${runDetail.latest_handoff_bundle_ref ?? "暂无"}`
             ]}
+          />
+          <SectionList
+            title="维护平面输出"
+            items={
+              maintenancePlane?.outputs.map(
+                (item) =>
+                  `${item.label} · ${item.status}${item.ref ? ` · ${item.ref}` : ""}${item.summary ? ` · ${localizeUiText(item.summary)}` : ""}`
+              ) ?? []
+            }
           />
           <SectionList
             title="当前成功标准"
@@ -407,6 +434,15 @@ export function RunOverviewPanel({
             }
           />
           <SectionList
+            title="信号来源"
+            items={
+              maintenancePlane?.signal_sources.map(
+                (item) =>
+                  `${item.label} · ${item.plane}${item.ref ? ` · ${item.ref}` : ""}${item.summary ? ` · ${localizeUiText(item.summary)}` : ""}`
+              ) ?? []
+            }
+          />
+          <SectionList
             title="治理与健康快照"
             items={[
               `治理摘要：${localizeUiText(governance?.context_summary.headline ?? "暂无治理摘要")}`,
@@ -414,7 +450,8 @@ export function RunOverviewPanel({
               `排除计划数：${String(governance?.excluded_plans.length ?? 0)}`,
               `最新活动：${latestActivityLabel}`,
               `心跳：${selectedRunHeartbeat?.heartbeat_at ? heartbeatLabel : "暂无"}`,
-              `疑似僵尸：${runHealth?.likely_zombie ? "是" : "否"}`
+              `疑似僵尸：${runHealth?.likely_zombie ? "是" : "否"}`,
+              `阻塞诊断：${localizeUiText(maintenancePlane?.blocked_diagnosis.summary ?? "暂无")}`
             ]}
           />
           <SectionList

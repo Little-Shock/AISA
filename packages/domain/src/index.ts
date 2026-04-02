@@ -340,6 +340,78 @@ export const RunBriefSchema = z.object({
   updated_at: z.string().datetime()
 });
 
+export const RunHealthStatusSchema = z.enum([
+  "healthy",
+  "stale_running_attempt",
+  "waiting_steer",
+  "draft",
+  "settled",
+  "unknown"
+]);
+
+export const RunHealthAssessmentSchema = z.object({
+  status: RunHealthStatusSchema,
+  summary: z.string().min(1),
+  likely_zombie: z.boolean(),
+  stale_after_ms: z.number().int().nonnegative(),
+  latest_attempt_id: z.string().nullable().default(null),
+  latest_attempt_status: AttemptStatusSchema.nullable().default(null),
+  latest_activity_at: z.string().datetime().nullable().default(null),
+  latest_activity_age_ms: z.number().int().nullable().default(null),
+  heartbeat_at: z.string().datetime().nullable().default(null),
+  heartbeat_age_ms: z.number().int().nullable().default(null)
+});
+
+export const RunSurfacePlaneSchema = z.enum(["mainline", "maintenance"]);
+
+export const RunMaintenanceOutputStatusSchema = z.enum([
+  "ready",
+  "attention",
+  "degraded",
+  "not_available"
+]);
+
+export const RunMaintenanceSourceSchema = z.object({
+  key: z.string().min(1),
+  label: z.string().min(1),
+  plane: RunSurfacePlaneSchema,
+  ref: z.string().min(1).nullable().default(null),
+  summary: z.string().nullable().default(null)
+});
+
+export const RunMaintenanceOutputSchema = z.object({
+  key: z.string().min(1),
+  label: z.string().min(1),
+  plane: RunSurfacePlaneSchema.default("maintenance"),
+  status: RunMaintenanceOutputStatusSchema,
+  ref: z.string().min(1).nullable().default(null),
+  summary: z.string().nullable().default(null)
+});
+
+export const RunBlockedDiagnosisStatusSchema = z.enum([
+  "clear",
+  "attention",
+  "not_applicable"
+]);
+
+export const RunBlockedDiagnosisSchema = z.object({
+  status: RunBlockedDiagnosisStatusSchema,
+  summary: z.string().nullable().default(null),
+  recommended_next_action: z.string().min(1).nullable().default(null),
+  source_ref: z.string().min(1).nullable().default(null),
+  evidence_refs: z.array(z.string().min(1)).default([]),
+  updated_at: z.string().datetime()
+});
+
+export const RunMaintenancePlaneSchema = z.object({
+  run_id: z.string(),
+  run_health: RunHealthAssessmentSchema,
+  outputs: z.array(RunMaintenanceOutputSchema).default([]),
+  signal_sources: z.array(RunMaintenanceSourceSchema).default([]),
+  blocked_diagnosis: RunBlockedDiagnosisSchema,
+  updated_at: z.string().datetime()
+});
+
 export const RunGovernanceStatusSchema = z.enum([
   "active",
   "blocked",
@@ -1007,12 +1079,21 @@ export type RunWorkingContextAutomation = z.infer<
   typeof RunWorkingContextAutomationSchema
 >;
 export type RunWorkingContext = z.infer<typeof RunWorkingContextSchema>;
+export type RunHealthStatus = z.infer<typeof RunHealthStatusSchema>;
+export type RunHealthAssessment = z.infer<typeof RunHealthAssessmentSchema>;
 export type RunFailureClass = z.infer<typeof RunFailureClassSchema>;
 export type RunFailurePolicyMode = z.infer<typeof RunFailurePolicyModeSchema>;
 export type RunFailureSourceKind = z.infer<typeof RunFailureSourceKindSchema>;
 export type RunFailureSignal = z.infer<typeof RunFailureSignalSchema>;
 export type RunBriefEvidenceRef = z.infer<typeof RunBriefEvidenceRefSchema>;
 export type RunBrief = z.infer<typeof RunBriefSchema>;
+export type RunSurfacePlane = z.infer<typeof RunSurfacePlaneSchema>;
+export type RunMaintenanceOutputStatus = z.infer<typeof RunMaintenanceOutputStatusSchema>;
+export type RunMaintenanceSource = z.infer<typeof RunMaintenanceSourceSchema>;
+export type RunMaintenanceOutput = z.infer<typeof RunMaintenanceOutputSchema>;
+export type RunBlockedDiagnosisStatus = z.infer<typeof RunBlockedDiagnosisStatusSchema>;
+export type RunBlockedDiagnosis = z.infer<typeof RunBlockedDiagnosisSchema>;
+export type RunMaintenancePlane = z.infer<typeof RunMaintenancePlaneSchema>;
 export type RunGovernanceStatus = z.infer<typeof RunGovernanceStatusSchema>;
 export type RunGovernanceExcludedPlan = z.infer<typeof RunGovernanceExcludedPlanSchema>;
 export type RunGovernanceContextSummary = z.infer<typeof RunGovernanceContextSummarySchema>;
@@ -1726,6 +1807,40 @@ export function createRunFailureSignal(input: {
     source_ref: input.source_ref ?? null,
     failure_code: input.failure_code ?? null,
     summary: input.summary
+  });
+}
+
+export function createRunBlockedDiagnosis(input: {
+  status?: RunBlockedDiagnosisStatus;
+  summary?: string | null;
+  recommended_next_action?: string | null;
+  source_ref?: string | null;
+  evidence_refs?: string[];
+}): RunBlockedDiagnosis {
+  return RunBlockedDiagnosisSchema.parse({
+    status: input.status ?? "not_applicable",
+    summary: input.summary ?? null,
+    recommended_next_action: input.recommended_next_action ?? null,
+    source_ref: input.source_ref ?? null,
+    evidence_refs: input.evidence_refs ?? [],
+    updated_at: new Date().toISOString()
+  });
+}
+
+export function createRunMaintenancePlane(input: {
+  run_id: string;
+  run_health: RunHealthAssessment;
+  outputs?: RunMaintenanceOutput[];
+  signal_sources?: RunMaintenanceSource[];
+  blocked_diagnosis?: RunBlockedDiagnosis;
+}): RunMaintenancePlane {
+  return RunMaintenancePlaneSchema.parse({
+    run_id: input.run_id,
+    run_health: input.run_health,
+    outputs: input.outputs ?? [],
+    signal_sources: input.signal_sources ?? [],
+    blocked_diagnosis: input.blocked_diagnosis ?? createRunBlockedDiagnosis({}),
+    updated_at: new Date().toISOString()
   });
 }
 

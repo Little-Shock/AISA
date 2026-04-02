@@ -1,6 +1,5 @@
 import { relative } from "node:path";
 import {
-  createRunJournalEntry,
   createCurrentDecision,
   createRunAutomationControl,
   createRunBrief,
@@ -12,7 +11,6 @@ import {
   type RunGovernanceState
 } from "@autoresearch/domain";
 import {
-  appendRunJournal,
   getAttemptAdversarialVerification,
   getAttemptHandoffBundle,
   getAttemptPreflightEvaluation,
@@ -28,11 +26,7 @@ import {
   saveRunBrief,
   type WorkspacePaths
 } from "@autoresearch/state-store";
-import {
-  readRunWorkingContextView,
-  refreshRunWorkingContext,
-  RunWorkingContextWriteError
-} from "./working-context.js";
+import { readRunWorkingContextView } from "./working-context.js";
 import {
   deriveFailureSignalFromAdversarialVerification,
   deriveFailureSignalFromHandoffBundle,
@@ -464,36 +458,6 @@ export async function refreshRunBrief(
   const runBrief = await buildRunBrief(paths, runId);
   await saveRunBrief(paths, runBrief);
   return runBrief;
-}
-
-export async function refreshRunOperatorSurface(
-  paths: WorkspacePaths,
-  runId: string
-): Promise<RunBrief> {
-  try {
-    await refreshRunWorkingContext(paths, runId);
-  } catch (error) {
-    if (!(error instanceof RunWorkingContextWriteError)) {
-      throw error;
-    }
-
-    await appendRunJournal(
-      paths,
-      createRunJournalEntry({
-        run_id: runId,
-        type: "run.working_context.refresh_failed",
-        payload: {
-          failure_class: "working_context_degraded",
-          failure_policy_mode: "soft_degrade",
-          reason_code: "context_write_failed",
-          summary: "working context 写入失败，当前现场不可信。",
-          detail: error.message
-        }
-      })
-    );
-  }
-
-  return await refreshRunBrief(paths, runId);
 }
 
 export async function readRunBriefView(

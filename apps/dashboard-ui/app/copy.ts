@@ -179,6 +179,8 @@ const ACTIVITY_LABELS: Record<string, string> = {
   "attempt.checkpoint.blocked": "检查点被阻塞",
   "attempt.checkpoint.skipped": "检查点已跳过",
   "run.working_context.refresh_failed": "运行现场写入失败",
+  "run.run_brief.refresh_failed": "运行摘要写入失败",
+  "run.maintenance_plane.refresh_failed": "维护平面写入失败",
   "run.auto_resume.blocked": "自动续跑已阻塞"
 };
 

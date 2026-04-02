@@ -214,6 +214,41 @@ export type RunBrief = {
   updated_at: string;
 } | null;
 
+export type RunMaintenanceSource = {
+  key: string;
+  label: string;
+  plane: string;
+  ref: string | null;
+  summary: string | null;
+};
+
+export type RunMaintenanceOutput = {
+  key: string;
+  label: string;
+  plane: string;
+  status: string;
+  ref: string | null;
+  summary: string | null;
+};
+
+export type RunBlockedDiagnosis = {
+  status: string;
+  summary: string | null;
+  recommended_next_action: string | null;
+  source_ref: string | null;
+  evidence_refs: string[];
+  updated_at: string;
+};
+
+export type RunMaintenancePlane = {
+  run_id: string;
+  run_health: RunHealthAssessment;
+  outputs: RunMaintenanceOutput[];
+  signal_sources: RunMaintenanceSource[];
+  blocked_diagnosis: RunBlockedDiagnosis;
+  updated_at: string;
+} | null;
+
 export type RunLatestPreflightEvaluation = {
   run_id: string;
   attempt_id: string;
@@ -285,6 +320,8 @@ export type RunSummaryItem = {
   latest_handoff_bundle_ref: string | null;
   run_brief: RunBrief;
   run_brief_ref: string | null;
+  maintenance_plane: RunMaintenancePlane;
+  maintenance_plane_ref: string | null;
   working_context: RunWorkingContext;
   working_context_ref: string | null;
   working_context_degraded: RunWorkingContextDegraded;
@@ -338,6 +375,8 @@ export type RunDetail = {
   latest_handoff_bundle_ref: string | null;
   run_brief: RunBrief;
   run_brief_ref: string | null;
+  maintenance_plane: RunMaintenancePlane;
+  maintenance_plane_ref: string | null;
   working_context: RunWorkingContext;
   working_context_ref: string | null;
   working_context_degraded: RunWorkingContextDegraded;

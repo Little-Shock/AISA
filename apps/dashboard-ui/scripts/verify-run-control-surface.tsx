@@ -77,8 +77,20 @@ async function main(): Promise<void> {
       runDetail.run_brief?.failure_signal?.failure_class,
       fixture.expected_failure_class
     );
+    assert.equal(runDetail.maintenance_plane?.blocked_diagnosis.status, "attention");
+    assert.ok(
+      runDetail.maintenance_plane?.outputs.some(
+        (item) => item.key === "run_brief" && item.plane === "maintenance"
+      )
+    );
+    assert.ok(
+      runDetail.maintenance_plane?.signal_sources.some(
+        (item) => item.key === "handoff_bundle" && item.plane === "mainline"
+      )
+    );
     assert.equal(selectedRun?.task_focus, fixture.expected_task_focus);
     assert.equal(selectedRun?.failure_signal?.failure_class, fixture.expected_failure_class);
+    assert.equal(selectedRun?.maintenance_plane?.blocked_diagnosis.status, "attention");
 
     const selectedRunAttemptDetail =
       runDetail.attempt_details.find(
@@ -121,6 +133,8 @@ async function main(): Promise<void> {
     assert.match(overviewMarkup, /统一失败信号/);
     assert.match(overviewMarkup, /preflight_blocked/);
     assert.match(overviewMarkup, /控制面真相/);
+    assert.match(overviewMarkup, /维护平面输出/);
+    assert.match(overviewMarkup, /信号来源/);
     assert.match(overviewMarkup, /建议先读/);
 
     const inboxMarkup = renderToStaticMarkup(

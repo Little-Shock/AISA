@@ -180,7 +180,7 @@ import {
   parseSelfBootstrapNextTaskActiveEntry,
   type SelfBootstrapNextTaskActiveEntry
 } from "./self-bootstrap-next-task.js";
-import { refreshRunOperatorSurface } from "./run-brief.js";
+import { refreshRunOperatorSurface } from "./maintenance-plane.js";
 import {
   deriveFailureSignalFromAdversarialVerification,
   deriveFailureSignalFromPreflight,
@@ -5587,6 +5587,14 @@ export {
   buildRunBrief,
   readRunBriefView,
   refreshRunBrief,
-  refreshRunOperatorSurface,
   type RunBriefView
 } from "./run-brief.js";
+
+export {
+  buildRunMaintenancePlane,
+  readRunMaintenancePlaneView,
+  refreshRunMaintenancePlane,
+  refreshRunOperatorSurface,
+  type RefreshRunMaintenancePlaneOptions,
+  type RunMaintenancePlaneView
+} from "./maintenance-plane.js";

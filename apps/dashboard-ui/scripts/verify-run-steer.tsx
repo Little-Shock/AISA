@@ -44,6 +44,8 @@ const fixtureRunDetail: RunDetail = {
   latest_handoff_bundle_ref: null,
   run_brief: null,
   run_brief_ref: null,
+  maintenance_plane: null,
+  maintenance_plane_ref: null,
   working_context: null,
   working_context_ref: null,
   working_context_degraded: {

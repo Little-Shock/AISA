@@ -31,6 +31,7 @@ import type {
   EvalResult,
   EvalSpec,
   Goal,
+  RunMaintenancePlane,
   RunGovernanceState,
   RunAutomationControl,
   RunBrief,
@@ -67,6 +68,7 @@ import {
   RunAutomationControlSchema,
   RunBriefSchema,
   RunGovernanceStateSchema,
+  RunMaintenancePlaneSchema,
   RunWorkingContextSchema,
   RuntimeHealthSnapshotSchema,
   RunJournalEntrySchema,
@@ -117,6 +119,7 @@ export interface RunPaths {
   runBriefFile: string;
   workingContextFile: string;
   governanceFile: string;
+  maintenancePlaneFile: string;
   reportFile: string;
   journalFile: string;
   runtimeHealthSnapshotFile: string;
@@ -171,6 +174,7 @@ export function resolveRunPaths(paths: WorkspacePaths, runId: string): RunPaths 
     runBriefFile: join(runDir, "run-brief.json"),
     workingContextFile: join(runDir, "working-context.json"),
     governanceFile: join(runDir, "governance.json"),
+    maintenancePlaneFile: join(runDir, "artifacts", "maintenance-plane.json"),
     reportFile: join(runDir, "report.md"),
     journalFile: join(runDir, "journal.ndjson"),
     runtimeHealthSnapshotFile: join(
@@ -573,6 +577,28 @@ export async function getRunGovernanceState(
       resolveRunPaths(paths, runId).governanceFile
     );
     return RunGovernanceStateSchema.parse(governanceState);
+  } catch {
+    return null;
+  }
+}
+
+export async function saveRunMaintenancePlane(
+  paths: WorkspacePaths,
+  maintenancePlane: RunMaintenancePlane
+): Promise<void> {
+  const runPaths = await ensureRunDirectories(paths, maintenancePlane.run_id);
+  await writeJsonFile(runPaths.maintenancePlaneFile, maintenancePlane);
+}
+
+export async function getRunMaintenancePlane(
+  paths: WorkspacePaths,
+  runId: string
+): Promise<RunMaintenancePlane | null> {
+  try {
+    const maintenancePlane = await readJsonFile<RunMaintenancePlane>(
+      resolveRunPaths(paths, runId).maintenancePlaneFile
+    );
+    return RunMaintenancePlaneSchema.parse(maintenancePlane);
   } catch {
     return null;
   }

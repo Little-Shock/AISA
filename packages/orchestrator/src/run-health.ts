@@ -2,29 +2,10 @@ import type {
   Attempt,
   AttemptHeartbeat,
   AttemptRuntimeState,
-  CurrentDecision
+  CurrentDecision,
+  RunHealthAssessment,
+  RunHealthStatus
 } from "@autoresearch/domain";
-
-export type RunHealthStatus =
-  | "healthy"
-  | "stale_running_attempt"
-  | "waiting_steer"
-  | "draft"
-  | "settled"
-  | "unknown";
-
-export type RunHealthAssessment = {
-  status: RunHealthStatus;
-  summary: string;
-  likely_zombie: boolean;
-  stale_after_ms: number;
-  latest_attempt_id: string | null;
-  latest_attempt_status: Attempt["status"] | null;
-  latest_activity_at: string | null;
-  latest_activity_age_ms: number | null;
-  heartbeat_at: string | null;
-  heartbeat_age_ms: number | null;
-};
 
 function ageMs(ts: string | null, nowMs: number): number | null {
   if (!ts) {
