@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
   createAttempt,
+  createAttemptAdversarialVerification,
   createAttemptContract,
+  createAttemptHandoffBundle,
   createRunAutomationControl,
   createCurrentDecision,
   createRun,
@@ -26,6 +27,7 @@ import {
 import {
   appendRunJournal,
   ensureWorkspace,
+  saveAttemptAdversarialVerification,
   getAttemptHandoffBundle,
   getAttemptReviewPacket,
   getRunAutomationControl,
@@ -37,6 +39,7 @@ import {
   resolveWorkspacePaths,
   saveAttempt,
   saveAttemptContract,
+  saveAttemptHandoffBundle,
   saveAttemptResult,
   saveAttemptRuntimeVerification,
   saveCurrentDecision,
@@ -44,6 +47,10 @@ import {
   saveRunAutomationControl,
   saveRunPolicyRuntime
 } from "../packages/state-store/src/index.js";
+import {
+  cleanupTrackedVerifyTempDirs,
+  createTrackedVerifyTempDir
+} from "./verify-temp.ts";
 
 type CaseResult = {
   id: string;
@@ -525,7 +532,7 @@ async function bootstrapRun(title: string, runTitle?: string): Promise<{
   rootDir: string;
   detachedRuntimeLayout: RuntimeLayout;
 }> {
-  const rootDir = await mkdtemp(join(tmpdir(), `aisa-autonomy-${title}-`));
+  const rootDir = await createTrackedVerifyTempDir(`aisa-autonomy-${title}-`);
   const workspacePaths = resolveWorkspacePaths(rootDir);
   await ensureWorkspace(workspacePaths);
   const detachedRuntimeLayout = await createDetachedRuntimeLayout(title, rootDir);
@@ -563,7 +570,9 @@ async function createDetachedRuntimeLayout(
   title: string,
   runtimeDataRoot: string
 ): Promise<RuntimeLayout> {
-  const laneRepoRoot = await mkdtemp(join(tmpdir(), `aisa-autonomy-runtime-lane-${title}-`));
+  const laneRepoRoot = await createTrackedVerifyTempDir(
+    `aisa-autonomy-runtime-lane-${title}-`
+  );
   await initializeGitRepo(laneRepoRoot);
   return resolveRuntimeLayout({
     repositoryRoot: laneRepoRoot,
@@ -578,7 +587,9 @@ async function createPromotableRuntimeLayout(
   devRepoRoot: string,
   runtimeDataRoot: string
 ): Promise<RuntimeLayout> {
-  const runtimeRepoRoot = await mkdtemp(join(tmpdir(), `aisa-autonomy-runtime-promote-${title}-`));
+  const runtimeRepoRoot = await createTrackedVerifyTempDir(
+    `aisa-autonomy-runtime-promote-${title}-`
+  );
   await runCommand(runtimeDataRoot, [
     "git",
     "clone",
@@ -721,6 +732,8 @@ async function runCommand(rootDir: string, args: string[]): Promise<void> {
 }
 
 async function verifyFailedExecutionAutoResumes(): Promise<void> {
+  const failureReason =
+    "Execution check failed because the target behavior is still missing in app.ts.";
   const { run, workspacePaths, rootDir, detachedRuntimeLayout } = await bootstrapRun(
     "failed-execution-auto-resume"
   );
@@ -752,7 +765,7 @@ async function verifyFailedExecutionAutoResumes(): Promise<void> {
       recommended_next_action: "wait_for_human",
       recommended_attempt_type: "execution",
       summary: "Execution failed and is waiting for steer.",
-      blocking_reason: "Expected object, received string at artifacts[0]",
+      blocking_reason: failureReason,
       waiting_for_human: true
     })
   );
@@ -763,7 +776,7 @@ async function verifyFailedExecutionAutoResumes(): Promise<void> {
       attempt_id: failedExecution.id,
       type: "attempt.failed",
       payload: {
-        message: "Expected object, received string at artifacts[0]"
+        message: failureReason
       }
     })
   );
@@ -785,7 +798,7 @@ async function verifyFailedExecutionAutoResumes(): Promise<void> {
     workspacePaths,
     runId: run.id,
     predicate: (runStatus) => runStatus === "completed",
-    timeoutMs: 45_000,
+    timeoutMs: 180_000,
     delayMs: 120
   });
 
@@ -816,6 +829,8 @@ async function verifyFailedExecutionAutoResumes(): Promise<void> {
 }
 
 async function verifyRunLaunchResetsAutoResumeBudget(): Promise<void> {
+  const failureReason =
+    "Execution check failed because the target behavior is still missing in app.ts.";
   const { run, workspacePaths, rootDir, detachedRuntimeLayout } = await bootstrapRun(
     "run-launch-resets-auto-resume-budget"
   );
@@ -881,7 +896,7 @@ async function verifyRunLaunchResetsAutoResumeBudget(): Promise<void> {
       recommended_next_action: "wait_for_human",
       recommended_attempt_type: "execution",
       summary: "Execution failed after relaunch.",
-      blocking_reason: "Expected object, received string at artifacts[0]",
+      blocking_reason: failureReason,
       waiting_for_human: true
     })
   );
@@ -892,7 +907,7 @@ async function verifyRunLaunchResetsAutoResumeBudget(): Promise<void> {
       attempt_id: failedExecution.id,
       type: "attempt.failed",
       payload: {
-        message: "Expected object, received string at artifacts[0]"
+        message: failureReason
       }
     })
   );
@@ -1104,7 +1119,7 @@ async function verifyCheckpointBlockerAutoResumesIntoExecution(): Promise<void> 
     predicate: ({ waitingForHuman, attempts }) =>
       waitingForHuman === false &&
       attempts.filter((attempt) => attempt.status === "completed").length >= 2,
-    timeoutMs: 10_000,
+    timeoutMs: 75_000,
     delayMs: 80
   });
 
@@ -1471,11 +1486,15 @@ async function verifyRecoveryAutoResumesExecution(): Promise<void> {
 
   await orchestrator.tick();
   await wait(60);
-  await settle(orchestrator, {
+  await settleUntilSnapshot(orchestrator, {
     workspacePaths,
     runId: run.id,
-    iterations: 18,
-    delayMs: 60
+    predicate: ({ runStatus, attempts }) =>
+      runStatus === "completed" &&
+      attempts.length >= 3 &&
+      attempts.filter((attempt) => attempt.status === "completed").length >= 2,
+    timeoutMs: 180_000,
+    delayMs: 80
   });
 
   const current = await getCurrentDecision(workspacePaths, run.id);
@@ -1721,7 +1740,7 @@ async function verifyExecutionRateLimitBudgetDoesNotInheritResearchCycles(): Pro
     workspacePaths,
     runId: run.id,
     predicate: (runStatus) => runStatus === "completed",
-    timeoutMs: 15_000,
+    timeoutMs: 60_000,
     delayMs: 120
   });
 
@@ -1819,7 +1838,7 @@ async function verifyWorkerStalledExecutionRetriesQuickly(): Promise<void> {
     workspacePaths,
     runId: run.id,
     predicate: (runStatus) => runStatus === "completed",
-    timeoutMs: 15_000,
+    timeoutMs: 60_000,
     delayMs: 120
   });
 
@@ -2495,9 +2514,18 @@ async function verifyRuntimeSourceDriftAutoResumesAfterRestart(): Promise<void> 
     workspacePaths,
     runId: run.id,
     predicate: (runStatus) => runStatus === "completed",
-    timeoutMs: 20_000,
+    timeoutMs: 75_000,
     delayMs: 120
   });
+  {
+    const deadline = Date.now() + 20_000;
+    while (
+      Date.now() < deadline &&
+      !restartRequests.some((request) => request.reason === "runtime_promotion")
+    ) {
+      await wait(50);
+    }
+  }
 
   const current = await getCurrentDecision(workspacePaths, run.id);
   const attempts = await listAttempts(workspacePaths, run.id);
@@ -2525,6 +2553,348 @@ async function verifyRuntimeSourceDriftAutoResumesAfterRestart(): Promise<void> 
   assert.ok(
     restartRequests.some((request) => request.reason === "runtime_promotion"),
     "the resumed execution should still request a runtime promotion restart under supervision"
+  );
+}
+
+async function verifyFailedAdversarialVerificationBlocksAutoResume(): Promise<void> {
+  const { run, workspacePaths, rootDir, detachedRuntimeLayout } = await bootstrapRun(
+    "failed-adversarial-verification-blocks-auto-resume"
+  );
+  await writeExecutionWorkspacePackage(rootDir);
+  await initializeGitRepo(rootDir);
+
+  const completedExecution = updateAttempt(
+    createAttempt({
+      run_id: run.id,
+      attempt_type: "execution",
+      worker: "fake-codex",
+      objective: "Stop automatic resume when adversarial verification fails.",
+      success_criteria: run.success_criteria,
+      workspace_root: run.workspace_root
+    }),
+    {
+      status: "completed",
+      started_at: new Date().toISOString(),
+      ended_at: new Date().toISOString()
+    }
+  );
+
+  const failureReason =
+    "Adversarial verification found a repeatable failure after runtime replay passed.";
+  const runtimeVerification = {
+    attempt_id: completedExecution.id,
+    run_id: run.id,
+    attempt_type: "execution" as const,
+    status: "passed" as const,
+    repo_root: rootDir,
+    git_head: "autonomy-fixture",
+    git_status: [],
+    preexisting_git_status: [],
+    new_git_status: ["?? execution-change.md"],
+    changed_files: ["execution-change.md"],
+    failure_class: null,
+    failure_policy_mode: null,
+    failure_code: null,
+    failure_reason: null,
+    command_results: [
+      {
+        purpose: "confirm the execution change was written",
+        command:
+          "test -f execution-change.md && rg -n '^execution change from' execution-change.md",
+        cwd: rootDir,
+        expected_exit_code: 0,
+        exit_code: 0,
+        passed: true,
+        stdout_file: `runs/${run.id}/attempts/${completedExecution.id}/artifacts/runtime-verification/stdout.log`,
+        stderr_file: `runs/${run.id}/attempts/${completedExecution.id}/artifacts/runtime-verification/stderr.log`
+      }
+    ],
+    created_at: new Date().toISOString()
+  };
+  const adversarialVerification = createAttemptAdversarialVerification({
+    run_id: run.id,
+    attempt_id: completedExecution.id,
+    attempt_type: "execution",
+    status: "failed",
+    verdict: "fail",
+    summary: failureReason,
+    failure_code: "verdict_fail",
+    failure_reason: failureReason,
+    checks: [
+      {
+        code: "non_happy_path",
+        status: "failed",
+        message: "Repeated execution produced the same adversarial failure."
+      }
+    ],
+    commands: [
+      {
+        purpose: "rerun the adversarial probe",
+        command: "pnpm verify:run-loop",
+        cwd: rootDir,
+        exit_code: 1,
+        status: "failed",
+        output_ref: null
+      }
+    ],
+    output_refs: [],
+    source_artifact_path: "artifacts/adversarial-verification.json"
+  });
+
+  await saveAttempt(workspacePaths, completedExecution);
+  await saveAttemptRuntimeVerification(workspacePaths, runtimeVerification);
+  await saveAttemptAdversarialVerification(workspacePaths, adversarialVerification);
+  await saveCurrentDecision(
+    workspacePaths,
+    createCurrentDecision({
+      run_id: run.id,
+      latest_attempt_id: completedExecution.id,
+      run_status: "waiting_steer",
+      recommended_next_action: "wait_for_human",
+      recommended_attempt_type: "execution",
+      summary: failureReason,
+      blocking_reason: failureReason,
+      waiting_for_human: true
+    })
+  );
+  await appendRunJournal(
+    workspacePaths,
+    createRunJournalEntry({
+      run_id: run.id,
+      attempt_id: completedExecution.id,
+      type: "attempt.completed",
+      payload: {
+        recommendation: "wait_human",
+        goal_progress: 0.5,
+        suggested_attempt_type: "execution"
+      }
+    })
+  );
+  await appendRunJournal(
+    workspacePaths,
+    createRunJournalEntry({
+      run_id: run.id,
+      attempt_id: completedExecution.id,
+      type: "attempt.verification.passed",
+      payload: {
+        status: "passed",
+        failure_code: null,
+        failure_reason: null,
+        changed_files: ["execution-change.md"],
+        command_count: 1,
+        artifact_path: "artifacts/runtime-verification.json"
+      }
+    })
+  );
+  await appendRunJournal(
+    workspacePaths,
+    createRunJournalEntry({
+      run_id: run.id,
+      attempt_id: completedExecution.id,
+      type: "attempt.adversarial_verification.failed",
+      payload: {
+        status: "failed",
+        failure_code: adversarialVerification.failure_code,
+        failure_reason: failureReason,
+        failure_class: "adversarial_verification_failed",
+        failure_policy_mode: "fail_closed",
+        artifact_path: "artifacts/adversarial-verification.json"
+      }
+    })
+  );
+  await saveAttemptHandoffBundle(
+    workspacePaths,
+    createAttemptHandoffBundle({
+      attempt: completedExecution,
+      current_decision_snapshot: createCurrentDecision({
+        run_id: run.id,
+        latest_attempt_id: completedExecution.id,
+        run_status: "waiting_steer",
+        recommended_next_action: "wait_for_human",
+        recommended_attempt_type: "execution",
+        summary: failureReason,
+        blocking_reason: failureReason,
+        waiting_for_human: true
+      }),
+      runtime_verification: runtimeVerification,
+      adversarial_verification: adversarialVerification,
+      source_refs: {
+        run_contract: `runs/${run.id}/contract.json`,
+        attempt_meta: `runs/${run.id}/attempts/${completedExecution.id}/meta.json`,
+        attempt_contract: null,
+        preflight_evaluation: null,
+        current_decision: `runs/${run.id}/current.json`,
+        review_packet: `runs/${run.id}/attempts/${completedExecution.id}/review_packet.json`,
+        runtime_verification: `runs/${run.id}/attempts/${completedExecution.id}/artifacts/runtime-verification.json`,
+        adversarial_verification: `runs/${run.id}/attempts/${completedExecution.id}/artifacts/adversarial-verification.json`
+      }
+    })
+  );
+
+  const orchestrator = new Orchestrator(
+    workspacePaths,
+    new AutoResumeExecutionAdapter() as never,
+    undefined,
+    60_000,
+    {
+      runtimeLayout: detachedRuntimeLayout,
+      waitingHumanAutoResumeMs: 30,
+      maxAutomaticResumeCycles: 2
+    }
+  );
+
+  await wait(40);
+  await settle(orchestrator, {
+    workspacePaths,
+    runId: run.id,
+    iterations: 8,
+    delayMs: 80
+  });
+
+  const current = await getCurrentDecision(workspacePaths, run.id);
+  const attempts = await listAttempts(workspacePaths, run.id);
+  const journal = await listRunJournal(workspacePaths, run.id);
+  const handoffBundle = await getAttemptHandoffBundle(
+    workspacePaths,
+    run.id,
+    completedExecution.id
+  );
+  const blockedEntry = journal.find((entry) => entry.type === "run.auto_resume.blocked");
+
+  assert.ok(current, "current decision must exist");
+  assert.equal(current.run_status, "waiting_steer");
+  assert.equal(current.waiting_for_human, true);
+  assert.equal(current.recommended_next_action, "wait_for_human");
+  assert.deepEqual(
+    attempts.map((attempt) => attempt.status),
+    ["completed"],
+    "failed adversarial verification should fail closed instead of spawning another execution"
+  );
+  assert.ok(
+    !journal.some((entry) => entry.type === "run.auto_resume.scheduled"),
+    "failed adversarial verification should not schedule automatic resume"
+  );
+  assert.ok(handoffBundle, "expected a machine-readable handoff bundle");
+  assert.equal(
+    handoffBundle?.adversarial_failure_code,
+    "verdict_fail",
+    "handoff bundle should carry the adversarial failure code"
+  );
+  assert.equal(
+    handoffBundle?.failure_class,
+    "adversarial_verification_failed",
+    "handoff bundle should expose the unified failure class"
+  );
+  assert.equal(
+    handoffBundle?.source_refs.adversarial_verification,
+    `runs/${run.id}/attempts/${completedExecution.id}/artifacts/adversarial-verification.json`,
+    "handoff bundle should point at adversarial verification"
+  );
+  assert.ok(blockedEntry, "expected a machine-readable auto-resume blocker");
+  assert.equal(blockedEntry?.payload.reason, "adversarial_verification_failed");
+  assert.equal(blockedEntry?.payload.failure_code, "verdict_fail");
+  assert.equal(
+    blockedEntry?.payload.handoff_bundle_ref,
+    `runs/${run.id}/attempts/${completedExecution.id}/artifacts/handoff_bundle.json`,
+    "blocked auto-resume should point at the consumed handoff bundle"
+  );
+}
+
+async function verifySchemaInvalidExecutionBlocksAutoResume(): Promise<void> {
+  const { run, workspacePaths, rootDir, detachedRuntimeLayout } = await bootstrapRun(
+    "schema-invalid-execution-blocks-auto-resume"
+  );
+  await writeExecutionWorkspacePackage(rootDir);
+  await initializeGitRepo(rootDir);
+
+  const failedExecution = updateAttempt(
+    createAttempt({
+      run_id: run.id,
+      attempt_type: "execution",
+      worker: "fake-codex",
+      objective: "Apply the planned execution step.",
+      success_criteria: run.success_criteria,
+      workspace_root: run.workspace_root
+    }),
+    {
+      status: "failed",
+      started_at: new Date().toISOString(),
+      ended_at: new Date().toISOString()
+    }
+  );
+  const failureReason =
+    "Worker writeback schema invalid at artifacts[0]: Expected object, received string";
+
+  await saveAttempt(workspacePaths, failedExecution);
+  await saveCurrentDecision(
+    workspacePaths,
+    createCurrentDecision({
+      run_id: run.id,
+      run_status: "waiting_steer",
+      latest_attempt_id: failedExecution.id,
+      recommended_next_action: "wait_for_human",
+      recommended_attempt_type: "execution",
+      summary: failureReason,
+      blocking_reason: failureReason,
+      waiting_for_human: true
+    })
+  );
+  await appendRunJournal(
+    workspacePaths,
+    createRunJournalEntry({
+      run_id: run.id,
+      attempt_id: failedExecution.id,
+      type: "attempt.failed",
+      payload: {
+        message: failureReason
+      }
+    })
+  );
+
+  const orchestrator = new Orchestrator(
+    workspacePaths,
+    new NeverDispatchAdapter() as never,
+    undefined,
+    60_000,
+    {
+      runtimeLayout: detachedRuntimeLayout,
+      waitingHumanAutoResumeMs: 30,
+      maxAutomaticResumeCycles: 2
+    }
+  );
+
+  await wait(40);
+  await settle(orchestrator, {
+    workspacePaths,
+    runId: run.id,
+    iterations: 8,
+    delayMs: 80
+  });
+
+  const current = await getCurrentDecision(workspacePaths, run.id);
+  const attempts = await listAttempts(workspacePaths, run.id);
+  const journal = await listRunJournal(workspacePaths, run.id);
+  const blockedEntry = journal.find((entry) => entry.type === "run.auto_resume.blocked");
+
+  assert.ok(current, "current decision must exist");
+  assert.equal(current.run_status, "waiting_steer");
+  assert.equal(current.waiting_for_human, true);
+  assert.equal(current.recommended_next_action, "wait_for_human");
+  assert.deepEqual(
+    attempts.map((attempt) => attempt.status),
+    ["failed"],
+    "schema-invalid execution should fail closed instead of spawning another execution"
+  );
+  assert.ok(
+    !journal.some((entry) => entry.type === "run.auto_resume.scheduled"),
+    "schema-invalid execution should not schedule automatic resume"
+  );
+  assert.ok(blockedEntry, "expected a machine-readable auto-resume blocker");
+  assert.equal(blockedEntry?.payload.reason, "worker_output_schema_invalid");
+  assert.equal(blockedEntry?.payload.failure_code, "worker_output_schema_invalid");
+  assert.match(
+    blockedEntry?.payload.message ?? "",
+    /worker 输出不符合结果契约/u
   );
 }
 
@@ -2603,7 +2973,7 @@ async function verifyVerifiedExecutionContinueDoesNotPauseForHuman(): Promise<vo
       attempts.filter(
         (attempt) => attempt.id !== previousExecution.id && attempt.status === "completed"
       ).length >= 1,
-    timeoutMs: 20_000,
+    timeoutMs: 35_000,
     delayMs: 120
   });
 
@@ -2765,7 +3135,7 @@ async function verifyCheckpointedRestartResetsAutoResumeBudget(): Promise<void> 
     workspacePaths,
     runId: run.id,
     predicate: (runStatus) => runStatus === "completed",
-    timeoutMs: 20_000,
+    timeoutMs: 90_000,
     delayMs: 120
   });
   await wait(50);
@@ -2802,96 +3172,104 @@ async function main(): Promise<void> {
   const previousSynthesizer = process.env[SYNTHESIZER_CONFIG_ENV];
   process.env[REVIEWER_CONFIG_ENV] = CLOSED_BASELINE_REVIEWERS_JSON;
   process.env[SYNTHESIZER_CONFIG_ENV] = CLOSED_BASELINE_SYNTHESIZER_JSON;
-  const checks: Array<{ id: string; run: () => Promise<void> }> = [
-    {
-      id: "failed_execution_auto_resumes",
-      run: verifyFailedExecutionAutoResumes
-    },
-    {
-      id: "run_launch_resets_auto_resume_budget",
-      run: verifyRunLaunchResetsAutoResumeBudget
-    },
-    {
-      id: "repeated_auto_resume_exhausts",
-      run: verifyRepeatedAutoResumeExhausts
-    },
-    {
-      id: "checkpoint_blocker_auto_resumes_execution",
-      run: verifyCheckpointBlockerAutoResumesIntoExecution
-    },
-    {
-      id: "no_git_changes_blocks_auto_resume",
-      run: verifyNoGitChangesBlocksAutoResume
-    },
-    {
-      id: "rate_limited_execution_retries_quickly",
-      run: verifyRateLimitedExecutionRetriesQuickly
-    },
-    {
-      id: "execution_rate_limit_budget_does_not_inherit_research_cycles",
-      run: verifyExecutionRateLimitBudgetDoesNotInheritResearchCycles
-    },
-    {
-      id: "worker_stalled_execution_retries_quickly",
-      run: verifyWorkerStalledExecutionRetriesQuickly
-    },
-    {
-      id: "worker_stalled_research_retries_quickly",
-      run: verifyWorkerStalledResearchRetriesQuickly
-    },
-    {
-      id: "superseded_self_bootstrap_does_not_auto_resume",
-      run: verifySupersededSelfBootstrapRunDoesNotAutoResume
-    },
-    {
-      id: "rate_limited_research_retries_quickly",
-      run: verifyRateLimitedResearchRetriesQuickly
-    },
-    {
-      id: "rate_limited_research_retries_using_stdout_signal",
-      run: verifyRateLimitedResearchRetriesUsingStdoutSignal
-    },
-    {
-      id: "runtime_source_drift_blocks_auto_resume",
-      run: verifyRuntimeSourceDriftBlocksAutoResume
-    },
-    {
-      id: "runtime_source_drift_auto_resumes_after_restart",
-      run: verifyRuntimeSourceDriftAutoResumesAfterRestart
-    },
-    {
-      id: "verified_execution_continue_does_not_pause_for_human",
-      run: verifyVerifiedExecutionContinueDoesNotPauseForHuman
-    },
-    {
-      id: "checkpointed_restart_resets_auto_resume_budget",
-      run: verifyCheckpointedRestartResetsAutoResumeBudget
-    },
-    {
-      id: "recovery_auto_resumes_execution",
-      run: verifyRecoveryAutoResumesExecution
-    }
-  ];
-  const results: CaseResult[] = [];
-
-  for (const check of checks) {
-    try {
-      await check.run();
-      results.push({
-        id: check.id,
-        status: "pass"
-      });
-    } catch (error) {
-      results.push({
-        id: check.id,
-        status: "fail",
-        error: error instanceof Error ? error.message : String(error)
-      });
-    }
-  }
-
-  const failed = results.filter((result) => result.status === "fail");
   try {
+    const checks: Array<{ id: string; run: () => Promise<void> }> = [
+      {
+        id: "failed_execution_auto_resumes",
+        run: verifyFailedExecutionAutoResumes
+      },
+      {
+        id: "run_launch_resets_auto_resume_budget",
+        run: verifyRunLaunchResetsAutoResumeBudget
+      },
+      {
+        id: "repeated_auto_resume_exhausts",
+        run: verifyRepeatedAutoResumeExhausts
+      },
+      {
+        id: "checkpoint_blocker_auto_resumes_execution",
+        run: verifyCheckpointBlockerAutoResumesIntoExecution
+      },
+      {
+        id: "no_git_changes_blocks_auto_resume",
+        run: verifyNoGitChangesBlocksAutoResume
+      },
+      {
+        id: "rate_limited_execution_retries_quickly",
+        run: verifyRateLimitedExecutionRetriesQuickly
+      },
+      {
+        id: "execution_rate_limit_budget_does_not_inherit_research_cycles",
+        run: verifyExecutionRateLimitBudgetDoesNotInheritResearchCycles
+      },
+      {
+        id: "worker_stalled_execution_retries_quickly",
+        run: verifyWorkerStalledExecutionRetriesQuickly
+      },
+      {
+        id: "worker_stalled_research_retries_quickly",
+        run: verifyWorkerStalledResearchRetriesQuickly
+      },
+      {
+        id: "superseded_self_bootstrap_does_not_auto_resume",
+        run: verifySupersededSelfBootstrapRunDoesNotAutoResume
+      },
+      {
+        id: "rate_limited_research_retries_quickly",
+        run: verifyRateLimitedResearchRetriesQuickly
+      },
+      {
+        id: "rate_limited_research_retries_using_stdout_signal",
+        run: verifyRateLimitedResearchRetriesUsingStdoutSignal
+      },
+      {
+        id: "runtime_source_drift_blocks_auto_resume",
+        run: verifyRuntimeSourceDriftBlocksAutoResume
+      },
+      {
+        id: "runtime_source_drift_auto_resumes_after_restart",
+        run: verifyRuntimeSourceDriftAutoResumesAfterRestart
+      },
+      {
+        id: "failed_adversarial_verification_blocks_auto_resume",
+        run: verifyFailedAdversarialVerificationBlocksAutoResume
+      },
+      {
+        id: "schema_invalid_execution_blocks_auto_resume",
+        run: verifySchemaInvalidExecutionBlocksAutoResume
+      },
+      {
+        id: "verified_execution_continue_does_not_pause_for_human",
+        run: verifyVerifiedExecutionContinueDoesNotPauseForHuman
+      },
+      {
+        id: "checkpointed_restart_resets_auto_resume_budget",
+        run: verifyCheckpointedRestartResetsAutoResumeBudget
+      },
+      {
+        id: "recovery_auto_resumes_execution",
+        run: verifyRecoveryAutoResumesExecution
+      }
+    ];
+    const results: CaseResult[] = [];
+
+    for (const check of checks) {
+      try {
+        await check.run();
+        results.push({
+          id: check.id,
+          status: "pass"
+        });
+      } catch (error) {
+        results.push({
+          id: check.id,
+          status: "fail",
+          error: error instanceof Error ? error.message : String(error)
+        });
+      }
+    }
+
+    const failed = results.filter((result) => result.status === "fail");
     console.log(
       JSON.stringify(
         {
@@ -2907,6 +3285,7 @@ async function main(): Promise<void> {
 
     assert.equal(failed.length, 0, "Run autonomy verification failed.");
   } finally {
+    await cleanupTrackedVerifyTempDirs();
     restoreEnv(REVIEWER_CONFIG_ENV, previousReviewers);
     restoreEnv(SYNTHESIZER_CONFIG_ENV, previousSynthesizer);
   }

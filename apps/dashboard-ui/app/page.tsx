@@ -338,6 +338,11 @@ export default function Page() {
               policy_runtime_ref: nextDetail.policy_runtime_ref,
               latest_preflight_evaluation: nextDetail.latest_preflight_evaluation,
               latest_preflight_evaluation_ref: nextDetail.latest_preflight_evaluation_ref,
+              latest_runtime_verification: nextDetail.latest_runtime_verification,
+              latest_runtime_verification_ref: nextDetail.latest_runtime_verification_ref,
+              latest_adversarial_verification: nextDetail.latest_adversarial_verification,
+              latest_adversarial_verification_ref:
+                nextDetail.latest_adversarial_verification_ref,
               latest_handoff_bundle: nextDetail.latest_handoff_bundle,
               latest_handoff_bundle_ref: nextDetail.latest_handoff_bundle_ref,
               run_brief: nextDetail.run_brief,

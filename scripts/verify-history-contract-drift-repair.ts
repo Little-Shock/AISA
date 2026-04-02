@@ -1,7 +1,5 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdtemp } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -22,6 +20,10 @@ import {
   saveAttemptReviewPacket,
   saveRun
 } from "../packages/state-store/src/index.ts";
+import {
+  cleanupTrackedVerifyTempDirs,
+  createTrackedVerifyTempDir
+} from "./verify-temp.ts";
 
 type ScriptResult = {
   exitCode: number | null;
@@ -194,9 +196,12 @@ async function seedDriftedAttempt(rootDir: string): Promise<{
 }
 
 async function main(): Promise<void> {
-  const sourceRoot = resolveSourceRoot();
-  const rootDir = await mkdtemp(join(tmpdir(), "aisa-history-contract-drift-"));
-  const fixture = await seedDriftedAttempt(rootDir);
+  try {
+    const sourceRoot = resolveSourceRoot();
+    const rootDir = await createTrackedVerifyTempDir(
+      "aisa-history-contract-drift-"
+    );
+    const fixture = await seedDriftedAttempt(rootDir);
 
   const verifyBefore = await runTypeScriptScript({
     cwd: rootDir,
@@ -273,18 +278,21 @@ async function main(): Promise<void> {
     ["new success criteria"]
   );
 
-  console.log(
-    JSON.stringify(
-      {
-        run_id: fixture.runId,
-        attempt_id: fixture.attemptId,
-        before_status: beforeReport.status,
-        after_status: afterReport.status
-      },
-      null,
-      2
-    )
-  );
+    console.log(
+      JSON.stringify(
+        {
+          run_id: fixture.runId,
+          attempt_id: fixture.attemptId,
+          before_status: beforeReport.status,
+          after_status: afterReport.status
+        },
+        null,
+        2
+      )
+    );
+  } finally {
+    await cleanupTrackedVerifyTempDirs();
+  }
 }
 
 main().catch((error) => {

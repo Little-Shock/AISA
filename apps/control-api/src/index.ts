@@ -360,6 +360,10 @@ export async function buildServer(
         latestAttempt,
         latest_preflight_evaluation: null,
         latest_preflight_evaluation_ref: null,
+        latest_runtime_verification: null,
+        latest_runtime_verification_ref: null,
+        latest_adversarial_verification: null,
+        latest_adversarial_verification_ref: null,
         latest_handoff_bundle: null,
         latest_handoff_bundle_ref: null
       };
@@ -374,12 +378,23 @@ export async function buildServer(
     ];
     let latestPreflightEvaluation = null;
     let latestPreflightAttempt = null;
+    let latestRuntimeVerification = null;
+    let latestRuntimeAttempt = null;
+    let latestAdversarialVerification = null;
+    let latestAdversarialAttempt = null;
     let latestHandoffBundle = null;
     let latestHandoffAttempt = null;
 
     for (const candidate of orderedCandidates) {
-      const [candidatePreflight, candidateHandoff] = await Promise.all([
+      const [
+        candidatePreflight,
+        candidateRuntimeVerification,
+        candidateAdversarialVerification,
+        candidateHandoff
+      ] = await Promise.all([
         getAttemptPreflightEvaluation(workspacePaths, input.runId, candidate.id),
+        getAttemptRuntimeVerification(workspacePaths, input.runId, candidate.id),
+        getAttemptAdversarialVerification(workspacePaths, input.runId, candidate.id),
         getAttemptHandoffBundle(workspacePaths, input.runId, candidate.id)
       ]);
 
@@ -388,12 +403,27 @@ export async function buildServer(
         latestPreflightAttempt = candidate;
       }
 
+      if (!latestRuntimeVerification && candidateRuntimeVerification) {
+        latestRuntimeVerification = candidateRuntimeVerification;
+        latestRuntimeAttempt = candidate;
+      }
+
+      if (!latestAdversarialVerification && candidateAdversarialVerification) {
+        latestAdversarialVerification = candidateAdversarialVerification;
+        latestAdversarialAttempt = candidate;
+      }
+
       if (!latestHandoffBundle && candidateHandoff) {
         latestHandoffBundle = candidateHandoff;
         latestHandoffAttempt = candidate;
       }
 
-      if (latestPreflightEvaluation && latestHandoffBundle) {
+      if (
+        latestPreflightEvaluation &&
+        latestRuntimeVerification &&
+        latestAdversarialVerification &&
+        latestHandoffBundle
+      ) {
         break;
       }
     }
@@ -409,6 +439,28 @@ export async function buildServer(
               input.runId,
               latestPreflightAttempt!.id
             ).preflightEvaluationFile
+          )
+        : null,
+      latest_runtime_verification: latestRuntimeVerification,
+      latest_runtime_verification_ref: latestRuntimeVerification
+        ? relative(
+            workspacePaths.rootDir,
+            resolveAttemptPaths(
+              workspacePaths,
+              input.runId,
+              latestRuntimeAttempt!.id
+            ).runtimeVerificationFile
+          )
+        : null,
+      latest_adversarial_verification: latestAdversarialVerification,
+      latest_adversarial_verification_ref: latestAdversarialVerification
+        ? relative(
+            workspacePaths.rootDir,
+            resolveAttemptPaths(
+              workspacePaths,
+              input.runId,
+              latestAdversarialAttempt!.id
+            ).adversarialVerificationFile
           )
         : null,
       latest_handoff_bundle: latestHandoffBundle,
@@ -490,6 +542,11 @@ export async function buildServer(
         null,
       latest_preflight_evaluation: latestAttemptSurface.latest_preflight_evaluation,
       latest_preflight_evaluation_ref: latestAttemptSurface.latest_preflight_evaluation_ref,
+      latest_runtime_verification: latestAttemptSurface.latest_runtime_verification,
+      latest_runtime_verification_ref: latestAttemptSurface.latest_runtime_verification_ref,
+      latest_adversarial_verification: latestAttemptSurface.latest_adversarial_verification,
+      latest_adversarial_verification_ref:
+        latestAttemptSurface.latest_adversarial_verification_ref,
       latest_handoff_bundle: latestAttemptSurface.latest_handoff_bundle,
       latest_handoff_bundle_ref: latestAttemptSurface.latest_handoff_bundle_ref,
       run_brief: runBriefView.run_brief,
@@ -570,6 +627,11 @@ export async function buildServer(
         null,
       latest_preflight_evaluation: latestAttemptSurface.latest_preflight_evaluation,
       latest_preflight_evaluation_ref: latestAttemptSurface.latest_preflight_evaluation_ref,
+      latest_runtime_verification: latestAttemptSurface.latest_runtime_verification,
+      latest_runtime_verification_ref: latestAttemptSurface.latest_runtime_verification_ref,
+      latest_adversarial_verification: latestAttemptSurface.latest_adversarial_verification,
+      latest_adversarial_verification_ref:
+        latestAttemptSurface.latest_adversarial_verification_ref,
       latest_handoff_bundle: latestAttemptSurface.latest_handoff_bundle,
       latest_handoff_bundle_ref: latestAttemptSurface.latest_handoff_bundle_ref,
       run_brief: runBriefView.run_brief,

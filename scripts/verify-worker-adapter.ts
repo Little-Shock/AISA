@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { chmod, mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { chmod, readFile, readdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
   createAttempt,
@@ -20,6 +19,10 @@ import {
   loadCodexCliConfig,
   prepareResearchShellGuard
 } from "../packages/worker-adapters/src/index.ts";
+import {
+  cleanupTrackedVerifyTempDirs,
+  createTrackedVerifyTempDir
+} from "./verify-temp.ts";
 
 async function createFakeCodexScript(input: {
   rootDir: string;
@@ -199,9 +202,10 @@ async function runZshProbe(input: {
 }
 
 async function main(): Promise<void> {
-  const rootDir = await mkdtemp(join(tmpdir(), "aisa-worker-adapter-"));
-  const workspacePaths = resolveWorkspacePaths(rootDir);
-  await ensureWorkspace(workspacePaths);
+  try {
+    const rootDir = await createTrackedVerifyTempDir("aisa-worker-adapter-");
+    const workspacePaths = resolveWorkspacePaths(rootDir);
+    await ensureWorkspace(workspacePaths);
 
   const fakeCodex = await createFakeCodexScript({
     rootDir,
@@ -763,23 +767,26 @@ async function main(): Promise<void> {
     /If you only want to cite files or commands as evidence, put them in findings\[\]\.evidence, recommended_next_steps, or next_attempt_contract\.expected_artifacts instead of artifacts\[\]\./
   );
 
-  console.log(
-    JSON.stringify(
-      {
-        run_id: run.id,
-        attempt_id: attempt.id,
-        research_shell_reentry: "passed",
-        blocked_command_exit_code: blockedProbe.exitCode,
-        runtime_event_stream: "passed",
-        stalled_worker_guard: "passed",
-        malformed_findings_guard: "passed",
-        malformed_artifacts_guard: "passed",
-        status: "passed"
-      },
-      null,
-      2
-    )
-  );
+    console.log(
+      JSON.stringify(
+        {
+          run_id: run.id,
+          attempt_id: attempt.id,
+          research_shell_reentry: "passed",
+          blocked_command_exit_code: blockedProbe.exitCode,
+          runtime_event_stream: "passed",
+          stalled_worker_guard: "passed",
+          malformed_findings_guard: "passed",
+          malformed_artifacts_guard: "passed",
+          status: "passed"
+        },
+        null,
+        2
+      )
+    );
+  } finally {
+    await cleanupTrackedVerifyTempDirs();
+  }
 }
 
 main().catch((error) => {

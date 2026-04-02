@@ -53,9 +53,12 @@ export function createDefaultRunWorkspaceScopePolicy(
   managedWorkspaceRootOverride?: string
 ): RunWorkspaceScopePolicy {
   const normalizedRuntimeRoot = normalizeExistingScopeRoot(runtimeRoot);
+  const envManagedWorkspaceRoot = process.env.AISA_MANAGED_WORKSPACE_ROOT;
   const managedWorkspaceRoot = managedWorkspaceRootOverride
     ? normalizeExistingScopeRoot(managedWorkspaceRootOverride)
-    : normalizeDerivedManagedWorkspaceRoot(normalizedRuntimeRoot);
+    : envManagedWorkspaceRoot
+      ? normalizeExistingScopeRoot(envManagedWorkspaceRoot)
+      : normalizeDerivedManagedWorkspaceRoot(normalizedRuntimeRoot);
   return {
     allowedRoots: sortScopeRoots([normalizedRuntimeRoot, managedWorkspaceRoot]),
     managedWorkspaceRoot

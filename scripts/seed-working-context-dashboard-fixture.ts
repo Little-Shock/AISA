@@ -3,6 +3,7 @@ import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   createAttempt,
+  createAttemptAdversarialVerification,
   createAttemptContract,
   createAttemptHandoffBundle,
   createAttemptPreflightEvaluation,
@@ -17,10 +18,12 @@ import {
   appendRunJournal,
   ensureWorkspace,
   resolveWorkspacePaths,
+  saveAttemptAdversarialVerification,
   saveAttempt,
   saveAttemptContract,
   saveAttemptHandoffBundle,
   saveAttemptPreflightEvaluation,
+  saveAttemptRuntimeVerification,
   saveCurrentDecision,
   saveRun,
   saveRunAutomationControl,
@@ -40,6 +43,8 @@ export type SeedWorkingContextDashboardFixtureResult = {
   expected_run_brief_summary: string;
   expected_preflight_failure_reason: string;
   expected_handoff_summary: string;
+  expected_latest_runtime_status: "passed";
+  expected_latest_adversarial_status: "passed";
   expected_task_focus: string;
   expected_policy_stage: "approval";
   expected_policy_approval_status: "pending";
@@ -76,6 +81,23 @@ export async function seedWorkingContextDashboardFixture(input: {
     started_at: "2026-04-01T08:00:00.000Z",
     ended_at: "2026-04-01T08:12:00.000Z"
   });
+  const previousExecution = updateAttempt(
+    createAttempt({
+      run_id: run.id,
+      attempt_type: "execution",
+      worker: "codex",
+      objective: "先把 runtime replay 和 adversarial gate 的首屏信号接出来。",
+      success_criteria: ["dashboard 直接暴露最近一次 runtime 和 adversarial gate 结果。"],
+      workspace_root: workspaceRoot
+    }),
+    {
+      status: "completed",
+      created_at: "2026-04-01T06:00:00.000Z",
+      started_at: "2026-04-01T06:00:00.000Z",
+      ended_at: "2026-04-01T06:18:00.000Z",
+      updated_at: "2026-04-01T06:18:00.000Z"
+    }
+  );
   const attemptContract = createAttemptContract({
     attempt_id: attempt.id,
     run_id: run.id,
@@ -116,8 +138,58 @@ export async function seedWorkingContextDashboardFixture(input: {
     "下一轮执行前，先把 adversarial verification 接成第二道硬门。";
 
   await saveRun(workspacePaths, run);
+  await saveAttempt(workspacePaths, previousExecution);
   await saveAttempt(workspacePaths, attempt);
   await saveAttemptContract(workspacePaths, attemptContract);
+  await saveAttemptRuntimeVerification(workspacePaths, {
+    attempt_id: previousExecution.id,
+    run_id: run.id,
+    attempt_type: "execution",
+    status: "passed",
+    repo_root: workspaceRoot,
+    git_head: "fixture-head",
+    git_status: [],
+    preexisting_git_status: [],
+    new_git_status: [" M packages/orchestrator/src/index.ts"],
+    changed_files: ["packages/orchestrator/src/index.ts"],
+    failure_class: null,
+    failure_policy_mode: null,
+    failure_code: null,
+    failure_reason: null,
+    command_results: [
+      {
+        purpose: "render dashboard control surface",
+        command: "pnpm verify:dashboard-control-surface",
+        cwd: workspaceRoot,
+        expected_exit_code: 0,
+        exit_code: 0,
+        passed: true,
+        stdout_file: `runs/${run.id}/attempts/${previousExecution.id}/artifacts/runtime-verification/stdout.log`,
+        stderr_file: `runs/${run.id}/attempts/${previousExecution.id}/artifacts/runtime-verification/stderr.log`
+      }
+    ],
+    created_at: "2026-04-01T06:18:30.000Z"
+  });
+  await saveAttemptAdversarialVerification(
+    workspacePaths,
+    createAttemptAdversarialVerification({
+      run_id: run.id,
+      attempt_id: previousExecution.id,
+      attempt_type: "execution",
+      status: "passed",
+      verdict: "pass",
+      summary: "Adversarial verification passed before the later preflight blocker.",
+      checks: [
+        {
+          code: "non_happy_path",
+          status: "passed",
+          message: "The fixture kept a passing adversarial probe."
+        }
+      ],
+      output_refs: ["artifacts/adversarial/fixture.txt"],
+      source_artifact_path: `runs/${run.id}/attempts/${previousExecution.id}/artifacts/adversarial-verification.json`
+    })
+  );
   await saveCurrentDecision(workspacePaths, initialCurrent);
   await saveRunAutomationControl(
     workspacePaths,
@@ -220,6 +292,8 @@ export async function seedWorkingContextDashboardFixture(input: {
     expected_run_brief_summary: initialCurrent.summary,
     expected_preflight_failure_reason: preflightFailureReason,
     expected_handoff_summary: preflightFailureReason,
+    expected_latest_runtime_status: "passed",
+    expected_latest_adversarial_status: "passed",
     expected_task_focus: attempt.objective,
     expected_policy_stage: "approval",
     expected_policy_approval_status: "pending"

@@ -421,6 +421,15 @@ async function assertPolicyRuntimeReplay(): Promise<PolicyRuntimeReport> {
   return report;
 }
 
+async function assertFailurePolicyReplay(): Promise<void> {
+  const result = await runTsxScript("scripts/verify-failure-policy.ts");
+  assert.equal(
+    result.exitCode,
+    0,
+    formatScriptFailure("scripts/verify-failure-policy.ts", result)
+  );
+}
+
 async function assertRuntimeLaneReplay(): Promise<void> {
   const result = await runTsxScript("scripts/verify-runtime-lanes.ts");
   assert.equal(
@@ -493,6 +502,7 @@ async function main(): Promise<void> {
   const runAutonomy = await assertRunAutonomyReplay();
   const governance = await assertGovernanceReplay();
   const policyRuntime = await assertPolicyRuntimeReplay();
+  await assertFailurePolicyReplay();
   const skipSelfBootstrapReplay = process.env[SKIP_SELF_BOOTSTRAP_ENV] === "1";
 
   if (!skipSelfBootstrapReplay) {

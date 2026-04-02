@@ -4973,6 +4973,15 @@ export class Orchestrator {
     });
     const failureMode = this.classifyFailureMode(failureMessage);
 
+    if (failureMode === "worker_output_schema_invalid" && failureMessage) {
+      return {
+        reason: "worker_output_schema_invalid",
+        message: `上一轮${input.latestAttempt.attempt_type === "execution" ? "execution" : "research"}的 worker 输出不符合结果契约，自动续跑已暂停。原始阻塞：${failureMessage}`,
+        failureCode: "worker_output_schema_invalid",
+        handoffBundleRef: input.latestHandoffBundleRef
+      };
+    }
+
     if (failureMode !== "provider_auth_failed" || !failureMessage) {
       return null;
     }
@@ -5573,7 +5582,12 @@ export class Orchestrator {
 
   private classifyFailureMode(
     message: string | null | undefined
-  ): "provider_rate_limited" | "provider_auth_failed" | "worker_stalled" | null {
+  ):
+    | "provider_rate_limited"
+    | "provider_auth_failed"
+    | "worker_stalled"
+    | "worker_output_schema_invalid"
+    | null {
     if (!message) {
       return null;
     }
@@ -5622,6 +5636,14 @@ export class Orchestrator {
     ];
     if (workerStallPatterns.some((pattern) => pattern.test(message))) {
       return "worker_stalled";
+    }
+
+    const workerOutputSchemaInvalidPatterns = [
+      /Worker writeback schema invalid/i,
+      /Expected [a-z_]+, received [a-z_]+ at (artifacts|findings|questions|recommended_next_steps|verification_plan)/i
+    ];
+    if (workerOutputSchemaInvalidPatterns.some((pattern) => pattern.test(message))) {
+      return "worker_output_schema_invalid";
     }
 
     return null;

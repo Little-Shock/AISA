@@ -66,9 +66,63 @@ import {
 
 const REVIEWER_CONFIG_ENV = "AISA_REVIEWERS_JSON";
 const SYNTHESIZER_CONFIG_ENV = "AISA_REVIEW_SYNTHESIZER_JSON";
+const VERIFY_RUN_LOOP_FILTER_ENV = "AISA_VERIFY_RUN_LOOP_FILTER";
+const VERIFY_TEMP_ROOT_ENV = "AISA_VERIFY_TEMP_ROOT";
+const VERIFY_KEEP_TEMP_ENV = "AISA_VERIFY_KEEP_TMP";
 const CLI_REVIEWER_FAILURE_TIMEOUT_MS = 1_000;
 const CLI_REVIEWER_RESPONSE_TIMEOUT_MS = 5_000;
 const CLI_SYNTHESIZER_FAILURE_TIMEOUT_MS = 5_000;
+const trackedVerifyTempDirs: string[] = [];
+let verifyManagedWorkspaceRoot: string | null = null;
+
+function shouldKeepVerifyTempDirs(): boolean {
+  return process.env[VERIFY_KEEP_TEMP_ENV] === "1";
+}
+
+function getRequestedSmokeCaseFilter(): string | null {
+  const raw = process.env[VERIFY_RUN_LOOP_FILTER_ENV]?.trim();
+  return raw && raw.length > 0 ? raw : null;
+}
+
+async function createVerifyTempDir(prefix: string): Promise<string> {
+  const configuredRoot = process.env[VERIFY_TEMP_ROOT_ENV]?.trim();
+  if (configuredRoot) {
+    await mkdir(configuredRoot, { recursive: true });
+  }
+  const rootDir = await mkdtemp(join(configuredRoot || tmpdir(), prefix));
+  if (!process.env.AISA_MANAGED_WORKSPACE_ROOT) {
+    if (!verifyManagedWorkspaceRoot) {
+      verifyManagedWorkspaceRoot = resolve(
+        rootDir,
+        "..",
+        `.aisa-run-worktrees-${process.pid}`
+      );
+      await mkdir(verifyManagedWorkspaceRoot, { recursive: true });
+      trackedVerifyTempDirs.push(verifyManagedWorkspaceRoot);
+    }
+    process.env.AISA_MANAGED_WORKSPACE_ROOT = verifyManagedWorkspaceRoot;
+  }
+  trackedVerifyTempDirs.push(rootDir);
+  return rootDir;
+}
+
+async function cleanupTrackedVerifyTempDirs(): Promise<void> {
+  if (shouldKeepVerifyTempDirs()) {
+    return;
+  }
+
+  while (trackedVerifyTempDirs.length > 0) {
+    const rootDir = trackedVerifyTempDirs.pop();
+    if (!rootDir) {
+      continue;
+    }
+    await rm(rootDir, {
+      recursive: true,
+      force: true,
+      maxRetries: 3
+    });
+  }
+}
 
 type CliReviewerFailureMode = "invalid_json" | "nonzero_exit" | "timeout";
 type CliSynthesizerFailureMode = "invalid_json" | "nonzero_exit";
@@ -1162,6 +1216,33 @@ async function isRunQuiescent(
   return current.run_status !== "running";
 }
 
+async function waitForAttemptActivityToDrain(input: {
+  workspacePaths: ReturnType<typeof resolveWorkspacePaths>;
+  runId: string;
+  failureMessage: string;
+  timeoutMs?: number;
+}): Promise<void> {
+  const deadline = Date.now() + (input.timeoutMs ?? 10_000);
+
+  while (Date.now() < deadline) {
+    const attempts = await listAttempts(input.workspacePaths, input.runId);
+    const hasActiveAttempt = attempts.some((attempt) =>
+      ["created", "queued", "running"].includes(attempt.status)
+    );
+    const hasActiveHeartbeat = await hasActiveAttemptHeartbeats(
+      input.workspacePaths,
+      input.runId,
+      attempts
+    );
+    if (!hasActiveAttempt && !hasActiveHeartbeat) {
+      return;
+    }
+    await sleep(50);
+  }
+
+  throw new Error(input.failureMessage);
+}
+
 async function hasActiveAttemptHeartbeats(
   workspacePaths: ReturnType<typeof resolveWorkspacePaths>,
   runId: string,
@@ -1240,7 +1321,7 @@ async function bootstrapRun(rootDir: string, title: string): Promise<{
 }
 
 async function assertRuntimeHealthSnapshotContextWiring(): Promise<void> {
-  const rootDir = await mkdtemp(join(tmpdir(), "aisa-runtime-health-context-"));
+  const rootDir = await createVerifyTempDir("aisa-runtime-health-context-");
   const { run, workspacePaths } = await bootstrapRun(
     rootDir,
     "runtime-health-context"
@@ -1325,7 +1406,7 @@ async function assertRuntimeHealthSnapshotContextWiring(): Promise<void> {
 }
 
 async function assertMissingRuntimeHealthSnapshotDoesNotFabricateContext(): Promise<void> {
-  const rootDir = await mkdtemp(join(tmpdir(), "aisa-missing-runtime-health-context-"));
+  const rootDir = await createVerifyTempDir("aisa-missing-runtime-health-context-");
   const { run, workspacePaths } = await bootstrapRun(
     rootDir,
     "missing-runtime-health-context"
@@ -1375,7 +1456,7 @@ async function assertMissingRuntimeHealthSnapshotDoesNotFabricateContext(): Prom
 }
 
 async function assertExecutionHarnessEffortFlowsToDispatchContext(): Promise<void> {
-  const rootDir = await mkdtemp(join(tmpdir(), "aisa-execution-effort-context-"));
+  const rootDir = await createVerifyTempDir("aisa-execution-effort-context-");
   const workspacePaths = resolveWorkspacePaths(rootDir);
   await ensureWorkspace(workspacePaths);
   await initializeGitRepo(rootDir, false);
@@ -1551,7 +1632,7 @@ async function assertExecutionHarnessEffortFlowsToDispatchContext(): Promise<voi
 }
 
 async function assertExecutionEffortNativeConfigReachesCodexCli(): Promise<void> {
-  const rootDir = await mkdtemp(join(tmpdir(), "aisa-execution-effort-native-"));
+  const rootDir = await createVerifyTempDir("aisa-execution-effort-native-");
   const workspacePaths = resolveWorkspacePaths(rootDir);
   await ensureWorkspace(workspacePaths);
 
@@ -1697,7 +1778,7 @@ async function assertExecutionEffortNativeConfigReachesCodexCli(): Promise<void>
 }
 
 async function assertCliJudgeEffortSettingsStayVisibleWhenUnsupported(): Promise<void> {
-  const rootDir = await mkdtemp(join(tmpdir(), "aisa-judge-effort-visibility-"));
+  const rootDir = await createVerifyTempDir("aisa-judge-effort-visibility-");
   const workspacePaths = resolveWorkspacePaths(rootDir);
   await ensureWorkspace(workspacePaths);
 
@@ -1760,7 +1841,7 @@ async function assertCliJudgeEffortSettingsStayVisibleWhenUnsupported(): Promise
 }
 
 async function assertExplicitPnpmVerificationPlanNeedsLocalNodeModules(): Promise<void> {
-  const rootDir = await mkdtemp(join(tmpdir(), "aisa-explicit-pnpm-toolchain-"));
+  const rootDir = await createVerifyTempDir("aisa-explicit-pnpm-toolchain-");
   await seedPackageJsonScriptsWithoutNodeModules(rootDir);
 
   const assessment = await assessExecutionVerificationToolchain({
@@ -1802,7 +1883,7 @@ async function assertExplicitPnpmVerificationPlanNeedsLocalNodeModules(): Promis
 }
 
 async function assertManagedWorkspaceInheritsLocalNodeModules(): Promise<void> {
-  const rootDir = await mkdtemp(join(tmpdir(), "aisa-managed-workspace-node-modules-"));
+  const rootDir = await createVerifyTempDir("aisa-managed-workspace-node-modules-");
   await initializeGitRepo(rootDir, false);
   await seedPackageJsonScriptsWithoutNodeModules(rootDir);
   await mkdir(join(rootDir, "node_modules"), { recursive: true });
@@ -1871,7 +1952,7 @@ async function assertManagedWorkspaceInheritsLocalNodeModules(): Promise<void> {
 }
 
 async function assertMultiReviewerPipelinePersistsOpinionsAndSynthesizesEvaluation(): Promise<void> {
-  const rootDir = await mkdtemp(join(tmpdir(), "aisa-multi-reviewer-pipeline-"));
+  const rootDir = await createVerifyTempDir("aisa-multi-reviewer-pipeline-");
   await initializeGitRepo(rootDir, false);
   const { run, workspacePaths } = await bootstrapRun(rootDir, "multi-reviewer-pipeline");
   const reviewerConfigs = [
@@ -2104,7 +2185,7 @@ async function assertMultiReviewerPipelinePersistsOpinionsAndSynthesizesEvaluati
 }
 
 async function assertCliSynthesizerPersistsArtifactAndFinalizesEvaluation(): Promise<void> {
-  const rootDir = await mkdtemp(join(tmpdir(), "aisa-cli-synthesizer-pipeline-"));
+  const rootDir = await createVerifyTempDir("aisa-cli-synthesizer-pipeline-");
   await initializeGitRepo(rootDir, false);
   const { run, workspacePaths } = await bootstrapRun(rootDir, "cli-synthesizer-pipeline");
   const reviewerConfigs = [
@@ -2340,7 +2421,7 @@ type CliSynthesizerFailureCaseState = {
 async function runCliSynthesizerFailureCase(
   mode: CliSynthesizerFailureMode
 ): Promise<CliSynthesizerFailureCaseState> {
-  const rootDir = await mkdtemp(join(tmpdir(), `aisa-cli-synthesizer-${mode}-`));
+  const rootDir = await createVerifyTempDir(`aisa-cli-synthesizer-${mode}-`);
   await initializeGitRepo(rootDir, false);
   const { run, workspacePaths } = await bootstrapRun(rootDir, `cli-synthesizer-${mode}`);
   const reviewerConfigs = [
@@ -2865,7 +2946,7 @@ type CliReviewerFailureCaseState = {
 async function runCliReviewerFailureCase(
   mode: CliReviewerFailureMode
 ): Promise<CliReviewerFailureCaseState> {
-  const rootDir = await mkdtemp(join(tmpdir(), `aisa-cli-reviewer-${mode}-`));
+  const rootDir = await createVerifyTempDir(`aisa-cli-reviewer-${mode}-`);
   await initializeGitRepo(rootDir, false);
   const { run, workspacePaths } = await bootstrapRun(rootDir, `cli-reviewer-${mode}`);
   const reviewerConfigs = [
@@ -3608,8 +3689,35 @@ async function assertRegressionGatesParseable(): Promise<void> {
   );
 }
 
+function assertDefaultWorkspaceScopePolicyHonorsManagedWorkspaceEnv(): void {
+  const runtimeRoot = resolve("/tmp", "aisa-scope-runtime-root");
+  const managedWorkspaceRoot = resolve("/tmp", "aisa-scope-managed-root");
+  const previous = process.env.AISA_MANAGED_WORKSPACE_ROOT;
+  process.env.AISA_MANAGED_WORKSPACE_ROOT = managedWorkspaceRoot;
+
+  try {
+    const policy = createDefaultRunWorkspaceScopePolicy(runtimeRoot);
+    assert.equal(
+      policy.managedWorkspaceRoot,
+      managedWorkspaceRoot,
+      "default workspace scope policy should honor AISA_MANAGED_WORKSPACE_ROOT"
+    );
+    assert.ok(
+      policy.allowedRoots.includes(managedWorkspaceRoot),
+      "default workspace scope policy should allow the managed workspace override"
+    );
+  } finally {
+    if (previous === undefined) {
+      delete process.env.AISA_MANAGED_WORKSPACE_ROOT;
+    } else {
+      process.env.AISA_MANAGED_WORKSPACE_ROOT = previous;
+    }
+  }
+}
+
 async function loadSmokeCases(): Promise<ScenarioCase[]> {
   await assertRegressionGatesParseable();
+  assertDefaultWorkspaceScopePolicyHonorsManagedWorkspaceEnv();
   await loadReviewPacketSchema();
   const smokeDir = join(process.cwd(), "evals", "runtime-run-loop", "datasets", "smoke");
   const entries = await readdir(smokeDir);
@@ -3619,13 +3727,24 @@ async function loadSmokeCases(): Promise<ScenarioCase[]> {
       .sort()
       .map(async (entry) => JSON.parse(await readFile(join(smokeDir, entry), "utf8")) as ScenarioCase)
   );
+  const filter = getRequestedSmokeCaseFilter();
+  const filteredCases =
+    filter === null
+      ? cases
+      : cases.filter(
+          (scenario) => scenario.id.includes(filter) || scenario.driver === filter
+        );
 
   assert.ok(cases.length > 0, "Expected at least one runtime smoke case.");
-  return cases;
+  assert.ok(
+    filteredCases.length > 0,
+    `No runtime smoke cases matched ${filter ?? "<all>"}.`
+  );
+  return filteredCases;
 }
 
 async function runCase(scenario: ScenarioCase): Promise<ScenarioObservation> {
-  const rootDir = await mkdtemp(join(tmpdir(), `aisa-${scenario.id}-`));
+  const rootDir = await createVerifyTempDir(`aisa-${scenario.id}-`);
   const { run, workspacePaths } = await bootstrapRun(rootDir, scenario.id);
 
   if (scenario.driver === "running_attempt_owned_elsewhere") {
@@ -3693,6 +3812,11 @@ async function runCase(scenario: ScenarioCase): Promise<ScenarioObservation> {
     iterations: scenario.max_ticks,
     autoApprovePendingExecution: shouldAutoApprovePendingExecution(scenario.driver)
   });
+  await waitForAttemptActivityToDrain({
+    workspacePaths,
+    runId: run.id,
+    failureMessage: `${scenario.id}: active attempts did not drain before observation`
+  });
   const persistedRun = await getRun(workspacePaths, run.id);
 
   assert.equal(persistedRun.id, run.id, `${scenario.id}: persisted run missing`);
@@ -3743,7 +3867,7 @@ async function runConcurrentOwnerCase(input: {
 }
 
 async function assertConcurrentTickCallsCreateSingleAttempt(): Promise<void> {
-  const rootDir = await mkdtemp(join(tmpdir(), "aisa-concurrent-tick-create-"));
+  const rootDir = await createVerifyTempDir("aisa-concurrent-tick-create-");
   const { run, workspacePaths } = await bootstrapRun(rootDir, "concurrent-tick-create");
   const orchestrator = new Orchestrator(
     workspacePaths,
@@ -3768,7 +3892,7 @@ async function assertConcurrentTickCallsCreateSingleAttempt(): Promise<void> {
 }
 
 async function assertConcurrentOrchestratorsCreateSingleAttempt(): Promise<void> {
-  const rootDir = await mkdtemp(join(tmpdir(), "aisa-concurrent-orch-create-"));
+  const rootDir = await createVerifyTempDir("aisa-concurrent-orch-create-");
   const { run, workspacePaths } = await bootstrapRun(rootDir, "concurrent-orch-create");
   const primary = new Orchestrator(
     workspacePaths,
@@ -3851,7 +3975,7 @@ async function seedCreatedResearchAttempt(input: {
 }
 
 async function assertConcurrentOrchestratorsStartPendingAttemptOnce(): Promise<void> {
-  const rootDir = await mkdtemp(join(tmpdir(), "aisa-concurrent-orch-start-"));
+  const rootDir = await createVerifyTempDir("aisa-concurrent-orch-start-");
   const { run, workspacePaths } = await bootstrapRun(rootDir, "concurrent-orch-start");
   const seededAttempt = await seedCreatedResearchAttempt({
     run,
@@ -3890,7 +4014,7 @@ async function assertConcurrentOrchestratorsStartPendingAttemptOnce(): Promise<v
 }
 
 async function assertGlobalAttemptConcurrencyLimitCapsParallelDispatch(): Promise<void> {
-  const rootDir = await mkdtemp(join(tmpdir(), "aisa-run-concurrency-limit-"));
+  const rootDir = await createVerifyTempDir("aisa-run-concurrency-limit-");
   const first = await bootstrapRun(rootDir, "run-concurrency-limit-a");
   const second = await bootstrapRun(rootDir, "run-concurrency-limit-b");
   const adapter = new BlockingAdapter();
@@ -5025,6 +5149,7 @@ async function assertPersistedPostRestartPromptChain(): Promise<void> {
 }
 
 async function main(): Promise<void> {
+  const scenarioFilter = getRequestedSmokeCaseFilter();
   const scenarios = await loadSmokeCases();
   const results: Array<{
     id: string;
@@ -5052,315 +5177,320 @@ async function main(): Promise<void> {
     }
   }
 
-  try {
-    await assertPersistedPostRestartPromptChain();
-    results.push({
-      id: "post_restart_prompt_chain",
-      status: "pass"
-    });
-  } catch (error) {
-    results.push({
-      id: "post_restart_prompt_chain",
-      status: "fail",
-      error: error instanceof Error ? error.message : String(error)
-    });
-  }
+  if (scenarioFilter === null) {
+    try {
+      await assertPersistedPostRestartPromptChain();
+      results.push({
+        id: "post_restart_prompt_chain",
+        status: "pass"
+      });
+    } catch (error) {
+      results.push({
+        id: "post_restart_prompt_chain",
+        status: "fail",
+        error: error instanceof Error ? error.message : String(error)
+      });
+    }
 
-  try {
-    await assertRuntimeHealthSnapshotContextWiring();
-    results.push({
-      id: "runtime_health_snapshot_context",
-      status: "pass"
-    });
-  } catch (error) {
-    results.push({
-      id: "runtime_health_snapshot_context",
-      status: "fail",
-      error: error instanceof Error ? error.message : String(error)
-    });
-  }
+    try {
+      await assertRuntimeHealthSnapshotContextWiring();
+      results.push({
+        id: "runtime_health_snapshot_context",
+        status: "pass"
+      });
+    } catch (error) {
+      results.push({
+        id: "runtime_health_snapshot_context",
+        status: "fail",
+        error: error instanceof Error ? error.message : String(error)
+      });
+    }
 
-  try {
-    await assertMissingRuntimeHealthSnapshotDoesNotFabricateContext();
-    results.push({
-      id: "missing_runtime_health_snapshot_context",
-      status: "pass"
-    });
-  } catch (error) {
-    results.push({
-      id: "missing_runtime_health_snapshot_context",
-      status: "fail",
-      error: error instanceof Error ? error.message : String(error)
-    });
-  }
+    try {
+      await assertMissingRuntimeHealthSnapshotDoesNotFabricateContext();
+      results.push({
+        id: "missing_runtime_health_snapshot_context",
+        status: "pass"
+      });
+    } catch (error) {
+      results.push({
+        id: "missing_runtime_health_snapshot_context",
+        status: "fail",
+        error: error instanceof Error ? error.message : String(error)
+      });
+    }
 
-  try {
-    await assertExecutionHarnessEffortFlowsToDispatchContext();
-    results.push({
-      id: "execution_harness_effort_context",
-      status: "pass"
-    });
-  } catch (error) {
-    results.push({
-      id: "execution_harness_effort_context",
-      status: "fail",
-      error: error instanceof Error ? error.message : String(error)
-    });
-  }
+    try {
+      await assertExecutionHarnessEffortFlowsToDispatchContext();
+      results.push({
+        id: "execution_harness_effort_context",
+        status: "pass"
+      });
+    } catch (error) {
+      results.push({
+        id: "execution_harness_effort_context",
+        status: "fail",
+        error: error instanceof Error ? error.message : String(error)
+      });
+    }
 
-  try {
-    await assertExecutionEffortNativeConfigReachesCodexCli();
-    results.push({
-      id: "execution_effort_native_config",
-      status: "pass"
-    });
-  } catch (error) {
-    results.push({
-      id: "execution_effort_native_config",
-      status: "fail",
-      error: error instanceof Error ? error.message : String(error)
-    });
-  }
+    try {
+      await assertExecutionEffortNativeConfigReachesCodexCli();
+      results.push({
+        id: "execution_effort_native_config",
+        status: "pass"
+      });
+    } catch (error) {
+      results.push({
+        id: "execution_effort_native_config",
+        status: "fail",
+        error: error instanceof Error ? error.message : String(error)
+      });
+    }
 
-  try {
-    await assertCliJudgeEffortSettingsStayVisibleWhenUnsupported();
-    results.push({
-      id: "cli_judge_effort_visibility",
-      status: "pass"
-    });
-  } catch (error) {
-    results.push({
-      id: "cli_judge_effort_visibility",
-      status: "fail",
-      error: error instanceof Error ? error.message : String(error)
-    });
-  }
+    try {
+      await assertCliJudgeEffortSettingsStayVisibleWhenUnsupported();
+      results.push({
+        id: "cli_judge_effort_visibility",
+        status: "pass"
+      });
+    } catch (error) {
+      results.push({
+        id: "cli_judge_effort_visibility",
+        status: "fail",
+        error: error instanceof Error ? error.message : String(error)
+      });
+    }
 
-  try {
-    await assertConcurrentTickCallsCreateSingleAttempt();
-    results.push({
-      id: "concurrent_tick_calls_create_single_attempt",
-      status: "pass"
-    });
-  } catch (error) {
-    results.push({
-      id: "concurrent_tick_calls_create_single_attempt",
-      status: "fail",
-      error: error instanceof Error ? error.message : String(error)
-    });
-  }
+    try {
+      await assertConcurrentTickCallsCreateSingleAttempt();
+      results.push({
+        id: "concurrent_tick_calls_create_single_attempt",
+        status: "pass"
+      });
+    } catch (error) {
+      results.push({
+        id: "concurrent_tick_calls_create_single_attempt",
+        status: "fail",
+        error: error instanceof Error ? error.message : String(error)
+      });
+    }
 
-  try {
-    await assertConcurrentOrchestratorsCreateSingleAttempt();
-    results.push({
-      id: "concurrent_orchestrators_create_single_attempt",
-      status: "pass"
-    });
-  } catch (error) {
-    results.push({
-      id: "concurrent_orchestrators_create_single_attempt",
-      status: "fail",
-      error: error instanceof Error ? error.message : String(error)
-    });
-  }
+    try {
+      await assertConcurrentOrchestratorsCreateSingleAttempt();
+      results.push({
+        id: "concurrent_orchestrators_create_single_attempt",
+        status: "pass"
+      });
+    } catch (error) {
+      results.push({
+        id: "concurrent_orchestrators_create_single_attempt",
+        status: "fail",
+        error: error instanceof Error ? error.message : String(error)
+      });
+    }
 
-  try {
-    await assertConcurrentOrchestratorsStartPendingAttemptOnce();
-    results.push({
-      id: "concurrent_orchestrators_start_pending_attempt_once",
-      status: "pass"
-    });
-  } catch (error) {
-    results.push({
-      id: "concurrent_orchestrators_start_pending_attempt_once",
-      status: "fail",
-      error: error instanceof Error ? error.message : String(error)
-    });
-  }
+    try {
+      await assertConcurrentOrchestratorsStartPendingAttemptOnce();
+      results.push({
+        id: "concurrent_orchestrators_start_pending_attempt_once",
+        status: "pass"
+      });
+    } catch (error) {
+      results.push({
+        id: "concurrent_orchestrators_start_pending_attempt_once",
+        status: "fail",
+        error: error instanceof Error ? error.message : String(error)
+      });
+    }
 
-  try {
-    await assertGlobalAttemptConcurrencyLimitCapsParallelDispatch();
-    results.push({
-      id: "global_attempt_concurrency_limit_caps_parallel_dispatch",
-      status: "pass"
-    });
-  } catch (error) {
-    results.push({
-      id: "global_attempt_concurrency_limit_caps_parallel_dispatch",
-      status: "fail",
-      error: error instanceof Error ? error.message : String(error)
-    });
-  }
+    try {
+      await assertGlobalAttemptConcurrencyLimitCapsParallelDispatch();
+      results.push({
+        id: "global_attempt_concurrency_limit_caps_parallel_dispatch",
+        status: "pass"
+      });
+    } catch (error) {
+      results.push({
+        id: "global_attempt_concurrency_limit_caps_parallel_dispatch",
+        status: "fail",
+        error: error instanceof Error ? error.message : String(error)
+      });
+    }
 
-  try {
-    await assertExplicitPnpmVerificationPlanNeedsLocalNodeModules();
-    results.push({
-      id: "explicit_pnpm_verification_plan_needs_local_node_modules",
-      status: "pass"
-    });
-  } catch (error) {
-    results.push({
-      id: "explicit_pnpm_verification_plan_needs_local_node_modules",
-      status: "fail",
-      error: error instanceof Error ? error.message : String(error)
-    });
-  }
+    try {
+      await assertExplicitPnpmVerificationPlanNeedsLocalNodeModules();
+      results.push({
+        id: "explicit_pnpm_verification_plan_needs_local_node_modules",
+        status: "pass"
+      });
+    } catch (error) {
+      results.push({
+        id: "explicit_pnpm_verification_plan_needs_local_node_modules",
+        status: "fail",
+        error: error instanceof Error ? error.message : String(error)
+      });
+    }
 
-  try {
-    await assertCliReviewerFailureBlocksOpinionPersistence("invalid_json");
-    results.push({
-      id: "cli_reviewer_invalid_json_blocks_opinion_persistence",
-      status: "pass"
-    });
-  } catch (error) {
-    results.push({
-      id: "cli_reviewer_invalid_json_blocks_opinion_persistence",
-      status: "fail",
-      error: error instanceof Error ? error.message : String(error)
-    });
-  }
+    try {
+      await assertCliReviewerFailureBlocksOpinionPersistence("invalid_json");
+      results.push({
+        id: "cli_reviewer_invalid_json_blocks_opinion_persistence",
+        status: "pass"
+      });
+    } catch (error) {
+      results.push({
+        id: "cli_reviewer_invalid_json_blocks_opinion_persistence",
+        status: "fail",
+        error: error instanceof Error ? error.message : String(error)
+      });
+    }
 
-  try {
-    await assertCliReviewerFailureBlocksOpinionPersistence("nonzero_exit");
-    results.push({
-      id: "cli_reviewer_nonzero_exit_blocks_opinion_persistence",
-      status: "pass"
-    });
-  } catch (error) {
-    results.push({
-      id: "cli_reviewer_nonzero_exit_blocks_opinion_persistence",
-      status: "fail",
-      error: error instanceof Error ? error.message : String(error)
-    });
-  }
+    try {
+      await assertCliReviewerFailureBlocksOpinionPersistence("nonzero_exit");
+      results.push({
+        id: "cli_reviewer_nonzero_exit_blocks_opinion_persistence",
+        status: "pass"
+      });
+    } catch (error) {
+      results.push({
+        id: "cli_reviewer_nonzero_exit_blocks_opinion_persistence",
+        status: "fail",
+        error: error instanceof Error ? error.message : String(error)
+      });
+    }
 
-  try {
-    await assertCliReviewerFailureBlocksOpinionPersistence("timeout");
-    results.push({
-      id: "cli_reviewer_timeout_blocks_opinion_persistence",
-      status: "pass"
-    });
-  } catch (error) {
-    results.push({
-      id: "cli_reviewer_timeout_blocks_opinion_persistence",
-      status: "fail",
-      error: error instanceof Error ? error.message : String(error)
-    });
-  }
+    try {
+      await assertCliReviewerFailureBlocksOpinionPersistence("timeout");
+      results.push({
+        id: "cli_reviewer_timeout_blocks_opinion_persistence",
+        status: "pass"
+      });
+    } catch (error) {
+      results.push({
+        id: "cli_reviewer_timeout_blocks_opinion_persistence",
+        status: "fail",
+        error: error instanceof Error ? error.message : String(error)
+      });
+    }
 
-  try {
-    await assertCliReviewerFailureRecoveryRebuildsReviewPacketFromMetaAndResult();
-    results.push({
-      id: "cli_reviewer_invalid_json_recovery_chain_rebuilds_from_meta_and_result",
-      status: "pass"
-    });
-  } catch (error) {
-    results.push({
-      id: "cli_reviewer_invalid_json_recovery_chain_rebuilds_from_meta_and_result",
-      status: "fail",
-      error: error instanceof Error ? error.message : String(error)
-    });
-  }
+    try {
+      await assertCliReviewerFailureRecoveryRebuildsReviewPacketFromMetaAndResult();
+      results.push({
+        id: "cli_reviewer_invalid_json_recovery_chain_rebuilds_from_meta_and_result",
+        status: "pass"
+      });
+    } catch (error) {
+      results.push({
+        id: "cli_reviewer_invalid_json_recovery_chain_rebuilds_from_meta_and_result",
+        status: "fail",
+        error: error instanceof Error ? error.message : String(error)
+      });
+    }
 
-  try {
-    await assertCliSynthesizerFailureBlocksEvaluationPersistence("invalid_json");
-    results.push({
-      id: "cli_synthesizer_invalid_json_blocks_evaluation_persistence",
-      status: "pass"
-    });
-  } catch (error) {
-    results.push({
-      id: "cli_synthesizer_invalid_json_blocks_evaluation_persistence",
-      status: "fail",
-      error: error instanceof Error ? error.message : String(error)
-    });
-  }
+    try {
+      await assertCliSynthesizerFailureBlocksEvaluationPersistence("invalid_json");
+      results.push({
+        id: "cli_synthesizer_invalid_json_blocks_evaluation_persistence",
+        status: "pass"
+      });
+    } catch (error) {
+      results.push({
+        id: "cli_synthesizer_invalid_json_blocks_evaluation_persistence",
+        status: "fail",
+        error: error instanceof Error ? error.message : String(error)
+      });
+    }
 
-  try {
-    await assertCliSynthesizerFailureBlocksEvaluationPersistence("nonzero_exit");
-    results.push({
-      id: "cli_synthesizer_nonzero_exit_blocks_evaluation_persistence",
-      status: "pass"
-    });
-  } catch (error) {
-    results.push({
-      id: "cli_synthesizer_nonzero_exit_blocks_evaluation_persistence",
-      status: "fail",
-      error: error instanceof Error ? error.message : String(error)
-    });
-  }
+    try {
+      await assertCliSynthesizerFailureBlocksEvaluationPersistence("nonzero_exit");
+      results.push({
+        id: "cli_synthesizer_nonzero_exit_blocks_evaluation_persistence",
+        status: "pass"
+      });
+    } catch (error) {
+      results.push({
+        id: "cli_synthesizer_nonzero_exit_blocks_evaluation_persistence",
+        status: "fail",
+        error: error instanceof Error ? error.message : String(error)
+      });
+    }
 
-  try {
-    await assertManagedWorkspaceInheritsLocalNodeModules();
-    results.push({
-      id: "managed_workspace_inherits_local_node_modules",
-      status: "pass"
-    });
-  } catch (error) {
-    results.push({
-      id: "managed_workspace_inherits_local_node_modules",
-      status: "fail",
-      error: error instanceof Error ? error.message : String(error)
-    });
-  }
+    try {
+      await assertManagedWorkspaceInheritsLocalNodeModules();
+      results.push({
+        id: "managed_workspace_inherits_local_node_modules",
+        status: "pass"
+      });
+    } catch (error) {
+      results.push({
+        id: "managed_workspace_inherits_local_node_modules",
+        status: "fail",
+        error: error instanceof Error ? error.message : String(error)
+      });
+    }
 
-  try {
-    await assertMultiReviewerPipelinePersistsOpinionsAndSynthesizesEvaluation();
-    results.push({
-      id: "multi_reviewer_pipeline_persists_and_synthesizes",
-      status: "pass"
-    });
-  } catch (error) {
-    results.push({
-      id: "multi_reviewer_pipeline_persists_and_synthesizes",
-      status: "fail",
-      error: error instanceof Error ? error.message : String(error)
-    });
-  }
+    try {
+      await assertMultiReviewerPipelinePersistsOpinionsAndSynthesizesEvaluation();
+      results.push({
+        id: "multi_reviewer_pipeline_persists_and_synthesizes",
+        status: "pass"
+      });
+    } catch (error) {
+      results.push({
+        id: "multi_reviewer_pipeline_persists_and_synthesizes",
+        status: "fail",
+        error: error instanceof Error ? error.message : String(error)
+      });
+    }
 
-  try {
-    await assertCliSynthesizerPersistsArtifactAndFinalizesEvaluation();
-    results.push({
-      id: "cli_synthesizer_persists_artifact_and_finalizes_evaluation",
-      status: "pass"
-    });
-  } catch (error) {
-    results.push({
-      id: "cli_synthesizer_persists_artifact_and_finalizes_evaluation",
-      status: "fail",
-      error: error instanceof Error ? error.message : String(error)
-    });
-  }
+    try {
+      await assertCliSynthesizerPersistsArtifactAndFinalizesEvaluation();
+      results.push({
+        id: "cli_synthesizer_persists_artifact_and_finalizes_evaluation",
+        status: "pass"
+      });
+    } catch (error) {
+      results.push({
+        id: "cli_synthesizer_persists_artifact_and_finalizes_evaluation",
+        status: "fail",
+        error: error instanceof Error ? error.message : String(error)
+      });
+    }
 
-  try {
-    await assertCliSynthesizerCannotOverrideFailedRuntimeVerification();
-    results.push({
-      id: "cli_synthesizer_hard_gate_preserves_failed_runtime_verification",
-      status: "pass"
-    });
-  } catch (error) {
-    results.push({
-      id: "cli_synthesizer_hard_gate_preserves_failed_runtime_verification",
-      status: "fail",
-      error: error instanceof Error ? error.message : String(error)
-    });
-  }
+    try {
+      await assertCliSynthesizerCannotOverrideFailedRuntimeVerification();
+      results.push({
+        id: "cli_synthesizer_hard_gate_preserves_failed_runtime_verification",
+        status: "pass"
+      });
+    } catch (error) {
+      results.push({
+        id: "cli_synthesizer_hard_gate_preserves_failed_runtime_verification",
+        status: "fail",
+        error: error instanceof Error ? error.message : String(error)
+      });
+    }
 
-  try {
-    await assertCliSynthesizerCannotOverrideFailedAdversarialVerification();
-    results.push({
-      id: "cli_synthesizer_hard_gate_preserves_failed_adversarial_verification",
-      status: "pass"
-    });
-  } catch (error) {
-    results.push({
-      id: "cli_synthesizer_hard_gate_preserves_failed_adversarial_verification",
-      status: "fail",
-      error: error instanceof Error ? error.message : String(error)
-    });
+    try {
+      await assertCliSynthesizerCannotOverrideFailedAdversarialVerification();
+      results.push({
+        id: "cli_synthesizer_hard_gate_preserves_failed_adversarial_verification",
+        status: "pass"
+      });
+    } catch (error) {
+      results.push({
+        id: "cli_synthesizer_hard_gate_preserves_failed_adversarial_verification",
+        status: "fail",
+        error: error instanceof Error ? error.message : String(error)
+      });
+    }
   }
 
   const failed = results.filter((result) => result.status === "fail");
+  if (failed.length === 0) {
+    await cleanupTrackedVerifyTempDirs();
+  }
   console.log(
     JSON.stringify(
       {

@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
   createAttempt,
@@ -35,6 +34,10 @@ import {
   saveCurrentDecision,
   saveRun
 } from "../packages/state-store/src/index.ts";
+import {
+  cleanupTrackedVerifyTempDirs,
+  createTrackedVerifyTempDir
+} from "./verify-temp.ts";
 
 const REVIEWER_CONFIG_ENV = "AISA_REVIEWERS_JSON";
 const SYNTHESIZER_CONFIG_ENV = "AISA_REVIEW_SYNTHESIZER_JSON";
@@ -142,7 +145,7 @@ async function main(): Promise<void> {
   process.env[SYNTHESIZER_CONFIG_ENV] = CLOSED_BASELINE_SYNTHESIZER_JSON;
 
   try {
-    const rootDir = await mkdtemp(join(tmpdir(), "aisa-working-context-"));
+    const rootDir = await createTrackedVerifyTempDir("aisa-working-context-");
     await initializeGitRepo(rootDir);
     const workspacePaths = resolveWorkspacePaths(rootDir);
     await ensureWorkspace(workspacePaths);
@@ -585,6 +588,11 @@ async function main(): Promise<void> {
       )
     );
   } finally {
+    // The final operator-surface refresh can still be settling when this verify script
+    // returns under nested runtime load. Give it one short drain window before removing
+    // the temp workspace, otherwise late readers can hit ENOENT on run contract files.
+    await wait(250);
+    await cleanupTrackedVerifyTempDirs();
     if (previousReviewers === undefined) {
       delete process.env[REVIEWER_CONFIG_ENV];
     } else {

@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { request as httpRequest, type ClientRequest, type IncomingMessage } from "node:http";
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { mkdir, rm } from "node:fs/promises";
 import { join } from "node:path";
 import {
   createAttempt,
@@ -20,6 +19,10 @@ import {
   saveRun
 } from "../packages/state-store/src/index.ts";
 import { buildServer } from "../apps/control-api/src/index.ts";
+import {
+  cleanupTrackedVerifyTempDirs,
+  createTrackedVerifyTempDir
+} from "./verify-temp.ts";
 
 type RunStreamPayload = {
   run: { id: string };
@@ -208,14 +211,19 @@ async function openInjectedRunStream(app: {
 }
 
 async function main(): Promise<void> {
-  const rootDir = await mkdtemp(join(tmpdir(), "aisa-run-stream-"));
-  const projectScopeDir = await mkdtemp(join(tmpdir(), "aisa-run-stream-scope-"));
-  const socketDir = await mkdtemp(join(tmpdir(), "aisa-sse-"));
-  const socketPath = join(socketDir, "s.sock");
-  const projectRoot = join(projectScopeDir, "project-a");
-  await mkdir(projectRoot, { recursive: true });
-  const workspacePaths = resolveWorkspacePaths(rootDir);
-  await ensureWorkspace(workspacePaths);
+  try {
+    const rootDir = await createTrackedVerifyTempDir("aisa-run-stream-");
+    const projectScopeDir = await createTrackedVerifyTempDir(
+      "aisa-run-stream-scope-"
+    );
+    const socketDir = await createTrackedVerifyTempDir("aisa-sse-", {
+      useSystemTempRoot: true
+    });
+    const socketPath = join(socketDir, "s.sock");
+    const projectRoot = join(projectScopeDir, "project-a");
+    await mkdir(projectRoot, { recursive: true });
+    const workspacePaths = resolveWorkspacePaths(rootDir);
+    await ensureWorkspace(workspacePaths);
 
   const run = createRun({
     title: "Run SSE verification",
@@ -274,81 +282,84 @@ async function main(): Promise<void> {
     allowedRunWorkspaceRoots: [rootDir, projectScopeDir]
   });
 
-  try {
-    const usesInjectedStream =
-      typeof (app as { injectStream?: unknown }).injectStream === "function";
-    const stream = usesInjectedStream
-      ? await openInjectedRunStream(
-          app as {
-            injectStream: (input: {
-              method: string;
-              url: string;
-            }) => Promise<{
-              request: ClientRequest;
-              response: IncomingMessage;
-            }>;
+    try {
+      const usesInjectedStream =
+        typeof (app as { injectStream?: unknown }).injectStream === "function";
+      const stream = usesInjectedStream
+        ? await openInjectedRunStream(
+            app as {
+              injectStream: (input: {
+                method: string;
+                url: string;
+              }) => Promise<{
+                request: ClientRequest;
+                response: IncomingMessage;
+              }>;
+            },
+            run.id
+          )
+        : (await app.listen({
+            path: socketPath
+          }),
+          await openRunStream(socketPath, run.id));
+      assert.equal(stream.response.statusCode, 200);
+      const contentType = String(stream.response.headers["content-type"] ?? "");
+
+      if (contentType.length > 0 || !usesInjectedStream) {
+        assert.match(contentType, /text\/event-stream/i);
+      }
+
+      const firstSnapshot = await readNextSnapshot(stream.state, 5_000);
+      const firstRuntimeState =
+        firstSnapshot.attempt_details.find((detail) => detail.attempt.id === attempt.id)
+          ?.runtime_state ?? null;
+      assert.equal(firstRuntimeState?.progress_text, "初始运行态");
+      assert.equal(firstRuntimeState?.phase, "reasoning");
+      assert.equal(firstRuntimeState?.session_id, "sess_stream_initial");
+
+      await saveAttemptRuntimeState(
+        workspacePaths,
+        updateAttemptRuntimeState(initialRuntimeState, {
+          phase: "tool",
+          progress_text: "第二次快照",
+          recent_activities: ["命令：pnpm verify:runtime"],
+          event_count: 2
+        })
+      );
+
+      const secondSnapshot = await readNextSnapshot(stream.state, 5_000);
+      const secondRuntimeState =
+        secondSnapshot.attempt_details.find((detail) => detail.attempt.id === attempt.id)
+          ?.runtime_state ?? null;
+      assert.equal(secondRuntimeState?.progress_text, "第二次快照");
+      assert.equal(secondRuntimeState?.phase, "tool");
+      assert.equal(secondRuntimeState?.event_count, 2);
+
+      stream.request.destroy();
+      stream.response.destroy();
+
+      console.log(
+        JSON.stringify(
+          {
+            run_id: run.id,
+            attempt_id: attempt.id,
+            first_phase: firstRuntimeState?.phase,
+            second_phase: secondRuntimeState?.phase,
+            status: "passed"
           },
-          run.id
+          null,
+          2
         )
-      : (await app.listen({
-          path: socketPath
-        }),
-        await openRunStream(socketPath, run.id));
-    assert.equal(stream.response.statusCode, 200);
-    const contentType = String(stream.response.headers["content-type"] ?? "");
-
-    if (contentType.length > 0 || !usesInjectedStream) {
-      assert.match(contentType, /text\/event-stream/i);
+      );
+    } finally {
+      await app.close();
+      await rm(socketDir, {
+        recursive: true,
+        force: true
+      });
     }
-
-    const firstSnapshot = await readNextSnapshot(stream.state, 5_000);
-    const firstRuntimeState =
-      firstSnapshot.attempt_details.find((detail) => detail.attempt.id === attempt.id)
-        ?.runtime_state ?? null;
-    assert.equal(firstRuntimeState?.progress_text, "初始运行态");
-    assert.equal(firstRuntimeState?.phase, "reasoning");
-    assert.equal(firstRuntimeState?.session_id, "sess_stream_initial");
-
-    await saveAttemptRuntimeState(
-      workspacePaths,
-      updateAttemptRuntimeState(initialRuntimeState, {
-        phase: "tool",
-        progress_text: "第二次快照",
-        recent_activities: ["命令：pnpm verify:runtime"],
-        event_count: 2
-      })
-    );
-
-    const secondSnapshot = await readNextSnapshot(stream.state, 5_000);
-    const secondRuntimeState =
-      secondSnapshot.attempt_details.find((detail) => detail.attempt.id === attempt.id)
-        ?.runtime_state ?? null;
-    assert.equal(secondRuntimeState?.progress_text, "第二次快照");
-    assert.equal(secondRuntimeState?.phase, "tool");
-    assert.equal(secondRuntimeState?.event_count, 2);
-
-    stream.request.destroy();
-    stream.response.destroy();
-
-    console.log(
-      JSON.stringify(
-        {
-          run_id: run.id,
-          attempt_id: attempt.id,
-          first_phase: firstRuntimeState?.phase,
-          second_phase: secondRuntimeState?.phase,
-          status: "passed"
-        },
-        null,
-        2
-      )
-    );
   } finally {
-    await app.close();
-    await rm(socketDir, {
-      recursive: true,
-      force: true
-    });
+    await cleanupTrackedVerifyTempDirs();
   }
 }
 

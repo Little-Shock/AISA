@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { access, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { access, mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
   createAttempt,
@@ -65,6 +64,10 @@ import {
   buildAttemptModeRules,
   prepareResearchShellGuard
 } from "../packages/worker-adapters/src/index.ts";
+import {
+  cleanupTrackedVerifyTempDirs,
+  createTrackedVerifyTempDir
+} from "./verify-temp.ts";
 
 const REVIEWER_CONFIG_ENV = "AISA_REVIEWERS_JSON";
 const SYNTHESIZER_CONFIG_ENV = "AISA_REVIEW_SYNTHESIZER_JSON";
@@ -510,15 +513,16 @@ async function withClosedJudgeBaseline<T>(
 async function main(hostJudgeConfig: HostJudgeConfigSnapshot): Promise<void> {
   assertClosedJudgeBaselineApplied("verify-drive-run");
   assertHostJudgeConfigOverridden("verify-drive-run", hostJudgeConfig);
-  const rootDir = await mkdtemp(join(tmpdir(), "aisa-drive-run-"));
-  const workspacePaths = resolveWorkspacePaths(rootDir);
-  await ensureWorkspace(workspacePaths);
-  await initializeGitRepo(rootDir);
-  await verifyManagedWorkspaceCheckpointCatchesUpDirtyBaseline();
-  await verifyExecutionAttemptRuntimeStateTransitionsAcrossVerification();
-  await verifyDriveRunDoesNotLeaveRunningAttemptBehind();
-  await assertSteeredExecutionDoesNotReuseMismatchedContract();
-  await assertDriveRunHonorsRuntimeLayoutScope();
+  try {
+    const rootDir = await createTrackedVerifyTempDir("aisa-drive-run-");
+    const workspacePaths = resolveWorkspacePaths(rootDir);
+    await ensureWorkspace(workspacePaths);
+    await initializeGitRepo(rootDir);
+    await verifyManagedWorkspaceCheckpointCatchesUpDirtyBaseline();
+    await verifyExecutionAttemptRuntimeStateTransitionsAcrossVerification();
+    await verifyDriveRunDoesNotLeaveRunningAttemptBehind();
+    await assertSteeredExecutionDoesNotReuseMismatchedContract();
+    await assertDriveRunHonorsRuntimeLayoutScope();
 
   const run = createRun({
     title: "Drive a self-bootstrap run locally",
@@ -855,31 +859,34 @@ async function main(hostJudgeConfig: HostJudgeConfigSnapshot): Promise<void> {
   );
   assert.equal(allowedShell.exitCode, 0);
 
-  console.log(
-    JSON.stringify(
-      {
-        run_id: run.id,
-        first_stop_next_action: firstStableStop.current?.recommended_next_action ?? null,
-        first_stop_blocking_reason: firstStableStop.current?.blocking_reason ?? null,
-        stop_reason: secondStop.stopReason,
-        attempt_types: attempts.map((attempt) => attempt.attempt_type),
-        research_attempt_count: researchAttempts.length,
-        execution_attempt_count: executionAttempts.length,
-        run_status: persistedCurrent?.run_status ?? null,
-        synced_self_bootstrap_artifacts: {
-          publication_artifact: syncedPublicationArtifactPath,
-          source_asset_snapshot: syncedSourceAssetSnapshotPath,
-          published_active_entry: syncedPublishedActiveEntryPath
-        }
-      },
-      null,
-      2
-    )
-  );
+    console.log(
+      JSON.stringify(
+        {
+          run_id: run.id,
+          first_stop_next_action: firstStableStop.current?.recommended_next_action ?? null,
+          first_stop_blocking_reason: firstStableStop.current?.blocking_reason ?? null,
+          stop_reason: secondStop.stopReason,
+          attempt_types: attempts.map((attempt) => attempt.attempt_type),
+          research_attempt_count: researchAttempts.length,
+          execution_attempt_count: executionAttempts.length,
+          run_status: persistedCurrent?.run_status ?? null,
+          synced_self_bootstrap_artifacts: {
+            publication_artifact: syncedPublicationArtifactPath,
+            source_asset_snapshot: syncedSourceAssetSnapshotPath,
+            published_active_entry: syncedPublishedActiveEntryPath
+          }
+        },
+        null,
+        2
+      )
+    );
+  } finally {
+    await cleanupTrackedVerifyTempDirs();
+  }
 }
 
 async function verifyManagedWorkspaceCheckpointCatchesUpDirtyBaseline(): Promise<void> {
-  const rootDir = await mkdtemp(join(tmpdir(), "aisa-managed-checkpoint-"));
+  const rootDir = await createTrackedVerifyTempDir("aisa-managed-checkpoint-");
   const workspacePaths = resolveWorkspacePaths(rootDir);
   await ensureWorkspace(workspacePaths);
   await initializeGitRepo(rootDir);
@@ -1027,7 +1034,9 @@ async function verifyManagedWorkspaceCheckpointCatchesUpDirtyBaseline(): Promise
 }
 
 async function verifyExecutionAttemptRuntimeStateTransitionsAcrossVerification(): Promise<void> {
-  const rootDir = await mkdtemp(join(tmpdir(), "aisa-runtime-state-verifying-"));
+  const rootDir = await createTrackedVerifyTempDir(
+    "aisa-runtime-state-verifying-"
+  );
   const workspacePaths = resolveWorkspacePaths(rootDir);
   await ensureWorkspace(workspacePaths);
   await initializeGitRepo(rootDir);
@@ -1133,7 +1142,7 @@ async function verifyExecutionAttemptRuntimeStateTransitionsAcrossVerification()
 }
 
 async function verifyDriveRunDoesNotLeaveRunningAttemptBehind(): Promise<void> {
-  const rootDir = await mkdtemp(join(tmpdir(), "aisa-drive-run-drain-"));
+  const rootDir = await createTrackedVerifyTempDir("aisa-drive-run-drain-");
   const workspacePaths = resolveWorkspacePaths(rootDir);
   await ensureWorkspace(workspacePaths);
   await initializeGitRepo(rootDir);
@@ -1189,7 +1198,9 @@ async function verifyDriveRunDoesNotLeaveRunningAttemptBehind(): Promise<void> {
 }
 
 async function assertSteeredExecutionDoesNotReuseMismatchedContract(): Promise<void> {
-  const rootDir = await mkdtemp(join(tmpdir(), "aisa-steered-contract-reset-"));
+  const rootDir = await createTrackedVerifyTempDir(
+    "aisa-steered-contract-reset-"
+  );
   const workspacePaths = resolveWorkspacePaths(rootDir);
   await ensureWorkspace(workspacePaths);
   await initializeGitRepo(rootDir);
@@ -1415,10 +1426,16 @@ async function assertSteeredExecutionDoesNotReuseMismatchedContract(): Promise<v
 }
 
 async function assertDriveRunHonorsRuntimeLayoutScope(): Promise<void> {
-  const runtimeRepoRoot = await mkdtemp(join(tmpdir(), "aisa-drive-run-runtime-repo-"));
-  const devRepoRoot = await mkdtemp(join(tmpdir(), "aisa-drive-run-dev-repo-"));
-  const runtimeDataRoot = await mkdtemp(join(tmpdir(), "aisa-drive-run-runtime-data-"));
-  const managedWorkspaceRoot = await mkdtemp(join(tmpdir(), "aisa-drive-run-managed-"));
+  const runtimeRepoRoot = await createTrackedVerifyTempDir(
+    "aisa-drive-run-runtime-repo-"
+  );
+  const devRepoRoot = await createTrackedVerifyTempDir("aisa-drive-run-dev-repo-");
+  const runtimeDataRoot = await createTrackedVerifyTempDir(
+    "aisa-drive-run-runtime-data-"
+  );
+  const managedWorkspaceRoot = await createTrackedVerifyTempDir(
+    "aisa-drive-run-managed-"
+  );
   const workspacePaths = resolveWorkspacePaths(runtimeDataRoot);
   await ensureWorkspace(workspacePaths);
   await mkdir(join(runtimeRepoRoot, "artifacts"), { recursive: true });

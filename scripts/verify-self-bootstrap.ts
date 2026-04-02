@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdir, mkdtemp, readFile, realpath, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { mkdir, readFile, realpath, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -25,13 +24,13 @@ import {
 import { buildServer } from "../apps/control-api/src/index.ts";
 import {
   appendRunJournal,
-    ensureWorkspace,
-    getAttemptContract,
-    getAttemptContext,
-    getAttemptHeartbeat,
-    getAttemptRuntimeState,
-    getRunAutomationControl,
-    getCurrentDecision,
+  ensureWorkspace,
+  getAttemptContract,
+  getAttemptContext,
+  getAttemptHeartbeat,
+  getAttemptRuntimeState,
+  getRunAutomationControl,
+  getCurrentDecision,
   getRun,
   getRunRuntimeHealthSnapshot,
   listAttempts,
@@ -45,8 +44,12 @@ import {
   saveAttemptRuntimeState,
   saveCurrentDecision,
   saveRunGovernanceState,
-  saveRun,
+  saveRun
 } from "../packages/state-store/src/index.ts";
+import {
+  cleanupTrackedVerifyTempDirs,
+  createTrackedVerifyTempDir
+} from "./verify-temp.ts";
 
 class NoopAdapter {
   readonly type = "fake-codex";
@@ -344,8 +347,8 @@ async function waitForFirstAttemptContext(input: {
 async function assertMissingActiveSnapshotBlocksRunInsteadOfCrashing(): Promise<{
   blocked_message: string | null;
 }> {
-  const baseDir = await mkdtemp(
-    join(tmpdir(), "aisa-self-bootstrap-execution-snapshot-")
+  const baseDir = await createTrackedVerifyTempDir(
+    "aisa-self-bootstrap-execution-snapshot-"
   );
   const repoRoot = join(baseDir, "repo");
   const runtimeDataRoot = join(baseDir, "runtime-data");
@@ -454,7 +457,9 @@ async function assertSupervisorRepairsWorkerOutputSchemaBlocker(sourceRoot: stri
   repair_steer_id: string | null;
   repair_state_action: string | null;
 }> {
-  const baseDir = await mkdtemp(join(tmpdir(), "aisa-self-bootstrap-supervisor-"));
+  const baseDir = await createTrackedVerifyTempDir(
+    "aisa-self-bootstrap-supervisor-"
+  );
   const repoRoot = join(baseDir, "repo");
   const runtimeDataRoot = join(baseDir, "runtime-data");
   const managedWorkspaceRoot = join(baseDir, ".aisa-run-worktrees");
@@ -651,7 +656,9 @@ async function assertSupervisorDoesNotKeepRotatingPinnedRun(sourceRoot: string):
   first_rotated_run_id: string | null;
   second_cycle_active_run_id: string | null;
 }> {
-  const baseDir = await mkdtemp(join(tmpdir(), "aisa-self-bootstrap-rotate-pin-"));
+  const baseDir = await createTrackedVerifyTempDir(
+    "aisa-self-bootstrap-rotate-pin-"
+  );
   const repoRoot = join(baseDir, "repo");
   const runtimeDataRoot = join(baseDir, "runtime-data");
   const managedWorkspaceRoot = join(baseDir, ".aisa-run-worktrees");
@@ -787,7 +794,9 @@ async function assertSupervisorSuspendsSupersededSelfBootstrapRuns(sourceRoot: s
   active_run_id: string;
   stopped_attempt_id: string;
 }> {
-  const baseDir = await mkdtemp(join(tmpdir(), "aisa-self-bootstrap-suspend-stale-"));
+  const baseDir = await createTrackedVerifyTempDir(
+    "aisa-self-bootstrap-suspend-stale-"
+  );
   const repoRoot = join(baseDir, "repo");
   const runtimeDataRoot = join(baseDir, "runtime-data");
   const managedWorkspaceRoot = join(baseDir, ".aisa-run-worktrees");
@@ -1001,40 +1010,43 @@ async function assertSupervisorSuspendsSupersededSelfBootstrapRuns(sourceRoot: s
 }
 
 async function main(): Promise<void> {
-  await assertRootEntrypointsUseNodeImportTsx();
+  try {
+    await assertRootEntrypointsUseNodeImportTsx();
 
-  const sourceRoot = resolveSourceRoot();
-  const publishedActiveTask = await loadPublishedActiveTaskFixture(sourceRoot);
-  const rootDir = await mkdtemp(join(tmpdir(), "aisa-self-bootstrap-"));
-  const workspacePaths = resolveWorkspacePaths(rootDir);
-  await ensureWorkspace(workspacePaths);
-  await seedSelfBootstrapActiveTask(rootDir, publishedActiveTask.content);
-  const bootstrapResult = await runTsxScript({
-    cwd: rootDir,
-    sourceRoot,
-    scriptPath: join(sourceRoot, "scripts", "bootstrap-self-run.ts"),
-    args: [
-      "--owner",
-      "test-owner",
-      "--focus",
-      "Use runtime evidence to choose the next backend step."
-    ],
-    extraEnv: {
-      AISA_DEV_REPO_ROOT: rootDir,
-      AISA_RUNTIME_DATA_ROOT: rootDir,
-      AISA_RUNTIME_REPO_ROOT: sourceRoot
-    }
-  });
-  assert.equal(
-    bootstrapResult.exitCode,
-    0,
-    formatScriptFailure("scripts/bootstrap-self-run.ts", bootstrapResult)
-  );
-  const bootstrapOutput = parseJsonStdout<BootstrapOutput>(
-    "scripts/bootstrap-self-run.ts",
-    bootstrapResult.stdout
-  );
-  const run = await getRun(workspacePaths, bootstrapOutput.run_id);
+    const sourceRoot = resolveSourceRoot();
+    const publishedActiveTask = await loadPublishedActiveTaskFixture(sourceRoot);
+    const rootDir = await createTrackedVerifyTempDir("aisa-self-bootstrap-", {
+      useSystemTempRoot: true
+    });
+    const workspacePaths = resolveWorkspacePaths(rootDir);
+    await ensureWorkspace(workspacePaths);
+    await seedSelfBootstrapActiveTask(rootDir, publishedActiveTask.content);
+    const bootstrapResult = await runTsxScript({
+      cwd: rootDir,
+      sourceRoot,
+      scriptPath: join(sourceRoot, "scripts", "bootstrap-self-run.ts"),
+      args: [
+        "--owner",
+        "test-owner",
+        "--focus",
+        "Use runtime evidence to choose the next backend step."
+      ],
+      extraEnv: {
+        AISA_DEV_REPO_ROOT: rootDir,
+        AISA_RUNTIME_DATA_ROOT: rootDir,
+        AISA_RUNTIME_REPO_ROOT: sourceRoot
+      }
+    });
+    assert.equal(
+      bootstrapResult.exitCode,
+      0,
+      formatScriptFailure("scripts/bootstrap-self-run.ts", bootstrapResult)
+    );
+    const bootstrapOutput = parseJsonStdout<BootstrapOutput>(
+      "scripts/bootstrap-self-run.ts",
+      bootstrapResult.stdout
+    );
+    const run = await getRun(workspacePaths, bootstrapOutput.run_id);
 
   const orchestrator = new Orchestrator(
     workspacePaths,
@@ -1236,106 +1248,119 @@ async function main(): Promise<void> {
     "journal should record the runtime health snapshot artifact"
   );
 
-  const missingActiveTaskRoot = await mkdtemp(
-    join(tmpdir(), "aisa-self-bootstrap-missing-")
-  );
-  const missingActiveTaskResult = await runTsxScript({
-    cwd: missingActiveTaskRoot,
-    sourceRoot,
-    scriptPath: join(sourceRoot, "scripts", "bootstrap-self-run.ts"),
-    args: ["--owner", "test-owner", "--focus", "Use runtime evidence to choose the next backend step."],
-    extraEnv: {
-      AISA_DEV_REPO_ROOT: missingActiveTaskRoot,
-      AISA_RUNTIME_DATA_ROOT: missingActiveTaskRoot,
-      AISA_RUNTIME_REPO_ROOT: sourceRoot
-    }
-  });
-  assert.notEqual(
-    missingActiveTaskResult.exitCode,
-    0,
-    "bootstrap:self should fail closed when the published active next task is missing"
-  );
-  assert.match(
-    missingActiveTaskResult.stderr,
-    /self-bootstrap-next-runtime-task-active\.json/,
-    "missing active next task failure should mention the published asset"
-  );
+    const missingActiveTaskRoot = await createTrackedVerifyTempDir(
+      "aisa-self-bootstrap-missing-"
+    );
+    const missingActiveTaskResult = await runTsxScript({
+      cwd: missingActiveTaskRoot,
+      sourceRoot,
+      scriptPath: join(sourceRoot, "scripts", "bootstrap-self-run.ts"),
+      args: [
+        "--owner",
+        "test-owner",
+        "--focus",
+        "Use runtime evidence to choose the next backend step."
+      ],
+      extraEnv: {
+        AISA_DEV_REPO_ROOT: missingActiveTaskRoot,
+        AISA_RUNTIME_DATA_ROOT: missingActiveTaskRoot,
+        AISA_RUNTIME_REPO_ROOT: sourceRoot
+      }
+    });
+    assert.notEqual(
+      missingActiveTaskResult.exitCode,
+      0,
+      "bootstrap:self should fail closed when the published active next task is missing"
+    );
+    assert.match(
+      missingActiveTaskResult.stderr,
+      /self-bootstrap-next-runtime-task-active\.json/,
+      "missing active next task failure should mention the published asset"
+    );
 
-  const invalidActiveTaskRoot = await mkdtemp(
-    join(tmpdir(), "aisa-self-bootstrap-invalid-")
-  );
-  await seedSelfBootstrapActiveTask(
-    invalidActiveTaskRoot,
-    JSON.stringify(
-      {
-        entry_type: "self_bootstrap_next_runtime_task_active",
-        updated_at: "2026-03-31T00:00:00Z",
-        source_anchor: {
-          asset_path: "Codex/bad.json"
+    const invalidActiveTaskRoot = await createTrackedVerifyTempDir(
+      "aisa-self-bootstrap-invalid-"
+    );
+    await seedSelfBootstrapActiveTask(
+      invalidActiveTaskRoot,
+      JSON.stringify(
+        {
+          entry_type: "self_bootstrap_next_runtime_task_active",
+          updated_at: "2026-03-31T00:00:00Z",
+          source_anchor: {
+            asset_path: "Codex/bad.json"
+          },
+          summary: "broken"
         },
-        summary: "broken"
-      },
-      null,
-      2
-    ) + "\n"
-  );
-  const invalidActiveTaskResult = await runTsxScript({
-    cwd: invalidActiveTaskRoot,
-    sourceRoot,
-    scriptPath: join(sourceRoot, "scripts", "bootstrap-self-run.ts"),
-    args: ["--owner", "test-owner", "--focus", "Use runtime evidence to choose the next backend step."],
-    extraEnv: {
-      AISA_DEV_REPO_ROOT: invalidActiveTaskRoot,
-      AISA_RUNTIME_DATA_ROOT: invalidActiveTaskRoot,
-      AISA_RUNTIME_REPO_ROOT: sourceRoot
-    }
-  });
-  assert.notEqual(
-    invalidActiveTaskResult.exitCode,
-    0,
-    "bootstrap:self should fail closed when the published active next task is malformed"
-  );
-  assert.match(
-    invalidActiveTaskResult.stderr,
-    /\.title/,
-    "invalid active next task failure should mention the broken required field"
-  );
+        null,
+        2
+      ) + "\n"
+    );
+    const invalidActiveTaskResult = await runTsxScript({
+      cwd: invalidActiveTaskRoot,
+      sourceRoot,
+      scriptPath: join(sourceRoot, "scripts", "bootstrap-self-run.ts"),
+      args: [
+        "--owner",
+        "test-owner",
+        "--focus",
+        "Use runtime evidence to choose the next backend step."
+      ],
+      extraEnv: {
+        AISA_DEV_REPO_ROOT: invalidActiveTaskRoot,
+        AISA_RUNTIME_DATA_ROOT: invalidActiveTaskRoot,
+        AISA_RUNTIME_REPO_ROOT: sourceRoot
+      }
+    });
+    assert.notEqual(
+      invalidActiveTaskResult.exitCode,
+      0,
+      "bootstrap:self should fail closed when the published active next task is malformed"
+    );
+    assert.match(
+      invalidActiveTaskResult.stderr,
+      /\.title/,
+      "invalid active next task failure should mention the broken required field"
+    );
 
-  const missingExecutionSnapshotBlock =
-    await assertMissingActiveSnapshotBlocksRunInsteadOfCrashing();
-  const supervisorSchemaRepair =
-    await assertSupervisorRepairsWorkerOutputSchemaBlocker(sourceRoot);
-  const pinnedRunRotation =
-    await assertSupervisorDoesNotKeepRotatingPinnedRun(sourceRoot);
-  const supersededRunCleanup =
-    await assertSupervisorSuspendsSupersededSelfBootstrapRuns(sourceRoot);
+    const missingExecutionSnapshotBlock =
+      await assertMissingActiveSnapshotBlocksRunInsteadOfCrashing();
+    const supervisorSchemaRepair =
+      await assertSupervisorRepairsWorkerOutputSchemaBlocker(sourceRoot);
+    const pinnedRunRotation =
+      await assertSupervisorDoesNotKeepRotatingPinnedRun(sourceRoot);
+    const supersededRunCleanup =
+      await assertSupervisorSuspendsSupersededSelfBootstrapRuns(sourceRoot);
 
-  console.log(
-    JSON.stringify(
-      {
-        run_id: run.id,
-        attempt_id: attempts[0]?.id ?? null,
-        objective: attempts[0]?.objective ?? null,
-        active_next_task: bootstrapOutput.active_next_task,
-        active_next_task_snapshot: bootstrapOutput.active_next_task_snapshot,
-        runtime_health_snapshot: bootstrapOutput.runtime_health_snapshot,
-        drift_count: runtimeHealthSnapshot?.history_contract_drift.drift_count ?? null,
-        missing_active_next_task_exit_code: missingActiveTaskResult.exitCode,
-        invalid_active_next_task_exit_code: invalidActiveTaskResult.exitCode,
-        missing_execution_snapshot_blocked_message:
-          missingExecutionSnapshotBlock.blocked_message,
-        repair_steer_id: supervisorSchemaRepair.repair_steer_id,
-        repair_state_action: supervisorSchemaRepair.repair_state_action,
-        first_rotated_run_id: pinnedRunRotation.first_rotated_run_id,
-        second_cycle_active_run_id: pinnedRunRotation.second_cycle_active_run_id,
-        suspended_run_id: supersededRunCleanup.suspended_run_id,
-        suspended_attempt_id: supersededRunCleanup.stopped_attempt_id,
-        cleanup_active_run_id: supersededRunCleanup.active_run_id
-      },
-      null,
-      2
-    )
-  );
+    console.log(
+      JSON.stringify(
+        {
+          run_id: run.id,
+          attempt_id: attempts[0]?.id ?? null,
+          objective: attempts[0]?.objective ?? null,
+          active_next_task: bootstrapOutput.active_next_task,
+          active_next_task_snapshot: bootstrapOutput.active_next_task_snapshot,
+          runtime_health_snapshot: bootstrapOutput.runtime_health_snapshot,
+          drift_count: runtimeHealthSnapshot?.history_contract_drift.drift_count ?? null,
+          missing_active_next_task_exit_code: missingActiveTaskResult.exitCode,
+          invalid_active_next_task_exit_code: invalidActiveTaskResult.exitCode,
+          missing_execution_snapshot_blocked_message:
+            missingExecutionSnapshotBlock.blocked_message,
+          repair_steer_id: supervisorSchemaRepair.repair_steer_id,
+          repair_state_action: supervisorSchemaRepair.repair_state_action,
+          first_rotated_run_id: pinnedRunRotation.first_rotated_run_id,
+          second_cycle_active_run_id: pinnedRunRotation.second_cycle_active_run_id,
+          suspended_run_id: supersededRunCleanup.suspended_run_id,
+          suspended_attempt_id: supersededRunCleanup.stopped_attempt_id,
+          cleanup_active_run_id: supersededRunCleanup.active_run_id
+        },
+        null,
+        2
+      )
+    );
+  } finally {
+    await cleanupTrackedVerifyTempDirs();
+  }
 }
 
 main().catch((error) => {

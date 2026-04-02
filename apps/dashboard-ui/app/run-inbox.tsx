@@ -406,6 +406,8 @@ export function RunInboxPanel({
               localizeUiText(
                 item.run_brief?.headline ??
                   item.latest_handoff_bundle?.summary ??
+                  item.latest_adversarial_verification?.failure_reason ??
+                  item.latest_runtime_verification?.failure_reason ??
                   item.current?.blocking_reason ??
                   item.current?.summary ??
                   item.run.description
@@ -415,6 +417,8 @@ export function RunInboxPanel({
             const governanceHeadline = truncateText(
               localizeUiText(
                 item.latest_preflight_evaluation?.failure_reason ??
+                  item.latest_adversarial_verification?.failure_reason ??
+                  item.latest_runtime_verification?.failure_reason ??
                   item.governance?.context_summary.headline ??
                   ""
               ),

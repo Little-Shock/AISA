@@ -1,6 +1,4 @@
 import assert from "node:assert/strict";
-import { mkdtemp } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   createAttempt,
@@ -26,11 +24,16 @@ import {
   saveCurrentDecision,
   saveRun
 } from "../packages/state-store/src/index.ts";
+import {
+  cleanupTrackedVerifyTempDirs,
+  createTrackedVerifyTempDir
+} from "./verify-temp.ts";
 
 async function main(): Promise<void> {
-  const rootDir = await mkdtemp(join(tmpdir(), "aisa-maintenance-plane-"));
-  const workspacePaths = resolveWorkspacePaths(rootDir);
-  await ensureWorkspace(workspacePaths);
+  try {
+    const rootDir = await createTrackedVerifyTempDir("aisa-maintenance-plane-");
+    const workspacePaths = resolveWorkspacePaths(rootDir);
+    await ensureWorkspace(workspacePaths);
 
   const run = createRun({
     title: "Maintenance plane verification",
@@ -161,20 +164,23 @@ async function main(): Promise<void> {
     "maintenance view should surface stale working context without rewriting mainline state"
   );
 
-  console.log(
-    JSON.stringify(
-      {
-        status: "passed",
-        run_id: run.id,
-        attempt_id: attempt.id,
-        blocked_diagnosis: maintenancePlane.blocked_diagnosis.status,
-        maintenance_plane_ref: `runs/${run.id}/artifacts/maintenance-plane.json`,
-        working_context_after_current_move: workingContextOutput?.status ?? null
-      },
-      null,
-      2
-    )
-  );
+    console.log(
+      JSON.stringify(
+        {
+          status: "passed",
+          run_id: run.id,
+          attempt_id: attempt.id,
+          blocked_diagnosis: maintenancePlane.blocked_diagnosis.status,
+          maintenance_plane_ref: `runs/${run.id}/artifacts/maintenance-plane.json`,
+          working_context_after_current_move: workingContextOutput?.status ?? null
+        },
+        null,
+        2
+      )
+    );
+  } finally {
+    await cleanupTrackedVerifyTempDirs();
+  }
 }
 
 main().catch((error) => {

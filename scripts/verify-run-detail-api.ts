@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { mkdir, realpath, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
   createAttempt,
@@ -54,10 +53,15 @@ import {
   SELF_BOOTSTRAP_NEXT_TASK_ACTIVE_ENTRY_SNAPSHOT_FILE_NAME
 } from "../packages/orchestrator/src/index.ts";
 import { CODEX_CLI_EXECUTION_EFFORT_APPLIED_DETAIL } from "../packages/worker-adapters/src/index.ts";
+import {
+  cleanupTrackedVerifyTempDirs,
+  createTrackedVerifyTempDir
+} from "./verify-temp.ts";
 
 async function main(): Promise<void> {
-  const rootDir = await mkdtemp(join(tmpdir(), "aisa-run-detail-api-"));
-  const projectScopeDir = await mkdtemp(join(tmpdir(), "aisa-run-scope-"));
+  try {
+  const rootDir = await createTrackedVerifyTempDir("aisa-run-detail-api-");
+  const projectScopeDir = await createTrackedVerifyTempDir("aisa-run-scope-");
   const projectRoot = join(projectScopeDir, "project-a");
   const selfBootstrapSourceAssetPath = join(
     rootDir,
@@ -626,7 +630,9 @@ async function main(): Promise<void> {
       await realpath(managedExternalRoot)
     );
 
-    const outsideWorkspaceDir = await mkdtemp(join(tmpdir(), "aisa-run-outside-scope-"));
+    const outsideWorkspaceDir = await createTrackedVerifyTempDir(
+      "aisa-run-outside-scope-"
+    );
     const createBlockedRunResponse = await app.inject({
       method: "POST",
       url: "/runs",
@@ -1022,6 +1028,25 @@ async function main(): Promise<void> {
         failure_class: string | null;
       } | null;
       latest_preflight_evaluation_ref: string | null;
+      latest_runtime_verification: {
+        attempt_id: string;
+        status: string;
+        failure_code: string | null;
+        failure_reason: string | null;
+        failure_class: string | null;
+        changed_files: string[];
+      } | null;
+      latest_runtime_verification_ref: string | null;
+      latest_adversarial_verification: {
+        attempt_id: string;
+        status: string;
+        verdict: string | null;
+        failure_code: string | null;
+        failure_reason: string | null;
+        failure_class: string | null;
+        output_refs: string[];
+      } | null;
+      latest_adversarial_verification_ref: string | null;
       latest_handoff_bundle: {
         attempt_id: string;
         summary: string | null;
@@ -1305,6 +1330,27 @@ async function main(): Promise<void> {
     assert.ok(
       payload.latest_preflight_evaluation_ref?.endsWith("artifacts/preflight-evaluation.json")
     );
+    assert.equal(payload.latest_runtime_verification?.attempt_id, attempt.id);
+    assert.equal(payload.latest_runtime_verification?.status, "passed");
+    assert.equal(payload.latest_runtime_verification?.failure_class, null);
+    assert.deepEqual(payload.latest_runtime_verification?.changed_files, [
+      "packages/orchestrator/src/index.ts"
+    ]);
+    assert.ok(
+      payload.latest_runtime_verification_ref?.endsWith("artifacts/runtime-verification.json")
+    );
+    assert.equal(payload.latest_adversarial_verification?.attempt_id, attempt.id);
+    assert.equal(payload.latest_adversarial_verification?.status, "passed");
+    assert.equal(payload.latest_adversarial_verification?.verdict, "pass");
+    assert.equal(payload.latest_adversarial_verification?.failure_class, null);
+    assert.deepEqual(payload.latest_adversarial_verification?.output_refs, [
+      adversarialOutputFile
+    ]);
+    assert.ok(
+      payload.latest_adversarial_verification_ref?.endsWith(
+        "artifacts/adversarial-verification.json"
+      )
+    );
     assert.equal(payload.latest_handoff_bundle?.attempt_id, blockerAttempt.id);
     assert.equal(payload.latest_handoff_bundle?.adversarial_verification, null);
     assert.equal(payload.latest_handoff_bundle?.adversarial_failure_code, null);
@@ -1438,6 +1484,23 @@ async function main(): Promise<void> {
           failure_class: string | null;
         } | null;
         latest_preflight_evaluation_ref: string | null;
+        latest_runtime_verification: {
+          attempt_id: string;
+          status: string;
+          failure_reason: string | null;
+          failure_class: string | null;
+          changed_files: string[];
+        } | null;
+        latest_runtime_verification_ref: string | null;
+        latest_adversarial_verification: {
+          attempt_id: string;
+          status: string;
+          verdict: string | null;
+          failure_reason: string | null;
+          failure_class: string | null;
+          output_refs: string[];
+        } | null;
+        latest_adversarial_verification_ref: string | null;
         latest_handoff_bundle: {
           attempt_id: string;
           summary: string | null;
@@ -1497,6 +1560,27 @@ async function main(): Promise<void> {
     assert.equal(runSummary?.latest_preflight_evaluation?.failure_class, null);
     assert.ok(
       runSummary?.latest_preflight_evaluation_ref?.endsWith("artifacts/preflight-evaluation.json")
+    );
+    assert.equal(runSummary?.latest_runtime_verification?.attempt_id, attempt.id);
+    assert.equal(runSummary?.latest_runtime_verification?.status, "passed");
+    assert.equal(runSummary?.latest_runtime_verification?.failure_class, null);
+    assert.deepEqual(runSummary?.latest_runtime_verification?.changed_files, [
+      "packages/orchestrator/src/index.ts"
+    ]);
+    assert.ok(
+      runSummary?.latest_runtime_verification_ref?.endsWith("artifacts/runtime-verification.json")
+    );
+    assert.equal(runSummary?.latest_adversarial_verification?.attempt_id, attempt.id);
+    assert.equal(runSummary?.latest_adversarial_verification?.status, "passed");
+    assert.equal(runSummary?.latest_adversarial_verification?.verdict, "pass");
+    assert.equal(runSummary?.latest_adversarial_verification?.failure_class, null);
+    assert.deepEqual(runSummary?.latest_adversarial_verification?.output_refs, [
+      adversarialOutputFile
+    ]);
+    assert.ok(
+      runSummary?.latest_adversarial_verification_ref?.endsWith(
+        "artifacts/adversarial-verification.json"
+      )
     );
     assert.equal(runSummary?.latest_handoff_bundle?.attempt_id, blockerAttempt.id);
     assert.equal(
@@ -1588,7 +1672,9 @@ async function main(): Promise<void> {
     await app.close();
   }
 
-  const idleRootDir = await mkdtemp(join(tmpdir(), "aisa-run-detail-api-idle-"));
+  const idleRootDir = await createTrackedVerifyTempDir(
+    "aisa-run-detail-api-idle-"
+  );
   const idleWorkspacePaths = resolveWorkspacePaths(idleRootDir);
   await ensureWorkspace(idleWorkspacePaths);
   const idleRun = createRun({
@@ -1625,6 +1711,9 @@ async function main(): Promise<void> {
     );
   } finally {
     await idleApp.close();
+  }
+  } finally {
+    await cleanupTrackedVerifyTempDirs();
   }
 }
 

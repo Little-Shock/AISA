@@ -124,6 +124,8 @@ export function RunOverviewPanel({
   const maintenancePlane = runDetail.maintenance_plane;
   const failureSignal = runDetail.failure_signal ?? runBrief?.failure_signal ?? null;
   const latestPreflight = runDetail.latest_preflight_evaluation;
+  const latestRuntimeVerification = runDetail.latest_runtime_verification;
+  const latestAdversarialVerification = runDetail.latest_adversarial_verification;
   const latestHandoff = runDetail.latest_handoff_bundle;
   const workingContext = runDetail.working_context;
   const workingContextDegraded = runDetail.working_context_degraded;
@@ -388,6 +390,18 @@ export function RunOverviewPanel({
               `failure ref：${failureSignal?.source_ref ?? "暂无"}`,
               `preflight：${latestPreflight ? statusLabel(latestPreflight.status) : "暂无"}`,
               `preflight ref：${runDetail.latest_preflight_evaluation_ref ?? "暂无"}`,
+              `runtime replay：${
+                latestRuntimeVerification
+                  ? statusLabel(latestRuntimeVerification.status)
+                  : "暂无"
+              }`,
+              `runtime replay ref：${runDetail.latest_runtime_verification_ref ?? "暂无"}`,
+              `adversarial gate：${
+                latestAdversarialVerification
+                  ? statusLabel(latestAdversarialVerification.status)
+                  : "暂无"
+              }`,
+              `adversarial gate ref：${runDetail.latest_adversarial_verification_ref ?? "暂无"}`,
               `handoff：${localizeUiText(latestHandoff?.summary ?? "暂无")}`,
               `handoff ref：${runDetail.latest_handoff_bundle_ref ?? "暂无"}`
             ]}

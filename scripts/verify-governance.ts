@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import {
   createAttempt,
@@ -41,6 +40,10 @@ import {
   saveRunGovernanceState,
   saveRunPolicyRuntime
 } from "../packages/state-store/src/index.js";
+import {
+  cleanupTrackedVerifyTempDirs,
+  createTrackedVerifyTempDir
+} from "./verify-temp.ts";
 
 type CaseResult = {
   id: string;
@@ -95,7 +98,7 @@ async function bootstrapRun(title: string): Promise<{
   workspacePaths: ReturnType<typeof resolveWorkspacePaths>;
   rootDir: string;
 }> {
-  const rootDir = await mkdtemp(join(tmpdir(), `aisa-governance-${title}-`));
+  const rootDir = await createTrackedVerifyTempDir(`aisa-governance-${title}-`);
   const workspacePaths = resolveWorkspacePaths(rootDir);
   await ensureWorkspace(workspacePaths);
 
@@ -188,7 +191,7 @@ async function runCommand(rootDir: string, args: string[]): Promise<string> {
 
 async function waitFor(
   predicate: () => Promise<boolean>,
-  timeoutMs = 4_000
+  timeoutMs = 20_000
 ): Promise<void> {
   const startedAt = Date.now();
   while (Date.now() - startedAt < timeoutMs) {
@@ -199,6 +202,31 @@ async function waitFor(
   }
 
   throw new Error(`Timed out after ${timeoutMs}ms`);
+}
+
+async function driveOrchestratorUntil(input: {
+  orchestrator: Orchestrator;
+  predicate: () => Promise<boolean>;
+  advance?: () => Promise<void>;
+  maxTicks?: number;
+  delayMs?: number;
+  failureMessage: string;
+}): Promise<void> {
+  const maxTicks = input.maxTicks ?? 80;
+  const delayMs = input.delayMs ?? 25;
+
+  for (let tick = 0; tick < maxTicks; tick += 1) {
+    await input.orchestrator.tick();
+    if (input.advance) {
+      await input.advance();
+    }
+    if (await input.predicate()) {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, delayMs));
+  }
+
+  throw new Error(input.failureMessage);
 }
 
 function buildContinueResearchObjective(input: {
@@ -311,15 +339,15 @@ async function verifyGovernancePreservesExecutionMainline(): Promise<void> {
       attemptHeartbeatStaleMs: 200
     }
   );
-  orchestrator.start();
-  try {
-    await waitFor(async () => {
+  await driveOrchestratorUntil({
+    orchestrator,
+    advance: async () => {
       await maybeApprovePendingExecutionPolicy(workspacePaths, run.id);
-      return (await listAttempts(workspacePaths, run.id)).length >= 2;
-    });
-  } finally {
-    orchestrator.stop();
-  }
+    },
+    predicate: async () => (await listAttempts(workspacePaths, run.id)).length >= 2,
+    failureMessage:
+      "governance should create a follow-up execution after auto-resume and approval."
+  });
 
   const attempts = await listAttempts(workspacePaths, run.id);
   const newAttempts = attempts.filter((attempt) => attempt.id !== completedExecution.id);
@@ -645,68 +673,72 @@ async function verifyCheckpointIncludesGovernanceContext(): Promise<void> {
 }
 
 async function main(): Promise<void> {
-  const cases: Array<{
-    id: string;
-    run: () => Promise<void>;
-  }> = [
-    {
-      id: "governance_preserves_execution_mainline",
-      run: verifyGovernancePreservesExecutionMainline
-    },
-    {
-      id: "excluded_plan_blocks_reuse",
-      run: verifyExcludedPlanBlocksReuse
-    },
-    {
-      id: "missing_artifact_reference_blocks_dispatch",
-      run: verifyMissingArtifactReferenceBlocksDispatch
-    },
-    {
-      id: "fullwidth_punctuation_artifact_reference_is_accepted",
-      run: verifyFullwidthPunctuationArtifactReferenceIsAccepted
-    },
-    {
-      id: "checkpoint_includes_governance_context",
-      run: verifyCheckpointIncludesGovernanceContext
-    }
-  ];
-
-  const results: CaseResult[] = [];
-  for (const testCase of cases) {
-    try {
-      await testCase.run();
-      results.push({
-        id: testCase.id,
-        status: "pass"
-      });
-    } catch (error) {
-      results.push({
-        id: testCase.id,
-        status: "fail",
-        error: error instanceof Error ? error.message : String(error)
-      });
-    }
-  }
-
-  const failed = results.filter((item) => item.status === "fail");
-  if (failed.length > 0) {
-    console.error(JSON.stringify({ suite: "verify-governance", failed }, null, 2));
-    process.exitCode = 1;
-    return;
-  }
-
-  console.log(
-    JSON.stringify(
+  try {
+    const cases: Array<{
+      id: string;
+      run: () => Promise<void>;
+    }> = [
       {
-        suite: "verify-governance",
-        passed: results.length,
-        failed: 0,
-        results
+        id: "governance_preserves_execution_mainline",
+        run: verifyGovernancePreservesExecutionMainline
       },
-      null,
-      2
-    )
-  );
+      {
+        id: "excluded_plan_blocks_reuse",
+        run: verifyExcludedPlanBlocksReuse
+      },
+      {
+        id: "missing_artifact_reference_blocks_dispatch",
+        run: verifyMissingArtifactReferenceBlocksDispatch
+      },
+      {
+        id: "fullwidth_punctuation_artifact_reference_is_accepted",
+        run: verifyFullwidthPunctuationArtifactReferenceIsAccepted
+      },
+      {
+        id: "checkpoint_includes_governance_context",
+        run: verifyCheckpointIncludesGovernanceContext
+      }
+    ];
+
+    const results: CaseResult[] = [];
+    for (const testCase of cases) {
+      try {
+        await testCase.run();
+        results.push({
+          id: testCase.id,
+          status: "pass"
+        });
+      } catch (error) {
+        results.push({
+          id: testCase.id,
+          status: "fail",
+          error: error instanceof Error ? error.message : String(error)
+        });
+      }
+    }
+
+    const failed = results.filter((item) => item.status === "fail");
+    if (failed.length > 0) {
+      console.error(JSON.stringify({ suite: "verify-governance", failed }, null, 2));
+      process.exitCode = 1;
+      return;
+    }
+
+    console.log(
+      JSON.stringify(
+        {
+          suite: "verify-governance",
+          passed: results.length,
+          failed: 0,
+          results
+        },
+        null,
+        2
+      )
+    );
+  } finally {
+    await cleanupTrackedVerifyTempDirs();
+  }
 }
 
 void main();

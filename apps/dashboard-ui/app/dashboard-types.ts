@@ -291,6 +291,33 @@ export type RunLatestPreflightEvaluation = {
   created_at: string;
 } | null;
 
+export type RunLatestRuntimeVerification = {
+  run_id: string;
+  attempt_id: string;
+  attempt_type: string;
+  status: string;
+  failure_class: string | null;
+  failure_policy_mode: string | null;
+  failure_code: string | null;
+  failure_reason: string | null;
+  changed_files: string[];
+  created_at: string;
+} | null;
+
+export type RunLatestAdversarialVerification = {
+  run_id: string;
+  attempt_id: string;
+  attempt_type: string;
+  status: string;
+  failure_class: string | null;
+  failure_policy_mode: string | null;
+  verdict: string | null;
+  failure_code: string | null;
+  failure_reason: string | null;
+  output_refs: string[];
+  created_at: string;
+} | null;
+
 export type RunLatestHandoffBundle = {
   run_id: string;
   attempt_id: string;
@@ -343,6 +370,10 @@ export type RunSummaryItem = {
   failure_signal: RunFailureSignal;
   latest_preflight_evaluation: RunLatestPreflightEvaluation;
   latest_preflight_evaluation_ref: string | null;
+  latest_runtime_verification: RunLatestRuntimeVerification;
+  latest_runtime_verification_ref: string | null;
+  latest_adversarial_verification: RunLatestAdversarialVerification;
+  latest_adversarial_verification_ref: string | null;
   latest_handoff_bundle: RunLatestHandoffBundle;
   latest_handoff_bundle_ref: string | null;
   run_brief: RunBrief;
@@ -400,6 +431,10 @@ export type RunDetail = {
   failure_signal: RunFailureSignal;
   latest_preflight_evaluation: RunLatestPreflightEvaluation;
   latest_preflight_evaluation_ref: string | null;
+  latest_runtime_verification: RunLatestRuntimeVerification;
+  latest_runtime_verification_ref: string | null;
+  latest_adversarial_verification: RunLatestAdversarialVerification;
+  latest_adversarial_verification_ref: string | null;
   latest_handoff_bundle: RunLatestHandoffBundle;
   latest_handoff_bundle_ref: string | null;
   run_brief: RunBrief;

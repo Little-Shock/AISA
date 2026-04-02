@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdtemp, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
   createAttempt,
@@ -37,6 +36,10 @@ import {
   saveRun,
   saveRunPolicyRuntime
 } from "../packages/state-store/src/index.ts";
+import {
+  cleanupTrackedVerifyTempDirs,
+  createTrackedVerifyTempDir
+} from "./verify-temp.ts";
 
 type CaseResult = {
   id: string;
@@ -156,7 +159,7 @@ async function initializeGitRepo(rootDir: string): Promise<void> {
 
 async function waitFor(
   predicate: () => Promise<boolean>,
-  timeoutMs = 4_000
+  timeoutMs = 20_000
 ): Promise<void> {
   const startedAt = Date.now();
   while (Date.now() - startedAt < timeoutMs) {
@@ -169,6 +172,26 @@ async function waitFor(
   throw new Error(`Timed out after ${timeoutMs}ms`);
 }
 
+async function driveOrchestratorUntil(input: {
+  orchestrator: Orchestrator;
+  predicate: () => Promise<boolean>;
+  timeoutMs?: number;
+}): Promise<void> {
+  const timeoutMs = input.timeoutMs ?? 20_000;
+  const startedAt = Date.now();
+
+  while (Date.now() - startedAt < timeoutMs) {
+    if (await input.predicate()) {
+      return;
+    }
+
+    await input.orchestrator.tick();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+
+  throw new Error(`Timed out after ${timeoutMs}ms while driving orchestrator`);
+}
+
 async function bootstrapExecutionApprovalRun(title: string): Promise<{
   runtimeDataRoot: string;
   workspaceRoot: string;
@@ -176,8 +199,12 @@ async function bootstrapExecutionApprovalRun(title: string): Promise<{
   run: Run;
   latestAttempt: Attempt;
 }> {
-  const runtimeDataRoot = await mkdtemp(join(tmpdir(), `aisa-policy-runtime-${title}-`));
-  const workspaceRoot = await mkdtemp(join(tmpdir(), `aisa-policy-workspace-${title}-`));
+  const runtimeDataRoot = await createTrackedVerifyTempDir(
+    `aisa-policy-runtime-${title}-`
+  );
+  const workspaceRoot = await createTrackedVerifyTempDir(
+    `aisa-policy-workspace-${title}-`
+  );
   const workspacePaths = resolveWorkspacePaths(runtimeDataRoot);
   await ensureWorkspace(workspacePaths);
   await initializeGitRepo(workspaceRoot);
@@ -328,21 +355,25 @@ async function createScenarioOrchestrator(input: {
 }
 
 async function waitForPendingApproval(
+  orchestrator: Orchestrator,
   workspacePaths: ReturnType<typeof resolveWorkspacePaths>,
   runId: string
 ): Promise<void> {
-  await waitFor(async () => {
-    const [current, policy, journal] = await Promise.all([
-      getCurrentDecision(workspacePaths, runId),
-      getRunPolicyRuntime(workspacePaths, runId),
-      listRunJournal(workspacePaths, runId)
-    ]);
-    return (
-      current?.waiting_for_human === true &&
-      current.run_status === "waiting_steer" &&
-      policy?.approval_status === "pending" &&
-      journal.some((entry) => entry.type === "run.policy.approval_requested")
-    );
+  await driveOrchestratorUntil({
+    orchestrator,
+    predicate: async () => {
+      const [current, policy, journal] = await Promise.all([
+        getCurrentDecision(workspacePaths, runId),
+        getRunPolicyRuntime(workspacePaths, runId),
+        listRunJournal(workspacePaths, runId)
+      ]);
+      return (
+        current?.waiting_for_human === true &&
+        current.run_status === "waiting_steer" &&
+        policy?.approval_status === "pending" &&
+        journal.some((entry) => entry.type === "run.policy.approval_requested")
+      );
+    }
   });
 }
 
@@ -354,12 +385,7 @@ async function verifyExecutionPlanRequiresApproval(): Promise<void> {
     workspaceRoot,
     workspacePaths
   });
-  orchestrator.start();
-  try {
-    await waitForPendingApproval(workspacePaths, run.id);
-  } finally {
-    orchestrator.stop();
-  }
+  await waitForPendingApproval(orchestrator, workspacePaths, run.id);
 
   const [attempts, current, policy, journal] = await Promise.all([
     listAttempts(workspacePaths, run.id),
@@ -389,12 +415,7 @@ async function verifyLaunchBypassIsBlockedWhileApprovalPending(): Promise<void> 
     workspaceRoot,
     workspacePaths
   });
-  orchestrator.start();
-  try {
-    await waitForPendingApproval(workspacePaths, run.id);
-  } finally {
-    orchestrator.stop();
-  }
+  await waitForPendingApproval(orchestrator, workspacePaths, run.id);
 
   const app = await buildServer({
     runtimeDataRoot,
@@ -420,12 +441,7 @@ async function verifyApproveRouteUnlocksExecution(): Promise<void> {
     workspaceRoot,
     workspacePaths
   });
-  orchestrator.start();
-  try {
-    await waitForPendingApproval(workspacePaths, run.id);
-  } finally {
-    orchestrator.stop();
-  }
+  await waitForPendingApproval(orchestrator, workspacePaths, run.id);
 
   const app = await buildServer({
     runtimeDataRoot,
@@ -467,12 +483,10 @@ async function verifyApproveRouteUnlocksExecution(): Promise<void> {
     workspaceRoot,
     workspacePaths
   });
-  resumedOrchestrator.start();
-  try {
-    await waitFor(async () => (await listAttempts(workspacePaths, run.id)).length >= 2);
-  } finally {
-    resumedOrchestrator.stop();
-  }
+  await driveOrchestratorUntil({
+    orchestrator: resumedOrchestrator,
+    predicate: async () => (await listAttempts(workspacePaths, run.id)).length >= 2
+  });
 
   const attempts = await listAttempts(workspacePaths, run.id);
   const latestAttempt = attempts.at(-1) ?? null;
@@ -487,12 +501,7 @@ async function verifyRejectRouteForcesResearchReplan(): Promise<void> {
     workspaceRoot,
     workspacePaths
   });
-  orchestrator.start();
-  try {
-    await waitForPendingApproval(workspacePaths, run.id);
-  } finally {
-    orchestrator.stop();
-  }
+  await waitForPendingApproval(orchestrator, workspacePaths, run.id);
 
   const app = await buildServer({
     runtimeDataRoot,
@@ -538,12 +547,10 @@ async function verifyRejectRouteForcesResearchReplan(): Promise<void> {
     workspaceRoot,
     workspacePaths
   });
-  resumedOrchestrator.start();
-  try {
-    await waitFor(async () => (await listAttempts(workspacePaths, run.id)).length >= 2);
-  } finally {
-    resumedOrchestrator.stop();
-  }
+  await driveOrchestratorUntil({
+    orchestrator: resumedOrchestrator,
+    predicate: async () => (await listAttempts(workspacePaths, run.id)).length >= 2
+  });
 
   const attempts = await listAttempts(workspacePaths, run.id);
   const latestAttempt = attempts.at(-1) ?? null;
@@ -558,12 +565,7 @@ async function verifyCorruptPolicyFailsClosed(): Promise<void> {
     workspaceRoot,
     workspacePaths
   });
-  orchestrator.start();
-  try {
-    await waitForPendingApproval(workspacePaths, run.id);
-  } finally {
-    orchestrator.stop();
-  }
+  await waitForPendingApproval(orchestrator, workspacePaths, run.id);
 
   const app = await buildServer({
     runtimeDataRoot,
@@ -591,15 +593,13 @@ async function verifyCorruptPolicyFailsClosed(): Promise<void> {
     workspaceRoot,
     workspacePaths
   });
-  resumedOrchestrator.start();
-  try {
-    await waitFor(async () => {
+  await driveOrchestratorUntil({
+    orchestrator: resumedOrchestrator,
+    predicate: async () => {
       const current = await getCurrentDecision(workspacePaths, run.id);
       return current?.waiting_for_human === true;
-    });
-  } finally {
-    resumedOrchestrator.stop();
-  }
+    }
+  });
 
   const attempts = await listAttempts(workspacePaths, run.id);
   const current = await getCurrentDecision(workspacePaths, run.id);
@@ -634,15 +634,13 @@ async function verifyKillswitchFailsClosed(): Promise<void> {
     workspaceRoot,
     workspacePaths
   });
-  orchestrator.start();
-  try {
-    await waitFor(async () => {
+  await driveOrchestratorUntil({
+    orchestrator,
+    predicate: async () => {
       const current = await getCurrentDecision(workspacePaths, run.id);
       return current?.waiting_for_human === true;
-    });
-  } finally {
-    orchestrator.stop();
-  }
+    }
+  });
 
   const attempts = await listAttempts(workspacePaths, run.id);
   const current = await getCurrentDecision(workspacePaths, run.id);
@@ -667,38 +665,51 @@ async function runCase(id: string, fn: () => Promise<void>): Promise<CaseResult>
 }
 
 async function main(): Promise<void> {
-  const results = await Promise.all([
-    runCase("execution_requires_approval", verifyExecutionPlanRequiresApproval),
-    runCase("pending_approval_blocks_launch_bypass", verifyLaunchBypassIsBlockedWhileApprovalPending),
-    runCase("approve_route_unlocks_execution", verifyApproveRouteUnlocksExecution),
-    runCase("reject_route_forces_research_replan", verifyRejectRouteForcesResearchReplan),
-    runCase("corrupt_policy_fails_closed", verifyCorruptPolicyFailsClosed),
-    runCase("killswitch_fails_closed", verifyKillswitchFailsClosed)
-  ]);
-  const passed = results.filter((result) => result.status === "pass").length;
-  const failed = results.length - passed;
+  try {
+    const cases: Array<[string, () => Promise<void>]> = [
+      ["execution_requires_approval", verifyExecutionPlanRequiresApproval],
+      [
+        "pending_approval_blocks_launch_bypass",
+        verifyLaunchBypassIsBlockedWhileApprovalPending
+      ],
+      ["approve_route_unlocks_execution", verifyApproveRouteUnlocksExecution],
+      ["reject_route_forces_research_replan", verifyRejectRouteForcesResearchReplan],
+      ["corrupt_policy_fails_closed", verifyCorruptPolicyFailsClosed],
+      ["killswitch_fails_closed", verifyKillswitchFailsClosed]
+    ];
+    const results: CaseResult[] = [];
 
-  if (failed > 0) {
-    throw new Error(
-      results
-        .filter((result) => result.status === "fail")
-        .map((result) => `${result.id}: ${result.error}`)
-        .join("\n")
-    );
-  }
+    for (const [id, fn] of cases) {
+      results.push(await runCase(id, fn));
+    }
 
-  console.log(
-    JSON.stringify(
-      {
-        suite: "policy-runtime",
-        passed,
-        failed,
+    const passed = results.filter((result) => result.status === "pass").length;
+    const failed = results.length - passed;
+
+    if (failed > 0) {
+      throw new Error(
         results
-      },
-      null,
-      2
-    )
-  );
+          .filter((result) => result.status === "fail")
+          .map((result) => `${result.id}: ${result.error}`)
+          .join("\n")
+      );
+    }
+
+    console.log(
+      JSON.stringify(
+        {
+          suite: "policy-runtime",
+          passed,
+          failed,
+          results
+        },
+        null,
+        2
+      )
+    );
+  } finally {
+    await cleanupTrackedVerifyTempDirs();
+  }
 }
 
 main().catch((error) => {

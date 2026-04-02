@@ -1,5 +1,7 @@
 import {
   createRunFailureSignal,
+  type RunFailureClass,
+  type RunFailurePolicyMode,
   type Attempt,
   type AttemptAdversarialVerification,
   type AttemptHandoffBundle,
@@ -9,6 +11,78 @@ import {
   type RunFailureSignal,
   type RunWorkingContextDegradedState
 } from "@autoresearch/domain";
+
+export type RunFailurePolicyEntry = {
+  failure_class: RunFailureClass;
+  policy_mode: RunFailurePolicyMode;
+  priority: number;
+  summary: string;
+};
+
+const RUN_FAILURE_POLICY_MATRIX: ReadonlyArray<RunFailurePolicyEntry> = [
+  {
+    failure_class: "handoff_incomplete",
+    policy_mode: "fail_closed",
+    priority: 10,
+    summary: "Settled attempts without a handoff bundle must stop the run."
+  },
+  {
+    failure_class: "adversarial_verification_failed",
+    policy_mode: "fail_closed",
+    priority: 20,
+    summary: "Failed postflight adversarial verification must stop automatic progress."
+  },
+  {
+    failure_class: "runtime_verification_failed",
+    policy_mode: "fail_closed",
+    priority: 30,
+    summary: "Failed deterministic replay must stop automatic progress."
+  },
+  {
+    failure_class: "preflight_blocked",
+    policy_mode: "fail_closed",
+    priority: 40,
+    summary: "Preflight blockers must fail closed before dispatch."
+  },
+  {
+    failure_class: "working_context_degraded",
+    policy_mode: "soft_degrade",
+    priority: 50,
+    summary: "Working context degradation can warn without rewriting mainline truth."
+  },
+  {
+    failure_class: "run_brief_degraded",
+    policy_mode: "soft_degrade",
+    priority: 60,
+    summary: "Run brief degradation can warn without rewriting mainline truth."
+  }
+];
+
+function getFailurePolicyEntry(failureClass: RunFailureClass): RunFailurePolicyEntry {
+  const entry = RUN_FAILURE_POLICY_MATRIX.find(
+    (candidate) => candidate.failure_class === failureClass
+  );
+  if (!entry) {
+    throw new Error(`Unknown failure class in policy matrix: ${failureClass}`);
+  }
+
+  return entry;
+}
+
+export function getFailurePolicyMatrix(): ReadonlyArray<RunFailurePolicyEntry> {
+  return RUN_FAILURE_POLICY_MATRIX;
+}
+
+function normalizePolicyMode(failureClass: RunFailureClass): RunFailurePolicyMode {
+  return getFailurePolicyEntry(failureClass).policy_mode;
+}
+
+function normalizeFailureSignal(signal: RunFailureSignal): RunFailureSignal {
+  return createRunFailureSignal({
+    ...signal,
+    policy_mode: normalizePolicyMode(signal.failure_class)
+  });
+}
 
 export function deriveFailureSignalFromPreflight(input: {
   preflight: AttemptPreflightEvaluation | null;
@@ -20,7 +94,7 @@ export function deriveFailureSignalFromPreflight(input: {
 
   return createRunFailureSignal({
     failure_class: input.preflight.failure_class ?? "preflight_blocked",
-    policy_mode: input.preflight.failure_policy_mode ?? "fail_closed",
+    policy_mode: normalizePolicyMode(input.preflight.failure_class ?? "preflight_blocked"),
     source_kind: "preflight_evaluation",
     source_ref: input.sourceRef ?? null,
     failure_code: input.preflight.failure_code ?? null,
@@ -41,7 +115,9 @@ export function deriveFailureSignalFromRuntimeVerification(input: {
   return createRunFailureSignal({
     failure_class:
       input.verification.failure_class ?? "runtime_verification_failed",
-    policy_mode: input.verification.failure_policy_mode ?? "fail_closed",
+    policy_mode: normalizePolicyMode(
+      input.verification.failure_class ?? "runtime_verification_failed"
+    ),
     source_kind: "runtime_verification",
     source_ref: input.sourceRef ?? null,
     failure_code: input.verification.failure_code ?? null,
@@ -62,7 +138,9 @@ export function deriveFailureSignalFromAdversarialVerification(input: {
   return createRunFailureSignal({
     failure_class:
       input.verification.failure_class ?? "adversarial_verification_failed",
-    policy_mode: input.verification.failure_policy_mode ?? "fail_closed",
+    policy_mode: normalizePolicyMode(
+      input.verification.failure_class ?? "adversarial_verification_failed"
+    ),
     source_kind: "adversarial_verification",
     source_ref: input.sourceRef ?? null,
     failure_code: input.verification.failure_code ?? null,
@@ -82,10 +160,12 @@ export function deriveFailureSignalFromHandoffBundle(input: {
   }
 
   if (input.handoff.failure_signal) {
-    return createRunFailureSignal({
-      ...input.handoff.failure_signal,
-      source_ref: input.handoff.failure_signal.source_ref ?? input.sourceRef ?? null
-    });
+    return normalizeFailureSignal(
+      createRunFailureSignal({
+        ...input.handoff.failure_signal,
+        source_ref: input.handoff.failure_signal.source_ref ?? input.sourceRef ?? null
+      })
+    );
   }
 
   if (!input.handoff.failure_class) {
@@ -94,7 +174,7 @@ export function deriveFailureSignalFromHandoffBundle(input: {
 
   return createRunFailureSignal({
     failure_class: input.handoff.failure_class,
-    policy_mode: input.handoff.failure_policy_mode ?? "fail_closed",
+    policy_mode: normalizePolicyMode(input.handoff.failure_class),
     source_kind: "handoff_bundle",
     source_ref: input.sourceRef ?? null,
     failure_code:
@@ -127,7 +207,7 @@ export function deriveFailureSignalFromHandoffGap(input: {
 
   return createRunFailureSignal({
     failure_class: "handoff_incomplete",
-    policy_mode: "fail_closed",
+    policy_mode: normalizePolicyMode("handoff_incomplete"),
     source_kind: "handoff_bundle",
     source_ref: input.sourceRef ?? null,
     summary: `Attempt ${input.latestAttempt.id} settled without a handoff bundle.`
@@ -144,7 +224,7 @@ export function deriveFailureSignalFromWorkingContext(input: {
 
   return createRunFailureSignal({
     failure_class: "working_context_degraded",
-    policy_mode: "soft_degrade",
+    policy_mode: normalizePolicyMode("working_context_degraded"),
     source_kind: "working_context",
     source_ref: input.sourceRef ?? null,
     failure_code: input.degraded.reason_code ?? null,
@@ -170,11 +250,14 @@ export function annotateRuntimeVerificationFailure(
 export function pickPrimaryFailureSignal(
   ...signals: Array<RunFailureSignal | null | undefined>
 ): RunFailureSignal | null {
-  for (const signal of signals) {
-    if (signal) {
-      return signal;
-    }
-  }
+  const normalizedSignals = signals
+    .filter((signal): signal is RunFailureSignal => signal !== null && signal !== undefined)
+    .map((signal) => normalizeFailureSignal(signal))
+    .sort(
+      (left, right) =>
+        getFailurePolicyEntry(left.failure_class).priority -
+        getFailurePolicyEntry(right.failure_class).priority
+    );
 
-  return null;
+  return normalizedSignals[0] ?? null;
 }

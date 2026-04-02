@@ -3,12 +3,10 @@ import { spawn } from "node:child_process";
 import {
   access,
   mkdir,
-  mkdtemp,
   readFile,
   realpath,
   writeFile
 } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   createAttempt,
@@ -42,6 +40,10 @@ import {
   saveRun
 } from "../packages/state-store/src/index.ts";
 import { driveRun } from "./drive-run.ts";
+import {
+  cleanupTrackedVerifyTempDirs,
+  createTrackedVerifyTempDir
+} from "./verify-temp.ts";
 
 const REVIEWER_CONFIG_ENV = "AISA_REVIEWERS_JSON";
 const SYNTHESIZER_CONFIG_ENV = "AISA_REVIEW_SYNTHESIZER_JSON";
@@ -191,6 +193,7 @@ async function main(): Promise<void> {
       )
     );
   } finally {
+    await cleanupTrackedVerifyTempDirs();
     restoreEnv(REVIEWER_CONFIG_ENV, previousReviewers);
     restoreEnv(SYNTHESIZER_CONFIG_ENV, previousSynthesizer);
   }
@@ -745,7 +748,7 @@ async function createRuntimeLaneFixture(prefix: string): Promise<{
   attemptWorktreeRoot: string;
   runtimeLayout: ReturnType<typeof resolveRuntimeLayout>;
 }> {
-  const baseDir = await mkdtemp(join(tmpdir(), prefix));
+  const baseDir = await createTrackedVerifyTempDir(prefix);
   const seedRepoRoot = join(baseDir, "seed-repo");
   const devRepoRoot = join(baseDir, "dev-repo");
   const runtimeRepoRoot = join(baseDir, "runtime-repo");

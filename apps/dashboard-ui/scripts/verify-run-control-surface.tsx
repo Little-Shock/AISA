@@ -1,6 +1,4 @@
 import assert from "node:assert/strict";
-import { mkdtemp } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -10,25 +8,34 @@ import type { RunDetail, RunSummaryItem } from "../app/dashboard-types";
 import { RunOverviewPanel, RunPolicyPanel } from "../app/run-detail-panels";
 import { RunInboxPanel } from "../app/run-inbox";
 import { seedWorkingContextDashboardFixture } from "../../../scripts/seed-working-context-dashboard-fixture.ts";
+import {
+  cleanupTrackedVerifyTempDirs,
+  createTrackedVerifyTempDir
+} from "../../../scripts/verify-temp.ts";
 
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 async function main(): Promise<void> {
-  const runtimeDataRoot = await mkdtemp(join(tmpdir(), "aisa-dashboard-control-surface-"));
-  const workspaceRoot = await mkdtemp(join(tmpdir(), "aisa-dashboard-control-workspace-"));
-  const fixture = await seedWorkingContextDashboardFixture({
-    runtimeDataRoot,
-    workspaceRoot
-  });
-  const app = await buildServer({
-    runtimeDataRoot,
-    workspaceRoot,
-    startOrchestrator: false
-  });
-
   try {
+    const runtimeDataRoot = await createTrackedVerifyTempDir(
+      "aisa-dashboard-control-surface-"
+    );
+    const workspaceRoot = await createTrackedVerifyTempDir(
+      "aisa-dashboard-control-workspace-"
+    );
+    const fixture = await seedWorkingContextDashboardFixture({
+      runtimeDataRoot,
+      workspaceRoot
+    });
+    const app = await buildServer({
+      runtimeDataRoot,
+      workspaceRoot,
+      startOrchestrator: false
+    });
+
+    try {
     const detailResponse = await app.inject({
       method: "GET",
       url: `/runs/${fixture.run_id}`
@@ -71,6 +78,14 @@ async function main(): Promise<void> {
       runDetail.latest_preflight_evaluation?.failure_class,
       fixture.expected_failure_class
     );
+    assert.equal(
+      runDetail.latest_runtime_verification?.status,
+      fixture.expected_latest_runtime_status
+    );
+    assert.equal(
+      runDetail.latest_adversarial_verification?.status,
+      fixture.expected_latest_adversarial_status
+    );
     assert.equal(runDetail.latest_handoff_bundle?.summary, fixture.expected_handoff_summary);
     assert.equal(
       runDetail.latest_handoff_bundle?.failure_class,
@@ -95,6 +110,14 @@ async function main(): Promise<void> {
     );
     assert.equal(selectedRun?.task_focus, fixture.expected_task_focus);
     assert.equal(selectedRun?.failure_signal?.failure_class, fixture.expected_failure_class);
+    assert.equal(
+      selectedRun?.latest_runtime_verification?.status,
+      fixture.expected_latest_runtime_status
+    );
+    assert.equal(
+      selectedRun?.latest_adversarial_verification?.status,
+      fixture.expected_latest_adversarial_status
+    );
     assert.equal(selectedRun?.maintenance_plane?.blocked_diagnosis.status, "attention");
     assert.equal(
       selectedRun?.policy_runtime?.approval_status,
@@ -141,6 +164,8 @@ async function main(): Promise<void> {
     );
     assert.match(overviewMarkup, /统一失败信号/);
     assert.match(overviewMarkup, /preflight_blocked/);
+    assert.match(overviewMarkup, /runtime replay：通过/);
+    assert.match(overviewMarkup, /adversarial gate：通过/);
     assert.match(overviewMarkup, /控制面真相/);
     assert.match(overviewMarkup, /维护平面输出/);
     assert.match(overviewMarkup, /信号来源/);
@@ -202,8 +227,11 @@ async function main(): Promise<void> {
         2
       )
     );
+    } finally {
+      await app.close();
+    }
   } finally {
-    await app.close();
+    await cleanupTrackedVerifyTempDirs();
   }
 }
 
