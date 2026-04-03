@@ -20,7 +20,7 @@ const fixtureRunDetail: RunDetail = {
     workspace_root: "/tmp/aisa-fixture",
     owner_id: "fixture-owner",
     harness_profile: {
-      version: 2,
+      version: 3,
       execution: {
         effort: "medium",
         default_verifier_kit: "repo"
@@ -30,6 +30,17 @@ const fixtureRunDetail: RunDetail = {
       },
       synthesizer: {
         effort: "medium"
+      },
+      gates: {
+        preflight_review: {
+          mode: "required"
+        },
+        deterministic_runtime: {
+          mode: "required"
+        },
+        postflight_adversarial: {
+          mode: "required"
+        }
       },
       slots: {
         research_or_planning: {
@@ -93,6 +104,41 @@ const fixtureRunDetail: RunDetail = {
     summary: null
   },
   run_health: null,
+  harness_gates: {
+    preflight_review: {
+      gate: "preflight_review",
+      title: "Preflight Gate",
+      mode: "required",
+      default_mode: "required",
+      phase: "dispatch",
+      enforced: true,
+      source: "run.harness_profile.gates.preflight_review.mode",
+      detail: "Shadow dispatch gate before execution.",
+      artifact_ref: "artifacts/preflight-evaluation.json"
+    },
+    deterministic_runtime: {
+      gate: "deterministic_runtime",
+      title: "Deterministic Runtime Gate",
+      mode: "required",
+      default_mode: "required",
+      phase: "runtime",
+      enforced: true,
+      source: "run.harness_profile.gates.deterministic_runtime.mode",
+      detail: "Replay locked deterministic verification after execution.",
+      artifact_ref: "artifacts/runtime-verification.json"
+    },
+    postflight_adversarial: {
+      gate: "postflight_adversarial",
+      title: "Postflight Adversarial Gate",
+      mode: "required",
+      default_mode: "required",
+      phase: "postflight",
+      enforced: true,
+      source: "run.harness_profile.gates.postflight_adversarial.mode",
+      detail: "Read-only adversarial gate after deterministic replay.",
+      artifact_ref: "artifacts/adversarial-verification.json"
+    }
+  },
   harness_slots: {
     research_or_planning: {
       slot: "research_or_planning",

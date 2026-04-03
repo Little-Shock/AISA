@@ -7,6 +7,7 @@ import {
   createAttemptContract,
   createCurrentDecision,
   createRun,
+  createRunAutomationControl,
   createRunJournalEntry,
   type Attempt,
   type Run,
@@ -32,7 +33,8 @@ import {
   saveAttempt,
   saveAttemptContract,
   saveCurrentDecision,
-  saveRun
+  saveRun,
+  saveRunAutomationControl
 } from "../packages/state-store/src/index.ts";
 import {
   cleanupTrackedVerifyTempDirs,
@@ -237,8 +239,19 @@ async function main(): Promise<void> {
       await wait(30);
     }
     assert.ok(activeWorkingContext, "working context should exist while the attempt is running");
+    assert.equal(activeWorkingContext.version, 1);
     assert.equal(activeWorkingContext.source_attempt_id, attempt.id);
     assert.equal(activeWorkingContext.current_focus, attempt.objective);
+    assert.ok(activeWorkingContext.source_snapshot.current.ref?.endsWith("current.json"));
+    assert.equal(
+      activeWorkingContext.source_snapshot.latest_attempt.attempt_id,
+      attempt.id
+    );
+    assert.ok(
+      activeWorkingContext.source_snapshot.latest_attempt.ref?.endsWith(
+        `/attempts/${attempt.id}/meta.json`
+      )
+    );
     assert.ok(
       activeWorkingContext.active_task_refs.some((task) => task.task_id === attempt.id),
       "running working context should point at the active attempt"
@@ -276,6 +289,8 @@ async function main(): Promise<void> {
 
     const healthyView = await readRunWorkingContextView(workspacePaths, run.id);
     assert.equal(healthyView.working_context_degraded.is_degraded, false);
+    assert.equal(healthyView.working_context?.version, 1);
+    assert.ok(healthyView.working_context?.source_snapshot.current.ref?.endsWith("current.json"));
     assert.ok(healthyView.working_context_ref?.endsWith("working-context.json"));
 
     const creationRefreshRun = createRun({
@@ -353,6 +368,53 @@ async function main(): Promise<void> {
     const staleView = await readRunWorkingContextView(workspacePaths, run.id);
     assert.equal(staleView.working_context_degraded.is_degraded, true);
     assert.equal(staleView.working_context_degraded.reason_code, "context_stale");
+    assert.equal(staleView.working_context?.version, 1);
+    assert.ok(staleView.working_context?.source_snapshot.current.ref?.endsWith("current.json"));
+    assert.ok(
+      staleView.working_context_degraded.summary?.includes(`runs/${run.id}/current.json`)
+    );
+
+    const automationStaleRun = createRun({
+      title: "Automation change should stale working context",
+      description: "A later automation truth change must mark the snapshot stale explicitly.",
+      success_criteria: ["Point at automation.json when automation outruns the snapshot."],
+      constraints: [],
+      owner_id: "test-owner",
+      workspace_root: rootDir
+    });
+    await saveRun(workspacePaths, automationStaleRun);
+    await saveCurrentDecision(
+      workspacePaths,
+      createCurrentDecision({
+        run_id: automationStaleRun.id,
+        run_status: "running",
+        summary: "Baseline working context snapshot is healthy."
+      })
+    );
+    await refreshRunOperatorSurface(workspacePaths, automationStaleRun.id);
+    await saveRunAutomationControl(
+      workspacePaths,
+      createRunAutomationControl({
+        run_id: automationStaleRun.id,
+        mode: "manual_only",
+        reason_code: "manual_recovery",
+        reason: "Automation changed after the last working context snapshot."
+      })
+    );
+    const automationStaleView = await readRunWorkingContextView(
+      workspacePaths,
+      automationStaleRun.id
+    );
+    assert.equal(automationStaleView.working_context_degraded.is_degraded, true);
+    assert.equal(
+      automationStaleView.working_context_degraded.reason_code,
+      "context_stale"
+    );
+    assert.ok(
+      automationStaleView.working_context_degraded.summary?.includes(
+        `runs/${automationStaleRun.id}/automation.json`
+      )
+    );
 
     const writeFailedRun = createRun({
       title: "Write failed working context verification",

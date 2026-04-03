@@ -63,14 +63,49 @@ async function main(): Promise<void> {
       runDetail.working_context_degraded.reason_code,
       fixture.expected_working_context_reason
     );
+    assert.equal(runDetail.working_context?.version, 1);
+    assert.ok(runDetail.working_context?.source_snapshot.current.ref?.endsWith("current.json"));
+    assert.ok(
+      runDetail.working_context?.source_snapshot.automation.ref?.endsWith("automation.json")
+    );
+    assert.ok(
+      runDetail.working_context?.source_snapshot.latest_attempt.ref?.endsWith(
+        `/attempts/${fixture.attempt_id}/meta.json`
+      )
+    );
+    assert.equal(
+      runDetail.working_context?.source_snapshot.latest_attempt.attempt_id,
+      fixture.attempt_id
+    );
     assert.equal(runDetail.automation?.mode, fixture.expected_automation_mode);
+    assert.equal(runDetail.run.harness_profile.version, 3);
     assert.equal(
       runDetail.run.harness_profile.execution.default_verifier_kit,
       fixture.expected_verifier_kit
     );
+    assert.equal(runDetail.run.harness_profile.gates.preflight_review.mode, "required");
+    assert.equal(
+      runDetail.run.harness_profile.gates.deterministic_runtime.mode,
+      "required"
+    );
+    assert.equal(
+      runDetail.run.harness_profile.gates.postflight_adversarial.mode,
+      "required"
+    );
     assert.equal(
       runDetail.run.harness_profile.slots.execution.binding,
       "codex_cli_execution_worker"
+    );
+    assert.equal(runDetail.harness_gates.preflight_review.mode, "required");
+    assert.equal(runDetail.harness_gates.preflight_review.enforced, true);
+    assert.equal(runDetail.harness_gates.preflight_review.phase, "dispatch");
+    assert.equal(runDetail.harness_gates.deterministic_runtime.mode, "required");
+    assert.equal(runDetail.harness_gates.deterministic_runtime.phase, "runtime");
+    assert.equal(runDetail.harness_gates.postflight_adversarial.mode, "required");
+    assert.equal(runDetail.harness_gates.postflight_adversarial.enforced, true);
+    assert.equal(
+      runDetail.harness_gates.postflight_adversarial.artifact_ref,
+      "artifacts/adversarial-verification.json"
     );
     assert.equal(runDetail.harness_slots.execution.binding, "codex_cli_execution_worker");
     assert.equal(runDetail.harness_slots.execution.expected_binding, "codex_cli_execution_worker");
@@ -203,6 +238,9 @@ async function main(): Promise<void> {
       selectedRun?.harness_slots.execution.default_verifier_kit,
       fixture.expected_verifier_kit
     );
+    assert.equal(selectedRun?.harness_gates.preflight_review.mode, "required");
+    assert.equal(selectedRun?.harness_gates.deterministic_runtime.enforced, true);
+    assert.equal(selectedRun?.harness_gates.postflight_adversarial.phase, "postflight");
     assert.equal(selectedRun?.harness_slots.execution.binding_status, "aligned");
     assert.equal(
       selectedRun?.harness_slots.final_synthesis.permission_boundary,
@@ -273,6 +311,11 @@ async function main(): Promise<void> {
     assert.match(overviewMarkup, /信号来源/);
     assert.match(overviewMarkup, /建议先读/);
     assert.match(overviewMarkup, /执行审批待处理/);
+    assert.match(overviewMarkup, /现场版本：v1/);
+    assert.match(overviewMarkup, /现场来源水位/);
+    assert.match(overviewMarkup, /current：.*current\.json/);
+    assert.match(overviewMarkup, /automation：.*automation\.json/);
+    assert.match(overviewMarkup, /latest attempt：.*meta\.json/);
 
     const policyMarkup = renderToStaticMarkup(
       <RunPolicyPanel
@@ -295,6 +338,10 @@ async function main(): Promise<void> {
     assert.match(policyMarkup, /开启 Killswitch/);
     assert.match(policyMarkup, /清除 Killswitch/);
     assert.match(policyMarkup, /Harness Profile/);
+    assert.match(policyMarkup, /Preflight Gate/);
+    assert.match(policyMarkup, /Deterministic Runtime Gate/);
+    assert.match(policyMarkup, /Postflight Adversarial Gate/);
+    assert.match(policyMarkup, /postflight adversarial gate：硬门/);
     assert.match(policyMarkup, /待批执行契约/);
     assert.match(policyMarkup, /最近策略活动/);
     assert.match(

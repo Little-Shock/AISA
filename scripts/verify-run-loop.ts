@@ -1903,8 +1903,11 @@ async function assertExplicitPnpmVerificationPlanNeedsLocalNodeModules(): Promis
 
 async function assertRunHarnessPolicyBundleDefaults(): Promise<void> {
   const defaultProfile = createDefaultRunHarnessProfile();
-  assert.equal(defaultProfile.version, 2);
+  assert.equal(defaultProfile.version, 3);
   assert.equal(defaultProfile.execution.default_verifier_kit, "repo");
+  assert.equal(defaultProfile.gates.preflight_review.mode, "required");
+  assert.equal(defaultProfile.gates.deterministic_runtime.mode, "required");
+  assert.equal(defaultProfile.gates.postflight_adversarial.mode, "required");
   assert.equal(
     defaultProfile.slots.research_or_planning.binding,
     "codex_cli_research_worker"
@@ -1943,6 +1946,7 @@ async function assertRunHarnessPolicyBundleDefaults(): Promise<void> {
     60_000
   );
   const slots = orchestrator.describeRunHarnessSlots(configuredRun);
+  const gates = orchestrator.describeRunHarnessGates(configuredRun);
 
   assert.equal(slots.research_or_planning.expected_binding, "codex_cli_research_worker");
   assert.equal(slots.research_or_planning.binding_status, "aligned");
@@ -1980,6 +1984,21 @@ async function assertRunHarnessPolicyBundleDefaults(): Promise<void> {
     "artifacts/handoff_bundle.json"
   ]);
   assert.equal(slots.final_synthesis.failure_semantics, "fail_closed");
+  assert.equal(gates.preflight_review.mode, "required");
+  assert.equal(gates.preflight_review.enforced, true);
+  assert.equal(gates.preflight_review.source, "run.harness_profile.gates.preflight_review.mode");
+  assert.equal(gates.deterministic_runtime.mode, "required");
+  assert.equal(gates.deterministic_runtime.enforced, true);
+  assert.equal(
+    gates.deterministic_runtime.source,
+    "run.harness_profile.gates.deterministic_runtime.mode"
+  );
+  assert.equal(gates.postflight_adversarial.mode, "required");
+  assert.equal(gates.postflight_adversarial.enforced, true);
+  assert.equal(
+    gates.postflight_adversarial.source,
+    "run.harness_profile.gates.postflight_adversarial.mode"
+  );
 }
 
 async function assertRunHarnessSlotBindingMismatchDetection(): Promise<void> {
@@ -2014,6 +2033,118 @@ async function assertRunHarnessSlotBindingMismatchDetection(): Promise<void> {
   assert.equal(slots.execution.failure_semantics, "fail_closed");
   assert.equal(slots.execution.default_verifier_kit, "cli");
   assert.equal(slots.preflight_review.binding_status, "aligned");
+}
+
+async function assertRunHarnessAdversarialGateProfileControlsContractAndPreflight(): Promise<void> {
+  const rootDir = await createVerifyTempDir("aisa-harness-adversarial-gate-");
+  const workspacePaths = resolveWorkspacePaths(rootDir);
+  await ensureWorkspace(workspacePaths);
+  await initializeGitRepo(rootDir, false);
+
+  const run = createRun({
+    title: "harness-adversarial-gate-profile",
+    description: "Verify harness profile gates control execution contracts and preflight.",
+    success_criteria: ["Postflight adversarial gate should follow the run harness profile."],
+    constraints: [],
+    owner_id: "test",
+    workspace_root: rootDir,
+    harness_profile: {
+      gates: {
+        postflight_adversarial: {
+          mode: "disabled"
+        }
+      }
+    }
+  });
+  const attempt = createAttempt({
+    run_id: run.id,
+    attempt_type: "execution",
+    worker: "codex",
+    objective: "Respect the run-level postflight adversarial gate mode.",
+    success_criteria: ["The generated execution contract should align to the gate mode."],
+    workspace_root: rootDir
+  });
+  const orchestrator = new Orchestrator(
+    workspacePaths,
+    new ContextCaptureAdapter() as never,
+    undefined,
+    60_000
+  );
+  const buildAttemptContract = (
+    orchestrator as unknown as {
+      buildAttemptContract: (
+        run: Run,
+        attempt: Attempt,
+        nextExecutionDraft: null,
+        reusableExecutionContract: null
+      ) => Promise<ReturnType<typeof createAttemptContract>>;
+    }
+  ).buildAttemptContract.bind(orchestrator);
+  const runAttemptDispatchPreflight = (
+    orchestrator as unknown as {
+      runAttemptDispatchPreflight: (input: {
+        run: Run;
+        runId: string;
+        attempt: Attempt;
+        attemptContract: ReturnType<typeof createAttemptContract>;
+        attemptPaths: ReturnType<typeof resolveAttemptPaths>;
+      }) => Promise<unknown>;
+    }
+  ).runAttemptDispatchPreflight.bind(orchestrator);
+
+  const alignedContract = await buildAttemptContract(run, attempt, null, null);
+  assert.equal(
+    alignedContract.adversarial_verification_required,
+    false,
+    "run_harness_adversarial_gate_profile_controls_contract_and_preflight: generated execution contract should disable the adversarial requirement when the profile disables the gate"
+  );
+
+  const mismatchedContract = createAttemptContract({
+    attempt_id: attempt.id,
+    run_id: run.id,
+    attempt_type: "execution",
+    objective: attempt.objective,
+    success_criteria: attempt.success_criteria,
+    required_evidence: ["Leave runnable replay evidence."],
+    adversarial_verification_required: true,
+    verification_plan: {
+      commands: [
+        {
+          purpose: "prove the fixture command stays runnable",
+          command: "node -e \"process.exit(0)\""
+        }
+      ]
+    }
+  });
+
+  await assert.rejects(
+    () =>
+      runAttemptDispatchPreflight({
+        run,
+        runId: run.id,
+        attempt,
+        attemptContract: mismatchedContract,
+        attemptPaths: resolveAttemptPaths(workspacePaths, run.id, attempt.id)
+      }),
+    /postflight adversarial.*disabled/i,
+    "run_harness_adversarial_gate_profile_controls_contract_and_preflight: preflight should fail closed when attempt_contract.json drifts away from the run harness gate bundle"
+  );
+
+  const evaluation = await getAttemptPreflightEvaluation(workspacePaths, run.id, attempt.id);
+  assert.equal(
+    evaluation?.failure_code,
+    "adversarial_gate_profile_mismatch",
+    "run_harness_adversarial_gate_profile_controls_contract_and_preflight: preflight should persist a dedicated gate profile mismatch failure code"
+  );
+  assert.ok(
+    evaluation?.checks.some(
+      (check) =>
+        check.code === "postflight_adversarial_gate_mode" &&
+        check.status === "passed" &&
+        check.message.includes("disabled")
+    ),
+    "run_harness_adversarial_gate_profile_controls_contract_and_preflight: preflight should persist the loaded gate mode as a structured check"
+  );
 }
 
 async function assertVerifierKitScopesDefaultInference(): Promise<void> {
@@ -5644,6 +5775,20 @@ async function main(): Promise<void> {
     } catch (error) {
       results.push({
         id: "run_harness_slot_binding_mismatch_detection",
+        status: "fail",
+        error: error instanceof Error ? error.message : String(error)
+      });
+    }
+
+    try {
+      await assertRunHarnessAdversarialGateProfileControlsContractAndPreflight();
+      results.push({
+        id: "run_harness_adversarial_gate_profile_controls_contract_and_preflight",
+        status: "pass"
+      });
+    } catch (error) {
+      results.push({
+        id: "run_harness_adversarial_gate_profile_controls_contract_and_preflight",
         status: "fail",
         error: error instanceof Error ? error.message : String(error)
       });

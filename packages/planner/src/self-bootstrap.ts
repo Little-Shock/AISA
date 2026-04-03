@@ -93,7 +93,7 @@ export function buildSelfBootstrapRunTemplate(
       owner_id: ownerId,
       workspace_root: workspaceRoot,
       harness_profile: {
-        version: 2,
+        version: 3,
         execution: {
           effort: "high",
           default_verifier_kit: "repo"

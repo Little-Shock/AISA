@@ -90,6 +90,10 @@ function buildAttemptContractRef(
   return buildRelativeRef(paths, resolveAttemptPaths(paths, runId, attemptId).contractFile);
 }
 
+function buildAttemptMetaRef(paths: WorkspacePaths, runId: string, attemptId: string): string {
+  return buildRelativeRef(paths, resolveAttemptPaths(paths, runId, attemptId).metaFile);
+}
+
 function buildAttemptPreflightRef(
   paths: WorkspacePaths,
   runId: string,
@@ -150,6 +154,53 @@ function pickLatestSteer(steers: RunSteer[]): RunSteer | null {
     .slice()
     .sort((left, right) => toTimestamp(left.updated_at) - toTimestamp(right.updated_at))
     .at(-1) ?? null;
+}
+
+function pickSourceLabel(input: {
+  actualRef: string | null;
+  snapshotRef: string | null;
+  fallback: string;
+}): string {
+  return input.actualRef ?? input.snapshotRef ?? input.fallback;
+}
+
+function buildSourceSnapshot(input: {
+  paths: WorkspacePaths;
+  runId: string;
+  current: CurrentDecision | null;
+  automation: RunAutomationControl | null;
+  governance: RunGovernanceState | null;
+  latestAttempt: Attempt | null;
+  latestSteer: RunSteer | null;
+}): RunWorkingContext["source_snapshot"] {
+  return {
+    current: {
+      ref: input.current ? buildRunCurrentRef(input.paths, input.runId) : null,
+      updated_at: input.current?.updated_at ?? null
+    },
+    automation: {
+      ref: input.automation ? buildRunAutomationRef(input.paths, input.runId) : null,
+      updated_at: input.automation?.updated_at ?? null
+    },
+    governance: {
+      ref: input.governance ? buildRunGovernanceRef(input.paths, input.runId) : null,
+      updated_at: input.governance?.updated_at ?? null
+    },
+    latest_attempt: {
+      ref: input.latestAttempt
+        ? buildAttemptMetaRef(input.paths, input.runId, input.latestAttempt.id)
+        : null,
+      updated_at: input.latestAttempt?.updated_at ?? null,
+      attempt_id: input.latestAttempt?.id ?? null
+    },
+    latest_steer: {
+      ref: input.latestSteer
+        ? buildRunSteerRef(input.paths, input.runId, input.latestSteer.id)
+        : null,
+      updated_at: input.latestSteer?.updated_at ?? null,
+      steer_id: input.latestSteer?.id ?? null
+    }
+  };
 }
 
 function buildCurrentFocus(input: {
@@ -245,6 +296,8 @@ function buildNextOperatorAttention(input: {
 }
 
 function buildDegradedState(input: {
+  paths: WorkspacePaths;
+  runId: string;
   workingContext: RunWorkingContext | null;
   current: CurrentDecision | null;
   automation: RunAutomationControl | null;
@@ -285,21 +338,71 @@ function buildDegradedState(input: {
     return input.workingContext.degraded;
   }
 
-  const latestSourceUpdatedAt = Math.max(
-    toTimestamp(input.current?.updated_at),
-    toTimestamp(input.automation?.updated_at),
-    toTimestamp(input.governance?.updated_at),
-    toTimestamp(input.latestAttempt?.updated_at),
-    toTimestamp(input.latestSteer?.updated_at)
-  );
-  const attemptMismatch =
-    (input.latestAttempt?.id ?? null) !== input.workingContext.source_attempt_id;
+  const snapshot = input.workingContext.source_snapshot;
+  const staleSources = [
+    {
+      label: pickSourceLabel({
+        actualRef: input.current ? buildRunCurrentRef(input.paths, input.runId) : null,
+        snapshotRef: snapshot.current.ref,
+        fallback: "current"
+      }),
+      stale:
+        toTimestamp(input.current?.updated_at) > toTimestamp(snapshot.current.updated_at)
+    },
+    {
+      label: pickSourceLabel({
+        actualRef: input.automation ? buildRunAutomationRef(input.paths, input.runId) : null,
+        snapshotRef: snapshot.automation.ref,
+        fallback: "automation"
+      }),
+      stale:
+        toTimestamp(input.automation?.updated_at) > toTimestamp(snapshot.automation.updated_at)
+    },
+    {
+      label: pickSourceLabel({
+        actualRef: input.governance ? buildRunGovernanceRef(input.paths, input.runId) : null,
+        snapshotRef: snapshot.governance.ref,
+        fallback: "governance"
+      }),
+      stale:
+        toTimestamp(input.governance?.updated_at) > toTimestamp(snapshot.governance.updated_at)
+    },
+    {
+      label: pickSourceLabel({
+        actualRef: input.latestAttempt
+          ? buildAttemptMetaRef(input.paths, input.runId, input.latestAttempt.id)
+          : null,
+        snapshotRef: snapshot.latest_attempt.ref,
+        fallback: "latest_attempt"
+      }),
+      stale:
+        toTimestamp(input.latestAttempt?.updated_at) >
+          toTimestamp(snapshot.latest_attempt.updated_at) ||
+        (input.latestAttempt?.id ?? null) !== snapshot.latest_attempt.attempt_id ||
+        (input.latestAttempt?.id ?? null) !== input.workingContext.source_attempt_id
+    },
+    {
+      label: pickSourceLabel({
+        actualRef: input.latestSteer
+          ? buildRunSteerRef(input.paths, input.runId, input.latestSteer.id)
+          : null,
+        snapshotRef: snapshot.latest_steer.ref,
+        fallback: "latest_steer"
+      }),
+      stale:
+        toTimestamp(input.latestSteer?.updated_at) >
+          toTimestamp(snapshot.latest_steer.updated_at) ||
+        (input.latestSteer?.id ?? null) !== snapshot.latest_steer.steer_id
+    }
+  ]
+    .filter((item) => item.stale)
+    .map((item) => item.label);
 
-  if (attemptMismatch || latestSourceUpdatedAt > workingContextUpdatedAt) {
+  if (staleSources.length > 0) {
     return createRunWorkingContextDegradedState({
       is_degraded: true,
       reason_code: "context_stale",
-      summary: "working context 落后于 current / attempt / steer 的最新现场。"
+      summary: `working context 落后于 ${Array.from(new Set(staleSources)).join(" / ")} 的最新现场。`
     });
   }
 
@@ -446,6 +549,15 @@ export async function buildRunWorkingContext(
       reason_code: automation.reason_code
     },
     degraded: createRunWorkingContextDegradedState(),
+    source_snapshot: buildSourceSnapshot({
+      paths,
+      runId,
+      current,
+      automation: automationControl,
+      governance: governanceState,
+      latestAttempt,
+      latestSteer
+    }),
     source_attempt_id: latestAttempt?.id ?? null
   });
 }
@@ -489,6 +601,8 @@ export async function readRunWorkingContextView(
     .sort((left, right) => toTimestamp(left.ts) - toTimestamp(right.ts))
     .at(-1);
   const degraded = buildDegradedState({
+    paths,
+    runId,
     workingContext,
     current,
     automation: automationControl,

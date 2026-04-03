@@ -198,6 +198,10 @@ import {
   deriveFailureSignalFromRuntimeVerification
 } from "./failure-policy.js";
 import {
+  describeRunHarnessGates as buildRunHarnessGatesView,
+  type RunHarnessGatesView
+} from "./gate-registry.js";
+import {
   describeRunHarnessSlots as buildRunHarnessSlotsView,
   type RunHarnessSlotsView
 } from "./slot-registry.js";
@@ -425,8 +429,99 @@ function formatVerificationCommands(commands: string[]): string {
   return commands.join(", ");
 }
 
-function buildDefaultExecutionDoneRubric(): AttemptContract["done_rubric"] {
-  return [
+function isPostflightAdversarialGateRequired(run: Run): boolean {
+  return resolveRunHarnessProfile(run).gates.postflight_adversarial.mode === "required";
+}
+
+function buildDefaultExecutionRequiredEvidence(
+  postflightAdversarialGateRequired: boolean
+): string[] {
+  const requiredEvidence = [
+    "Leave git-visible workspace changes tied to the objective.",
+    "Leave artifacts that show what changed.",
+    "Pass the replayable verification commands locked into this contract."
+  ];
+
+  if (postflightAdversarialGateRequired) {
+    requiredEvidence.push(
+      "Leave a machine-readable adversarial verification artifact after deterministic replay passes."
+    );
+  }
+
+  return requiredEvidence;
+}
+
+function buildDefaultExecutionForbiddenShortcuts(
+  postflightAdversarialGateRequired: boolean
+): string[] {
+  const forbiddenShortcuts = [
+    "Do not claim success without replayable verification commands.",
+    "Do not treat unchanged workspace state as a completed execution step."
+  ];
+
+  if (postflightAdversarialGateRequired) {
+    forbiddenShortcuts.push(
+      "Do not treat deterministic replay as the only verification layer for execution."
+    );
+  }
+
+  return forbiddenShortcuts;
+}
+
+function buildDefaultExecutionExpectedArtifacts(
+  postflightAdversarialGateRequired: boolean
+): string[] {
+  const expectedArtifacts = ["changed files visible in git status"];
+
+  if (postflightAdversarialGateRequired) {
+    expectedArtifacts.push("artifacts/adversarial-verification.json");
+  }
+
+  return expectedArtifacts;
+}
+
+function normalizeExecutionRequiredEvidence(
+  requiredEvidence: string[],
+  postflightAdversarialGateRequired: boolean
+): string[] {
+  const adversarialEvidence =
+    "Leave a machine-readable adversarial verification artifact after deterministic replay passes.";
+  const normalized = requiredEvidence.filter((item) => item !== adversarialEvidence);
+
+  return postflightAdversarialGateRequired
+    ? [...normalized, adversarialEvidence]
+    : normalized;
+}
+
+function normalizeExecutionForbiddenShortcuts(
+  forbiddenShortcuts: string[],
+  postflightAdversarialGateRequired: boolean
+): string[] {
+  const adversarialShortcut =
+    "Do not treat deterministic replay as the only verification layer for execution.";
+  const normalized = forbiddenShortcuts.filter((item) => item !== adversarialShortcut);
+
+  return postflightAdversarialGateRequired
+    ? [...normalized, adversarialShortcut]
+    : normalized;
+}
+
+function normalizeExecutionExpectedArtifacts(
+  expectedArtifacts: string[],
+  postflightAdversarialGateRequired: boolean
+): string[] {
+  const adversarialArtifact = "artifacts/adversarial-verification.json";
+  const normalized = expectedArtifacts.filter((item) => item !== adversarialArtifact);
+
+  return postflightAdversarialGateRequired
+    ? [...normalized, adversarialArtifact]
+    : normalized;
+}
+
+function buildDefaultExecutionDoneRubric(
+  postflightAdversarialGateRequired = true
+): AttemptContract["done_rubric"] {
+  const doneRubric: AttemptContract["done_rubric"] = [
     {
       code: "git_change_recorded",
       description: "Leave a git-visible workspace change tied to the execution objective."
@@ -438,17 +533,44 @@ function buildDefaultExecutionDoneRubric(): AttemptContract["done_rubric"] {
     {
       code: "verification_replay_passed",
       description: "Pass the replayable verification commands locked into this contract."
-    },
-    {
+    }
+  ];
+
+  if (postflightAdversarialGateRequired) {
+    doneRubric.push({
       code: "adversarial_verification_passed",
       description:
         "Leave a machine-readable adversarial verification artifact after deterministic replay passes."
-    }
-  ];
+    });
+  }
+
+  return doneRubric;
 }
 
-function buildDefaultExecutionFailureModes(): AttemptContract["failure_modes"] {
-  return [
+function normalizeExecutionDoneRubric(
+  doneRubric: AttemptContract["done_rubric"],
+  postflightAdversarialGateRequired: boolean
+): AttemptContract["done_rubric"] {
+  const normalized = doneRubric.filter(
+    (item: AttemptContract["done_rubric"][number]) =>
+      item.code !== "adversarial_verification_passed"
+  );
+
+  if (!postflightAdversarialGateRequired) {
+    return normalized;
+  }
+
+  const adversarialItem = buildDefaultExecutionDoneRubric(true).find(
+    (item: AttemptContract["done_rubric"][number]) =>
+      item.code === "adversarial_verification_passed"
+  );
+  return adversarialItem ? [...normalized, adversarialItem] : normalized;
+}
+
+function buildDefaultExecutionFailureModes(
+  postflightAdversarialGateRequired = true
+): AttemptContract["failure_modes"] {
+  const failureModes: AttemptContract["failure_modes"] = [
     {
       code: "missing_replayable_verification_plan",
       description: "Do not dispatch when attempt_contract.json has no replayable verification commands."
@@ -460,18 +582,47 @@ function buildDefaultExecutionFailureModes(): AttemptContract["failure_modes"] {
     {
       code: "unchanged_workspace_state",
       description: "Do not treat unchanged workspace state as a completed execution step."
-    },
-    {
-      code: "missing_adversarial_verification_requirement",
-      description:
-        "Do not dispatch execution when attempt_contract.json does not explicitly require adversarial verification."
-    },
-    {
-      code: "missing_adversarial_verification_artifact",
-      description:
-        "Do not treat execution as complete without a machine-readable adversarial verification artifact."
     }
   ];
+
+  if (postflightAdversarialGateRequired) {
+    failureModes.push(
+      {
+        code: "missing_adversarial_verification_requirement",
+        description:
+          "Do not dispatch execution when attempt_contract.json does not explicitly require adversarial verification."
+      },
+      {
+        code: "missing_adversarial_verification_artifact",
+        description:
+          "Do not treat execution as complete without a machine-readable adversarial verification artifact."
+      }
+    );
+  }
+
+  return failureModes;
+}
+
+function normalizeExecutionFailureModes(
+  failureModes: AttemptContract["failure_modes"],
+  postflightAdversarialGateRequired: boolean
+): AttemptContract["failure_modes"] {
+  const adversarialCodes = new Set([
+    "missing_adversarial_verification_requirement",
+    "missing_adversarial_verification_artifact"
+  ]);
+  const normalized = failureModes.filter(
+    (item: AttemptContract["failure_modes"][number]) => !adversarialCodes.has(item.code)
+  );
+
+  if (!postflightAdversarialGateRequired) {
+    return normalized;
+  }
+
+  const adversarialFailureModes = buildDefaultExecutionFailureModes(true).filter(
+    (item: AttemptContract["failure_modes"][number]) => adversarialCodes.has(item.code)
+  );
+  return [...normalized, ...adversarialFailureModes];
 }
 
 function normalizeExecutionObjective(value: string | null | undefined): string {
@@ -813,6 +964,10 @@ export class Orchestrator {
         slot: "synthesizer"
       })
     };
+  }
+
+  describeRunHarnessGates(run: Run): RunHarnessGatesView {
+    return buildRunHarnessGatesView(run);
   }
 
   describeRunHarnessSlots(run: Run): RunHarnessSlotsView {
@@ -2979,6 +3134,8 @@ export class Orchestrator {
       return verification;
     };
     const verifierKit = resolveExecutionVerifierKit(input.attemptContract);
+    const postflightAdversarialGateMode =
+      resolveRunHarnessProfile(input.run).gates.postflight_adversarial.mode;
 
     if (input.attempt.attempt_type !== "execution") {
       return await persist(
@@ -3004,6 +3161,70 @@ export class Orchestrator {
           summary:
             "Adversarial verification was skipped because deterministic runtime verification did not pass.",
           failure_reason: input.runtimeVerification.failure_reason
+        })
+      );
+    }
+
+    if (postflightAdversarialGateMode === "disabled") {
+      if (input.attemptContract?.adversarial_verification_required) {
+        return await persist(
+          createAttemptAdversarialVerification({
+            run_id: input.run.id,
+            attempt_id: input.attempt.id,
+            attempt_type: input.attempt.attempt_type,
+            status: "failed",
+            verifier_kit: verifierKit,
+            verdict: "fail",
+            summary:
+              "Execution contract drifted away from the run harness gate bundle.",
+            failure_code: "gate_profile_mismatch",
+            failure_reason:
+              "Run harness profile disables the postflight adversarial gate, but attempt_contract.json still requires it."
+          })
+        );
+      }
+
+      return await persist(
+        createAttemptAdversarialVerification({
+          run_id: input.run.id,
+          attempt_id: input.attempt.id,
+          attempt_type: input.attempt.attempt_type,
+          status: "not_applicable",
+          verifier_kit: verifierKit,
+          summary:
+            "Adversarial verification was skipped because the run harness profile disables the postflight adversarial gate."
+        })
+      );
+    }
+
+    if (postflightAdversarialGateMode === "disabled") {
+      if (input.attemptContract?.adversarial_verification_required) {
+        return await persist(
+          createAttemptAdversarialVerification({
+            run_id: input.run.id,
+            attempt_id: input.attempt.id,
+            attempt_type: input.attempt.attempt_type,
+            status: "failed",
+            verifier_kit: verifierKit,
+            verdict: "fail",
+            summary:
+              "Execution contract still requires postflight adversarial verification after the run harness profile disabled that gate.",
+            failure_code: "gate_profile_mismatch",
+            failure_reason:
+              "run.harness_profile.gates.postflight_adversarial.mode is disabled, but attempt_contract.json still requires postflight adversarial verification."
+          })
+        );
+      }
+
+      return await persist(
+        createAttemptAdversarialVerification({
+          run_id: input.run.id,
+          attempt_id: input.attempt.id,
+          attempt_type: input.attempt.attempt_type,
+          status: "not_applicable",
+          verifier_kit: verifierKit,
+          summary:
+            "Adversarial verification was skipped because the run harness profile disabled the postflight adversarial gate."
         })
       );
     }
@@ -3077,6 +3298,7 @@ export class Orchestrator {
             : null,
         summary: typeof raw.summary === "string" ? raw.summary : null,
         failure_code:
+          raw.failure_code === "gate_profile_mismatch" ||
           raw.failure_code === "missing_requirement" ||
           raw.failure_code === "missing_artifact" ||
           raw.failure_code === "invalid_artifact" ||
@@ -4668,6 +4890,7 @@ export class Orchestrator {
   ): Promise<AttemptContract> {
     const harnessProfile = resolveRunHarnessProfile(run);
     if (attempt.attempt_type === "execution") {
+      const postflightAdversarialGateRequired = isPostflightAdversarialGateRequired(run);
       const draft = isExecutionContractDraft(nextExecutionDraft)
         ? nextExecutionDraft
         : null;
@@ -4687,41 +4910,42 @@ export class Orchestrator {
         attempt_type: attempt.attempt_type,
         objective: attempt.objective,
         success_criteria: attempt.success_criteria,
-        required_evidence:
+        required_evidence: normalizeExecutionRequiredEvidence(
           draft?.required_evidence ??
-          reusableExecutionContract?.required_evidence ?? [
-            "Leave git-visible workspace changes tied to the objective.",
-            "Leave artifacts that show what changed.",
-            "Pass the replayable verification commands locked into this contract.",
-            "Leave a machine-readable adversarial verification artifact after deterministic replay passes."
-          ],
-        adversarial_verification_required:
-          draft?.adversarial_verification_required ??
-          reusableExecutionContract?.adversarial_verification_required ??
-          true,
+            reusableExecutionContract?.required_evidence ??
+            buildDefaultExecutionRequiredEvidence(postflightAdversarialGateRequired),
+          postflightAdversarialGateRequired
+        ),
+        adversarial_verification_required: postflightAdversarialGateRequired,
         verifier_kit: verifierKit,
-        done_rubric:
+        done_rubric: normalizeExecutionDoneRubric(
           draft && draft.done_rubric.length > 0
             ? draft.done_rubric
             : reusableExecutionContract && reusableExecutionContract.done_rubric.length > 0
               ? reusableExecutionContract.done_rubric
-              : buildDefaultExecutionDoneRubric(),
-        failure_modes:
+              : buildDefaultExecutionDoneRubric(postflightAdversarialGateRequired),
+          postflightAdversarialGateRequired
+        ),
+        failure_modes: normalizeExecutionFailureModes(
           draft && draft.failure_modes.length > 0
             ? draft.failure_modes
             : reusableExecutionContract && reusableExecutionContract.failure_modes.length > 0
               ? reusableExecutionContract.failure_modes
-              : buildDefaultExecutionFailureModes(),
-        forbidden_shortcuts:
+              : buildDefaultExecutionFailureModes(postflightAdversarialGateRequired),
+          postflightAdversarialGateRequired
+        ),
+        forbidden_shortcuts: normalizeExecutionForbiddenShortcuts(
           draft?.forbidden_shortcuts ??
-          reusableExecutionContract?.forbidden_shortcuts ?? [
-            "Do not claim success without replayable verification commands.",
-            "Do not treat unchanged workspace state as a completed execution step.",
-            "Do not treat deterministic replay as the only verification layer for execution."
-          ],
-        expected_artifacts:
+            reusableExecutionContract?.forbidden_shortcuts ??
+            buildDefaultExecutionForbiddenShortcuts(postflightAdversarialGateRequired),
+          postflightAdversarialGateRequired
+        ),
+        expected_artifacts: normalizeExecutionExpectedArtifacts(
           draft?.expected_artifacts ??
-          reusableExecutionContract?.expected_artifacts ?? ["changed files visible in git status"],
+            reusableExecutionContract?.expected_artifacts ??
+            buildDefaultExecutionExpectedArtifacts(postflightAdversarialGateRequired),
+          postflightAdversarialGateRequired
+        ),
         verification_plan: inferredVerificationPlan
       });
     }
@@ -4860,6 +5084,8 @@ export class Orchestrator {
       };
     }
 
+    const postflightAdversarialGateMode =
+      resolveRunHarnessProfile(input.run).gates.postflight_adversarial.mode;
     const verifierKit =
       resolveExecutionVerifierKit(input.attemptContract) ?? DEFAULT_EXECUTION_VERIFIER_KIT;
     const verifierKitView = buildExecutionVerifierKitView({
@@ -4908,17 +5134,43 @@ export class Orchestrator {
         ? `${verifierKitView.title} uses workspace_script_inference, so preflight may infer replay commands from local workspace scripts when the repo toolchain is already present.`
         : `${verifierKitView.title} uses contract_locked_commands, so preflight requires explicit replay commands instead of auto-inferring workspace scripts.`
     );
+    addCheck(
+      "postflight_adversarial_gate_mode",
+      "passed",
+      postflightAdversarialGateMode === "required"
+        ? "Run harness profile requires the postflight adversarial gate for this execution."
+        : "Run harness profile sets the postflight adversarial gate to disabled for this execution."
+    );
 
-    if (contractSummary?.requires_adversarial_verification) {
+    if (
+      postflightAdversarialGateMode === "required" &&
+      contractSummary?.requires_adversarial_verification
+    ) {
       addCheck(
         "adversarial_verification_required",
         "passed",
         "Execution contract explicitly requires adversarial verification."
       );
-    } else if (!failureReason) {
+    } else if (
+      postflightAdversarialGateMode === "required" &&
+      !failureReason
+    ) {
       failureCode = "missing_adversarial_verification_requirement";
       failureReason = `Execution attempt ${input.attempt.id} is blocked before dispatch because attempt_contract.json does not explicitly require adversarial verification.`;
       addCheck("adversarial_verification_required", "failed", failureReason);
+    } else if (
+      postflightAdversarialGateMode === "disabled" &&
+      contractSummary?.requires_adversarial_verification
+    ) {
+      failureCode = "adversarial_gate_profile_mismatch";
+      failureReason = `Execution attempt ${input.attempt.id} is blocked before dispatch because the postflight adversarial gate is disabled in run.harness_profile.gates.postflight_adversarial.mode, but attempt_contract.json still requires postflight adversarial verification.`;
+      addCheck("adversarial_verification_required", "failed", failureReason);
+    } else if (postflightAdversarialGateMode === "disabled") {
+      addCheck(
+        "adversarial_verification_required",
+        "passed",
+        "Execution contract correctly leaves the postflight adversarial requirement disabled."
+      );
     } else {
       addCheck(
         "adversarial_verification_required",

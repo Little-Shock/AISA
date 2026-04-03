@@ -96,6 +96,31 @@ function verifierKitCommandPolicyLabel(
   }
 }
 
+function harnessGateModeLabel(mode: string | null | undefined): string {
+  switch (mode) {
+    case "required":
+      return "硬门";
+    case "disabled":
+      return "已关闭";
+    default:
+      return "未知";
+  }
+}
+
+function formatWorkingContextSource(input: {
+  label: string;
+  ref: string | null | undefined;
+  updatedAt: string | null | undefined;
+  sourceId?: string | null | undefined;
+}): string {
+  const sourceBits = [input.ref ?? "未记录", formatDateTime(input.updatedAt)];
+  if (input.sourceId) {
+    sourceBits.push(input.sourceId);
+  }
+
+  return `${input.label}：${sourceBits.join(" · ")}`;
+}
+
 export function RunOverviewPanel({
   runDetail,
   selectedRun,
@@ -369,6 +394,7 @@ export function RunOverviewPanel({
           <SectionList
             title="运行中现场"
             items={[
+              `现场版本：${workingContext ? `v${String(workingContext.version)}` : "未落盘"}`,
               `run brief：${localizeUiText(runBrief?.headline ?? "暂无")}`,
               `run brief ref：${runDetail.run_brief_ref ?? "未落盘"}`,
               `维护平面：${runDetail.maintenance_plane_ref ?? "未落盘"}`,
@@ -380,6 +406,38 @@ export function RunOverviewPanel({
               `策略阶段：${policyStageLabel(policyRuntime?.stage)}`,
               `策略决议：${localizeUiText(policyRuntime?.last_decision ?? "暂无")}`,
               `待批目标：${localizeUiText(policyRuntime?.proposed_objective ?? "暂无")}`
+            ]}
+          />
+          <SectionList
+            title="现场来源水位"
+            items={[
+              formatWorkingContextSource({
+                label: "current",
+                ref: workingContext?.source_snapshot.current.ref,
+                updatedAt: workingContext?.source_snapshot.current.updated_at
+              }),
+              formatWorkingContextSource({
+                label: "automation",
+                ref: workingContext?.source_snapshot.automation.ref,
+                updatedAt: workingContext?.source_snapshot.automation.updated_at
+              }),
+              formatWorkingContextSource({
+                label: "governance",
+                ref: workingContext?.source_snapshot.governance.ref,
+                updatedAt: workingContext?.source_snapshot.governance.updated_at
+              }),
+              formatWorkingContextSource({
+                label: "latest attempt",
+                ref: workingContext?.source_snapshot.latest_attempt.ref,
+                updatedAt: workingContext?.source_snapshot.latest_attempt.updated_at,
+                sourceId: workingContext?.source_snapshot.latest_attempt.attempt_id
+              }),
+              formatWorkingContextSource({
+                label: "latest steer",
+                ref: workingContext?.source_snapshot.latest_steer.ref,
+                updatedAt: workingContext?.source_snapshot.latest_steer.updated_at,
+                sourceId: workingContext?.source_snapshot.latest_steer.steer_id
+              })
             ]}
           />
           <SectionList
@@ -728,6 +786,11 @@ export function RunPolicyPanel({
   const policyActivity = runDetail.policy_activity ?? [];
   const defaultVerifierKitProfile = runDetail.default_verifier_kit_profile;
   const harnessProfile = runDetail.run.harness_profile;
+  const harnessGates = [
+    runDetail.harness_gates.preflight_review,
+    runDetail.harness_gates.deterministic_runtime,
+    runDetail.harness_gates.postflight_adversarial
+  ];
   const harnessSlots = [
     runDetail.harness_slots.research_or_planning,
     runDetail.harness_slots.execution,
@@ -831,9 +894,46 @@ export function RunPolicyPanel({
           `profile 版本：${String(harnessProfile.version)}`,
           `execution effort：${harnessProfile.execution.effort}`,
           `reviewer effort：${harnessProfile.reviewer.effort}`,
-          `synthesizer effort：${harnessProfile.synthesizer.effort}`
+          `synthesizer effort：${harnessProfile.synthesizer.effort}`,
+          `preflight gate：${harnessGateModeLabel(harnessProfile.gates.preflight_review.mode)}`,
+          `runtime gate：${harnessGateModeLabel(harnessProfile.gates.deterministic_runtime.mode)}`,
+          `postflight adversarial gate：${harnessGateModeLabel(
+            harnessProfile.gates.postflight_adversarial.mode
+          )}`
         ]}
       />
+
+      {!runDetail.harness_gates.postflight_adversarial.enforced ? (
+        <Callout tone="amber" title="Postflight Gate 已关闭">
+          {localizeUiText(
+            "这条 run 的 postflight adversarial gate 已在 harness profile 里关闭。deterministic runtime gate 仍然是硬门。"
+          )}
+        </Callout>
+      ) : null}
+
+      <div className="mt-4 grid gap-3">
+        {harnessGates.map((gateView) => (
+          <SubPanel
+            key={gateView.gate}
+            title={gateView.title}
+            accent={gateView.enforced ? "emerald" : "amber"}
+          >
+            <SectionList
+              title="Gate Contract"
+              items={[
+                `mode: ${gateView.mode}`,
+                `mode label: ${harnessGateModeLabel(gateView.mode)}`,
+                `phase: ${gateView.phase}`,
+                `enforced: ${gateView.enforced ? "yes" : "no"}`,
+                `default mode: ${gateView.default_mode}`,
+                `source: ${gateView.source}`,
+                `artifact: ${gateView.artifact_ref}`,
+                `detail: ${gateView.detail}`
+              ]}
+            />
+          </SubPanel>
+        ))}
+      </div>
 
       {slotMismatches.length > 0 ? (
         <Callout tone="amber" title="Slot Registry 漂移">

@@ -83,6 +83,24 @@ type HarnessSlotsPayload = {
   final_synthesis: HarnessSlotPayload;
 };
 
+type HarnessGatePayload = {
+  gate: string;
+  title: string;
+  mode: string;
+  default_mode: string;
+  phase: string;
+  enforced: boolean;
+  source: string;
+  detail: string;
+  artifact_ref: string;
+};
+
+type HarnessGatesPayload = {
+  preflight_review: HarnessGatePayload;
+  deterministic_runtime: HarnessGatePayload;
+  postflight_adversarial: HarnessGatePayload;
+};
+
 type VerifierKitProfilePayload = {
   kit: string;
   title: string;
@@ -92,6 +110,23 @@ type VerifierKitProfilePayload = {
   runtime_expectations: string[];
   adversarial_focus: string[];
   source: string;
+};
+
+type WorkingContextSourceSnapshotEntryPayload = {
+  ref: string | null;
+  updated_at: string | null;
+};
+
+type WorkingContextSourceSnapshotPayload = {
+  current: WorkingContextSourceSnapshotEntryPayload;
+  automation: WorkingContextSourceSnapshotEntryPayload;
+  governance: WorkingContextSourceSnapshotEntryPayload;
+  latest_attempt: WorkingContextSourceSnapshotEntryPayload & {
+    attempt_id: string | null;
+  };
+  latest_steer: WorkingContextSourceSnapshotEntryPayload & {
+    steer_id: string | null;
+  };
 };
 
 async function main(): Promise<void> {
@@ -848,6 +883,11 @@ async function main(): Promise<void> {
           synthesizer: {
             effort: string;
           };
+          gates: {
+            preflight_review: { mode: string };
+            deterministic_runtime: { mode: string };
+            postflight_adversarial: { mode: string };
+          };
           version: number;
         };
       };
@@ -855,7 +895,7 @@ async function main(): Promise<void> {
       active_next_task_snapshot: string;
     };
     assert.equal(selfBootstrap.run.workspace_root, resolvedRootDir);
-    assert.equal(selfBootstrap.run.harness_profile.version, 2);
+    assert.equal(selfBootstrap.run.harness_profile.version, 3);
     assert.equal(selfBootstrap.run.harness_profile.execution.effort, "high");
     assert.equal(
       selfBootstrap.run.harness_profile.execution.default_verifier_kit,
@@ -863,6 +903,15 @@ async function main(): Promise<void> {
     );
     assert.equal(selfBootstrap.run.harness_profile.reviewer.effort, "medium");
     assert.equal(selfBootstrap.run.harness_profile.synthesizer.effort, "medium");
+    assert.equal(selfBootstrap.run.harness_profile.gates.preflight_review.mode, "required");
+    assert.equal(
+      selfBootstrap.run.harness_profile.gates.deterministic_runtime.mode,
+      "required"
+    );
+    assert.equal(
+      selfBootstrap.run.harness_profile.gates.postflight_adversarial.mode,
+      "required"
+    );
     assert.equal(
       selfBootstrap.active_next_task,
       SELF_BOOTSTRAP_NEXT_TASK_ACTIVE_ENTRY_RELATIVE_PATH
@@ -1251,6 +1300,11 @@ async function main(): Promise<void> {
           execution: { effort: string; default_verifier_kit: string };
           reviewer: { effort: string };
           synthesizer: { effort: string };
+          gates: {
+            preflight_review: { mode: string };
+            deterministic_runtime: { mode: string };
+            postflight_adversarial: { mode: string };
+          };
           slots: {
             research_or_planning: { binding: string };
             execution: { binding: string };
@@ -1260,6 +1314,7 @@ async function main(): Promise<void> {
           };
         };
       };
+      harness_gates: HarnessGatesPayload;
       harness_slots: HarnessSlotsPayload;
       default_verifier_kit_profile: VerifierKitProfilePayload;
       worker_effort: {
@@ -1389,6 +1444,7 @@ async function main(): Promise<void> {
       } | null;
       maintenance_plane_ref: string | null;
       working_context: {
+        version: number;
         plan_ref: string | null;
         current_focus: string | null;
         current_blocker: {
@@ -1400,6 +1456,7 @@ async function main(): Promise<void> {
           kind: string;
           ref: string;
         }>;
+        source_snapshot: WorkingContextSourceSnapshotPayload;
         source_attempt_id: string | null;
       } | null;
       working_context_ref: string | null;
@@ -1477,7 +1534,9 @@ async function main(): Promise<void> {
     };
     const staleWorkingContextPayload = staleWorkingContextResponse.json() as {
       working_context: {
+        version: number;
         current_focus: string | null;
+        source_snapshot: WorkingContextSourceSnapshotPayload;
       } | null;
       working_context_ref: string | null;
       working_context_degraded: {
@@ -1488,7 +1547,9 @@ async function main(): Promise<void> {
     };
     const writeFailedWorkingContextPayload = writeFailedWorkingContextResponse.json() as {
       working_context: {
+        version: number;
         current_focus: string | null;
+        source_snapshot: WorkingContextSourceSnapshotPayload;
       } | null;
       working_context_ref: string | null;
       failure_signal: {
@@ -1622,10 +1683,13 @@ async function main(): Promise<void> {
     );
     assert.equal(payload.run_health.status, "waiting_steer");
     assert.equal(payload.run.harness_profile.execution.effort, "high");
-    assert.equal(payload.run.harness_profile.version, 2);
+    assert.equal(payload.run.harness_profile.version, 3);
     assert.equal(payload.run.harness_profile.execution.default_verifier_kit, "api");
     assert.equal(payload.run.harness_profile.reviewer.effort, "low");
     assert.equal(payload.run.harness_profile.synthesizer.effort, "medium");
+    assert.equal(payload.run.harness_profile.gates.preflight_review.mode, "required");
+    assert.equal(payload.run.harness_profile.gates.deterministic_runtime.mode, "required");
+    assert.equal(payload.run.harness_profile.gates.postflight_adversarial.mode, "required");
     assert.equal(
       payload.run.harness_profile.slots.execution.binding,
       "codex_cli_execution_worker"
@@ -1647,6 +1711,23 @@ async function main(): Promise<void> {
       "worker-declared artifacts under artifacts/"
     ]);
     assert.equal(payload.harness_slots.execution.failure_semantics, "fail_closed");
+    assert.equal(payload.harness_gates.preflight_review.mode, "required");
+    assert.equal(payload.harness_gates.preflight_review.enforced, true);
+    assert.equal(payload.harness_gates.preflight_review.phase, "dispatch");
+    assert.equal(
+      payload.harness_gates.preflight_review.source,
+      "run.harness_profile.gates.preflight_review.mode"
+    );
+    assert.equal(payload.harness_gates.deterministic_runtime.mode, "required");
+    assert.equal(payload.harness_gates.deterministic_runtime.enforced, true);
+    assert.equal(payload.harness_gates.deterministic_runtime.phase, "runtime");
+    assert.equal(payload.harness_gates.postflight_adversarial.mode, "required");
+    assert.equal(payload.harness_gates.postflight_adversarial.enforced, true);
+    assert.equal(payload.harness_gates.postflight_adversarial.phase, "postflight");
+    assert.equal(
+      payload.harness_gates.postflight_adversarial.artifact_ref,
+      "artifacts/adversarial-verification.json"
+    );
     assert.equal(payload.harness_slots.execution.default_verifier_kit, "api");
     assert.equal(payload.default_verifier_kit_profile.kit, "api");
     assert.equal(payload.default_verifier_kit_profile.title, "API Task");
@@ -1804,9 +1885,21 @@ async function main(): Promise<void> {
       )
     );
     assert.equal(payload.working_context_degraded.is_degraded, false);
+    assert.equal(payload.working_context?.version, 1);
     assert.equal(payload.working_context?.source_attempt_id, blockerAttempt.id);
     assert.equal(payload.working_context?.current_focus, blockerAttempt.objective);
     assert.equal(payload.working_context?.current_blocker?.summary, blockerFailureContext.message);
+    assert.ok(payload.working_context?.source_snapshot.current.ref?.endsWith("current.json"));
+    assert.equal(payload.working_context?.source_snapshot.automation.ref, null);
+    assert.equal(
+      payload.working_context?.source_snapshot.latest_attempt.attempt_id,
+      blockerAttempt.id
+    );
+    assert.ok(
+      payload.working_context?.source_snapshot.latest_attempt.ref?.endsWith(
+        `/attempts/${blockerAttempt.id}/meta.json`
+      )
+    );
     assert.equal(
       payload.working_context?.plan_ref,
       `runs/${run.id}/attempts/${blockerAttempt.id}/attempt_contract.json`
@@ -1828,8 +1921,16 @@ async function main(): Promise<void> {
       staleWorkingContextPayload.working_context_degraded.reason_code,
       "context_stale"
     );
+    assert.equal(staleWorkingContextPayload.working_context?.version, 1);
     assert.ok(
-      staleWorkingContextPayload.working_context_degraded.summary?.includes("working context")
+      staleWorkingContextPayload.working_context?.source_snapshot.current.ref?.endsWith(
+        "current.json"
+      )
+    );
+    assert.ok(
+      staleWorkingContextPayload.working_context_degraded.summary?.includes(
+        `runs/${staleWorkingContextRun.id}/current.json`
+      )
     );
     assert.ok(staleWorkingContextPayload.working_context_ref?.endsWith("working-context.json"));
     assert.equal(writeFailedWorkingContextPayload.working_context, null);
@@ -1872,11 +1973,15 @@ async function main(): Promise<void> {
           harness_profile: {
             version: number;
             execution: { default_verifier_kit: string };
+            gates: {
+              postflight_adversarial: { mode: string };
+            };
             slots: {
               execution: { binding: string };
             };
           };
         };
+        harness_gates: HarnessGatesPayload;
         harness_slots: HarnessSlotsPayload;
         default_verifier_kit_profile: VerifierKitProfilePayload;
         worker_effort: {
@@ -1886,6 +1991,10 @@ async function main(): Promise<void> {
           status: string;
           likely_zombie: boolean;
         };
+        working_context: {
+          version: number;
+          source_snapshot: WorkingContextSourceSnapshotPayload;
+        } | null;
         working_context_ref: string | null;
         working_context_degraded: {
           is_degraded: boolean;
@@ -1974,14 +2083,25 @@ async function main(): Promise<void> {
       }>;
     };
     const runSummary = runsPayload.runs.find((item) => item.run.id === run.id);
-    assert.equal(runSummary?.run.harness_profile.version, 2);
+    assert.equal(runSummary?.run.harness_profile.version, 3);
     assert.equal(
       runSummary?.run.harness_profile.execution.default_verifier_kit,
       "api"
     );
     assert.equal(
+      runSummary?.run.harness_profile.gates.postflight_adversarial.mode,
+      "required"
+    );
+    assert.equal(
       runSummary?.run.harness_profile.slots.execution.binding,
       "codex_cli_execution_worker"
+    );
+    assert.equal(runSummary?.harness_gates.preflight_review.mode, "required");
+    assert.equal(runSummary?.harness_gates.preflight_review.enforced, true);
+    assert.equal(runSummary?.harness_gates.deterministic_runtime.phase, "runtime");
+    assert.equal(
+      runSummary?.harness_gates.postflight_adversarial.source,
+      "run.harness_profile.gates.postflight_adversarial.mode"
     );
     assert.equal(runSummary?.harness_slots.execution.binding, "codex_cli_execution_worker");
     assert.equal(runSummary?.default_verifier_kit_profile.kit, "api");
@@ -2020,6 +2140,12 @@ async function main(): Promise<void> {
     assert.equal(runSummary?.policy_runtime_invalid_reason, null);
     assert.equal(runSummary?.run_health.status, "waiting_steer");
     assert.equal(runSummary?.working_context_degraded.is_degraded, false);
+    assert.equal(runSummary?.working_context?.version, 1);
+    assert.ok(runSummary?.working_context?.source_snapshot.current.ref?.endsWith("current.json"));
+    assert.equal(
+      runSummary?.working_context?.source_snapshot.latest_attempt.attempt_id,
+      blockerAttempt.id
+    );
     assert.equal(runSummary?.failure_signal?.failure_class, "preflight_blocked");
     assert.equal(
       runSummary?.failure_signal?.failure_code,

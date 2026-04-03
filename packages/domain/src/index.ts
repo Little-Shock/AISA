@@ -79,6 +79,14 @@ export const ExecutionVerifierKitCommandPolicySchema = z.enum(
   ExecutionVerifierKitCommandPolicyValues
 );
 export const DEFAULT_EXECUTION_VERIFIER_KIT = "repo" as const;
+export const RunHarnessGateValues = [
+  "preflight_review",
+  "deterministic_runtime",
+  "postflight_adversarial"
+] as const;
+export const RunHarnessGateSchema = z.enum(RunHarnessGateValues);
+export const RunHarnessGateModeValues = ["required", "disabled"] as const;
+export const RunHarnessGateModeSchema = z.enum(RunHarnessGateModeValues);
 export const RunHarnessSlotValues = [
   "research_or_planning",
   "execution",
@@ -104,10 +112,27 @@ export const RunHarnessExecutionPreferenceSchema = RunHarnessEffortPreferenceSch
     DEFAULT_EXECUTION_VERIFIER_KIT
   )
 });
+export const RunHarnessRequiredGateConfigSchema = z.object({
+  mode: z.literal("required").default("required")
+});
+export const RunHarnessPostflightAdversarialGateConfigSchema = z.object({
+  mode: RunHarnessGateModeSchema.default("required")
+});
 export const RunHarnessSlotConfigSchema = z.object({
   binding: RunHarnessSlotBindingSchema
 });
 
+const DEFAULT_RUN_HARNESS_GATES = {
+  preflight_review: {
+    mode: "required" as const
+  },
+  deterministic_runtime: {
+    mode: "required" as const
+  },
+  postflight_adversarial: {
+    mode: "required" as const
+  }
+};
 const DEFAULT_RUN_HARNESS_SLOTS = {
   research_or_planning: {
     binding: "codex_cli_research_worker" as const
@@ -140,9 +165,20 @@ export const RunHarnessSlotsSchema = z.object({
     DEFAULT_RUN_HARNESS_SLOTS.final_synthesis
   )
 });
+export const RunHarnessGatesSchema = z.object({
+  preflight_review: RunHarnessRequiredGateConfigSchema.default(
+    DEFAULT_RUN_HARNESS_GATES.preflight_review
+  ),
+  deterministic_runtime: RunHarnessRequiredGateConfigSchema.default(
+    DEFAULT_RUN_HARNESS_GATES.deterministic_runtime
+  ),
+  postflight_adversarial: RunHarnessPostflightAdversarialGateConfigSchema.default(
+    DEFAULT_RUN_HARNESS_GATES.postflight_adversarial
+  )
+});
 
 const DEFAULT_RUN_HARNESS_PROFILE = {
-  version: 2 as const,
+  version: 3 as const,
   execution: {
     effort: "medium" as const,
     default_verifier_kit: DEFAULT_EXECUTION_VERIFIER_KIT
@@ -153,11 +189,12 @@ const DEFAULT_RUN_HARNESS_PROFILE = {
   synthesizer: {
     effort: "medium" as const
   },
+  gates: DEFAULT_RUN_HARNESS_GATES,
   slots: DEFAULT_RUN_HARNESS_SLOTS
 };
 
 export const RunHarnessProfileSchema = z.object({
-  version: z.number().int().min(1).max(2).default(2),
+  version: z.number().int().min(1).max(3).default(3),
   execution: RunHarnessExecutionPreferenceSchema.default(
     DEFAULT_RUN_HARNESS_PROFILE.execution
   ),
@@ -167,6 +204,7 @@ export const RunHarnessProfileSchema = z.object({
   synthesizer: RunHarnessEffortPreferenceSchema.default(
     DEFAULT_RUN_HARNESS_PROFILE.synthesizer
   ),
+  gates: RunHarnessGatesSchema.default(DEFAULT_RUN_HARNESS_PROFILE.gates),
   slots: RunHarnessSlotsSchema.default(DEFAULT_RUN_HARNESS_PROFILE.slots)
 });
 
@@ -425,7 +463,68 @@ export const RunWorkingContextAutomationSchema = z.object({
   reason_code: RunAutomationReasonCodeSchema.nullable().default(null)
 });
 
+export const RUN_WORKING_CONTEXT_VERSION = 1 as const;
+
+export const RunWorkingContextSourceSnapshotEntrySchema = z.object({
+  ref: z.string().min(1).nullable().default(null),
+  updated_at: z.string().datetime().nullable().default(null)
+});
+
+export const RunWorkingContextSourceSnapshotAttemptEntrySchema =
+  RunWorkingContextSourceSnapshotEntrySchema.extend({
+    attempt_id: z.string().nullable().default(null)
+  });
+
+export const RunWorkingContextSourceSnapshotSteerEntrySchema =
+  RunWorkingContextSourceSnapshotEntrySchema.extend({
+    steer_id: z.string().nullable().default(null)
+  });
+
+const DEFAULT_RUN_WORKING_CONTEXT_SOURCE_SNAPSHOT = {
+  current: {
+    ref: null,
+    updated_at: null
+  },
+  automation: {
+    ref: null,
+    updated_at: null
+  },
+  governance: {
+    ref: null,
+    updated_at: null
+  },
+  latest_attempt: {
+    ref: null,
+    updated_at: null,
+    attempt_id: null
+  },
+  latest_steer: {
+    ref: null,
+    updated_at: null,
+    steer_id: null
+  }
+} as const;
+
+export const RunWorkingContextSourceSnapshotSchema = z.object({
+  current: RunWorkingContextSourceSnapshotEntrySchema.default(
+    DEFAULT_RUN_WORKING_CONTEXT_SOURCE_SNAPSHOT.current
+  ),
+  automation: RunWorkingContextSourceSnapshotEntrySchema.default(
+    DEFAULT_RUN_WORKING_CONTEXT_SOURCE_SNAPSHOT.automation
+  ),
+  governance: RunWorkingContextSourceSnapshotEntrySchema.default(
+    DEFAULT_RUN_WORKING_CONTEXT_SOURCE_SNAPSHOT.governance
+  ),
+  latest_attempt: RunWorkingContextSourceSnapshotAttemptEntrySchema.default(
+    DEFAULT_RUN_WORKING_CONTEXT_SOURCE_SNAPSHOT.latest_attempt
+  ),
+  latest_steer: RunWorkingContextSourceSnapshotSteerEntrySchema.default(
+    DEFAULT_RUN_WORKING_CONTEXT_SOURCE_SNAPSHOT.latest_steer
+  )
+});
+
 export const RunWorkingContextSchema = z.object({
+  version: z.literal(RUN_WORKING_CONTEXT_VERSION).default(RUN_WORKING_CONTEXT_VERSION),
   run_id: z.string(),
   plan_ref: z.string().nullable().default(null),
   active_task_refs: z.array(RunWorkingContextTaskRefSchema).default([]),
@@ -435,6 +534,9 @@ export const RunWorkingContextSchema = z.object({
   next_operator_attention: z.string().nullable().default(null),
   automation: RunWorkingContextAutomationSchema,
   degraded: RunWorkingContextDegradedStateSchema,
+  source_snapshot: RunWorkingContextSourceSnapshotSchema.default(
+    DEFAULT_RUN_WORKING_CONTEXT_SOURCE_SNAPSHOT
+  ),
   source_attempt_id: z.string().nullable().default(null),
   updated_at: z.string().datetime()
 });
@@ -790,6 +892,7 @@ export const AttemptPreflightCheckSchema = z.object({
 export const AttemptPreflightFailureCodeSchema = z.enum([
   "missing_attempt_contract",
   "missing_adversarial_verification_requirement",
+  "adversarial_gate_profile_mismatch",
   "missing_done_rubric",
   "missing_failure_modes",
   "missing_contract_verification_plan",
@@ -872,6 +975,7 @@ export const AttemptAdversarialVerificationVerdictSchema = z.enum([
 
 export const AttemptAdversarialVerificationFailureCodeSchema = z.enum([
   "missing_requirement",
+  "gate_profile_mismatch",
   "missing_artifact",
   "invalid_artifact",
   "missing_checks",
@@ -1228,6 +1332,18 @@ export type RunWorkingContextDegradedState = z.infer<
 export type RunWorkingContextAutomation = z.infer<
   typeof RunWorkingContextAutomationSchema
 >;
+export type RunWorkingContextSourceSnapshotEntry = z.infer<
+  typeof RunWorkingContextSourceSnapshotEntrySchema
+>;
+export type RunWorkingContextSourceSnapshotAttemptEntry = z.infer<
+  typeof RunWorkingContextSourceSnapshotAttemptEntrySchema
+>;
+export type RunWorkingContextSourceSnapshotSteerEntry = z.infer<
+  typeof RunWorkingContextSourceSnapshotSteerEntrySchema
+>;
+export type RunWorkingContextSourceSnapshot = z.infer<
+  typeof RunWorkingContextSourceSnapshotSchema
+>;
 export type RunWorkingContext = z.infer<typeof RunWorkingContextSchema>;
 export type RunHealthStatus = z.infer<typeof RunHealthStatusSchema>;
 export type RunHealthAssessment = z.infer<typeof RunHealthAssessmentSchema>;
@@ -1262,6 +1378,8 @@ export type ExecutionVerifierKit = z.infer<typeof ExecutionVerifierKitSchema>;
 export type ExecutionVerifierKitCommandPolicy = z.infer<
   typeof ExecutionVerifierKitCommandPolicySchema
 >;
+export type RunHarnessGate = z.infer<typeof RunHarnessGateSchema>;
+export type RunHarnessGateMode = z.infer<typeof RunHarnessGateModeSchema>;
 export type RunHarnessSlot = z.infer<typeof RunHarnessSlotSchema>;
 export type RunHarnessSlotBinding = z.infer<typeof RunHarnessSlotBindingSchema>;
 export type RunHarnessEffortPreference = z.infer<
@@ -1270,7 +1388,14 @@ export type RunHarnessEffortPreference = z.infer<
 export type RunHarnessExecutionPreference = z.infer<
   typeof RunHarnessExecutionPreferenceSchema
 >;
+export type RunHarnessRequiredGateConfig = z.infer<
+  typeof RunHarnessRequiredGateConfigSchema
+>;
+export type RunHarnessPostflightAdversarialGateConfig = z.infer<
+  typeof RunHarnessPostflightAdversarialGateConfigSchema
+>;
 export type RunHarnessSlotConfig = z.infer<typeof RunHarnessSlotConfigSchema>;
+export type RunHarnessGates = z.infer<typeof RunHarnessGatesSchema>;
 export type RunHarnessSlots = z.infer<typeof RunHarnessSlotsSchema>;
 export type RunHarnessProfile = z.infer<typeof RunHarnessProfileSchema>;
 export type AttemptDoneRubricItem = z.infer<typeof AttemptDoneRubricItemSchema>;
@@ -1908,6 +2033,39 @@ export function createRunWorkingContextDegradedState(input?: {
   });
 }
 
+export function createRunWorkingContextSourceSnapshot(input?: {
+  current?: Partial<RunWorkingContextSourceSnapshotEntry>;
+  automation?: Partial<RunWorkingContextSourceSnapshotEntry>;
+  governance?: Partial<RunWorkingContextSourceSnapshotEntry>;
+  latest_attempt?: Partial<RunWorkingContextSourceSnapshotAttemptEntry>;
+  latest_steer?: Partial<RunWorkingContextSourceSnapshotSteerEntry>;
+}): RunWorkingContextSourceSnapshot {
+  return RunWorkingContextSourceSnapshotSchema.parse({
+    current: {
+      ref: input?.current?.ref ?? null,
+      updated_at: input?.current?.updated_at ?? null
+    },
+    automation: {
+      ref: input?.automation?.ref ?? null,
+      updated_at: input?.automation?.updated_at ?? null
+    },
+    governance: {
+      ref: input?.governance?.ref ?? null,
+      updated_at: input?.governance?.updated_at ?? null
+    },
+    latest_attempt: {
+      ref: input?.latest_attempt?.ref ?? null,
+      updated_at: input?.latest_attempt?.updated_at ?? null,
+      attempt_id: input?.latest_attempt?.attempt_id ?? null
+    },
+    latest_steer: {
+      ref: input?.latest_steer?.ref ?? null,
+      updated_at: input?.latest_steer?.updated_at ?? null,
+      steer_id: input?.latest_steer?.steer_id ?? null
+    }
+  });
+}
+
 export function createRunWorkingContext(input: {
   run_id: string;
   plan_ref?: string | null;
@@ -1918,9 +2076,17 @@ export function createRunWorkingContext(input: {
   next_operator_attention?: string | null;
   automation?: Partial<RunWorkingContextAutomation>;
   degraded?: Partial<RunWorkingContextDegradedState>;
+  source_snapshot?: {
+    current?: Partial<RunWorkingContextSourceSnapshotEntry>;
+    automation?: Partial<RunWorkingContextSourceSnapshotEntry>;
+    governance?: Partial<RunWorkingContextSourceSnapshotEntry>;
+    latest_attempt?: Partial<RunWorkingContextSourceSnapshotAttemptEntry>;
+    latest_steer?: Partial<RunWorkingContextSourceSnapshotSteerEntry>;
+  };
   source_attempt_id?: string | null;
 }): RunWorkingContext {
   return RunWorkingContextSchema.parse({
+    version: RUN_WORKING_CONTEXT_VERSION,
     run_id: input.run_id,
     plan_ref: input.plan_ref ?? null,
     active_task_refs: input.active_task_refs ?? [],
@@ -1933,6 +2099,7 @@ export function createRunWorkingContext(input: {
       reason_code: input.automation?.reason_code ?? null
     },
     degraded: createRunWorkingContextDegradedState(input.degraded),
+    source_snapshot: createRunWorkingContextSourceSnapshot(input.source_snapshot),
     source_attempt_id: input.source_attempt_id ?? null,
     updated_at: new Date().toISOString()
   });
@@ -2122,7 +2289,6 @@ export function isExecutionContractDraftReady(
 ): contract is AttemptContractDraft {
   return (
     contract?.attempt_type === "execution" &&
-    (contract.adversarial_verification_required ?? true) === true &&
     (contract.verification_plan?.commands.length ?? 0) > 0 &&
     contract.required_evidence.length > 0 &&
     contract.done_rubric.length > 0 &&
@@ -2135,7 +2301,6 @@ export function isExecutionAttemptContractReady(
 ): contract is AttemptContract {
   return (
     contract?.attempt_type === "execution" &&
-    contract.adversarial_verification_required === true &&
     (contract.verification_plan?.commands.length ?? 0) > 0 &&
     contract.required_evidence.length > 0 &&
     contract.done_rubric.length > 0 &&

@@ -208,6 +208,17 @@ export type RunHarnessProfileView = {
   synthesizer: {
     effort: string;
   };
+  gates: {
+    preflight_review: {
+      mode: string;
+    };
+    deterministic_runtime: {
+      mode: string;
+    };
+    postflight_adversarial: {
+      mode: string;
+    };
+  };
   slots: {
     research_or_planning: {
       binding: string;
@@ -235,6 +246,29 @@ export type RunHarnessSlotPermissionBoundary =
   | "control_plane_only";
 
 export type RunHarnessSlotFailureSemantics = "fail_closed" | "fail_open";
+
+export type RunHarnessGatePhase = "dispatch" | "runtime" | "postflight";
+
+export type RunHarnessGateView = {
+  gate:
+    | "preflight_review"
+    | "deterministic_runtime"
+    | "postflight_adversarial";
+  title: string;
+  mode: "required" | "disabled";
+  default_mode: "required";
+  phase: RunHarnessGatePhase;
+  enforced: boolean;
+  source: string;
+  detail: string;
+  artifact_ref: string;
+};
+
+export type RunHarnessGatesView = {
+  preflight_review: RunHarnessGateView;
+  deterministic_runtime: RunHarnessGateView;
+  postflight_adversarial: RunHarnessGateView;
+};
 
 export type RunHarnessSlotView = {
   slot:
@@ -305,7 +339,25 @@ export type RunWorkingContextDegraded = {
   summary: string | null;
 };
 
+export type RunWorkingContextSourceSnapshotEntry = {
+  ref: string | null;
+  updated_at: string | null;
+};
+
+export type RunWorkingContextSourceSnapshot = {
+  current: RunWorkingContextSourceSnapshotEntry;
+  automation: RunWorkingContextSourceSnapshotEntry;
+  governance: RunWorkingContextSourceSnapshotEntry;
+  latest_attempt: RunWorkingContextSourceSnapshotEntry & {
+    attempt_id: string | null;
+  };
+  latest_steer: RunWorkingContextSourceSnapshotEntry & {
+    steer_id: string | null;
+  };
+};
+
 export type RunWorkingContext = {
+  version: 1;
   run_id: string;
   plan_ref: string | null;
   active_task_refs: RunWorkingContextTaskRef[];
@@ -318,6 +370,7 @@ export type RunWorkingContext = {
     reason_code: string | null;
   };
   degraded: RunWorkingContextDegraded;
+  source_snapshot: RunWorkingContextSourceSnapshot;
   source_attempt_id: string | null;
   updated_at: string;
 } | null;
@@ -507,6 +560,7 @@ export type RunSummaryItem = {
   working_context_ref: string | null;
   working_context_degraded: RunWorkingContextDegraded;
   run_health: RunHealthAssessment;
+  harness_gates: RunHarnessGatesView;
   harness_slots: RunHarnessSlotsView;
   default_verifier_kit_profile: ExecutionVerifierKitView;
   attempt_count: number;
@@ -574,6 +628,7 @@ export type RunDetail = {
   working_context_ref: string | null;
   working_context_degraded: RunWorkingContextDegraded;
   run_health: RunHealthAssessment;
+  harness_gates: RunHarnessGatesView;
   harness_slots: RunHarnessSlotsView;
   default_verifier_kit_profile: ExecutionVerifierKitView;
   attempts: Array<{

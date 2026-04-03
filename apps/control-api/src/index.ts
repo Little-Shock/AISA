@@ -761,6 +761,7 @@ export async function buildServer(
         staleAfterMs: runHealthStaleMs
       });
     const workerEffort = orchestrator.describeRunWorkerEffort(run);
+    const harnessGates = orchestrator.describeRunHarnessGates(run);
     const harnessSlots = orchestrator.describeRunHarnessSlots(run);
     const defaultVerifierKitProfile = orchestrator.describeRunDefaultVerifierKit(run);
 
@@ -795,6 +796,7 @@ export async function buildServer(
       working_context_ref: workingContextView.working_context_ref,
       working_context_degraded: workingContextView.working_context_degraded,
       run_health: runHealth,
+      harness_gates: harnessGates,
       harness_slots: harnessSlots,
       default_verifier_kit_profile: defaultVerifierKitProfile,
       worker_effort: workerEffort,
@@ -851,6 +853,7 @@ export async function buildServer(
         latestHeartbeat,
         staleAfterMs: runHealthStaleMs
       });
+    const harnessGates = orchestrator.describeRunHarnessGates(run);
     const harnessSlots = orchestrator.describeRunHarnessSlots(run);
     const defaultVerifierKitProfile = orchestrator.describeRunDefaultVerifierKit(run);
 
@@ -882,6 +885,7 @@ export async function buildServer(
       working_context: workingContextView.working_context,
       working_context_ref: workingContextView.working_context_ref,
       working_context_degraded: workingContextView.working_context_degraded,
+      harness_gates: harnessGates,
       harness_slots: harnessSlots,
       default_verifier_kit_profile: defaultVerifierKitProfile,
       worker_effort: orchestrator.describeRunWorkerEffort(run),

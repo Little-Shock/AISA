@@ -665,9 +665,14 @@ function buildAttemptEvaluationBase(input: {
   reviewPacket: ReviewableAttemptPacket;
 }): AttemptEvaluation {
   const attempt = input.reviewPacket.attempt;
+  const attemptContract = input.reviewPacket.attempt_contract;
   const result = input.reviewPacket.result;
   const runtimeVerification = input.reviewPacket.runtime_verification ?? null;
   const adversarialVerification = input.reviewPacket.adversarial_verification ?? null;
+  const requiresAdversarialVerification =
+    attemptContract?.attempt_type === "execution"
+      ? attemptContract.adversarial_verification_required === true
+      : false;
 
   if (attempt.status !== "completed") {
     throw new Error(
@@ -756,10 +761,15 @@ function buildAttemptEvaluationBase(input: {
   const verificationStatus = runtimeVerification?.status === "passed" ? "passed" : "failed";
   const adversarialVerificationStatus =
     verificationStatus === "passed"
-      ? adversarialVerification?.status ?? "failed"
+      ? requiresAdversarialVerification
+        ? adversarialVerification?.status ?? "failed"
+        : "not_applicable"
       : "not_applicable";
   const dualVerificationPassed =
-    verificationStatus === "passed" && adversarialVerificationStatus === "passed";
+    verificationStatus === "passed" &&
+    (requiresAdversarialVerification
+      ? adversarialVerificationStatus === "passed"
+      : true);
   const verifiedCommandScore =
     runtimeVerification?.status === "passed" && runtimeVerification.command_results.length > 0
       ? 1
@@ -813,6 +823,7 @@ function buildAttemptEvaluationBase(input: {
     evidenceQuality,
     nextStepScore,
     artifactScore,
+    requiresAdversarialVerification,
     runtimeVerification,
     adversarialVerification
   });
@@ -855,6 +866,7 @@ function buildMissingEvidence(input: {
   nextStepScore: number;
   artifactScore: number;
   hasExecutionContract?: boolean;
+  requiresAdversarialVerification?: boolean;
   runtimeVerification?: AttemptRuntimeVerification | null;
   adversarialVerification?: ReviewableAttemptPacket["adversarial_verification"] | null;
 }): string[] {
@@ -894,7 +906,11 @@ function buildMissingEvidence(input: {
     }
   }
 
-  if (input.attemptType === "execution" && input.runtimeVerification?.status === "passed") {
+  if (
+    input.attemptType === "execution" &&
+    input.requiresAdversarialVerification === true &&
+    input.runtimeVerification?.status === "passed"
+  ) {
     if (!input.adversarialVerification) {
       missing.push(
         "Need a machine-readable adversarial verification artifact after deterministic replay passes."
