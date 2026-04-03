@@ -42,7 +42,8 @@ import {
   saveCurrentDecision,
   saveRun,
   saveRunAutomationControl,
-  saveRunPolicyRuntime
+  saveRunPolicyRuntime,
+  getRunRuntimeHealthSnapshot
 } from "../packages/state-store/src/index.ts";
 import { buildServer } from "../apps/control-api/src/index.ts";
 import {
@@ -766,6 +767,8 @@ async function main(): Promise<void> {
     journal_event_id: blockerPreflightEntry.id,
     journal_event_ts: blockerPreflightEntry.ts
   };
+  const settledHandoffRecoveryBlockedMessage =
+    "Low reviewer effort keeps settled handoff recovery in manual recovery mode, so automatic resume stays blocked.";
 
   await saveAttempt(workspacePaths, blockerAttempt);
   await saveAttemptContract(workspacePaths, blockerAttemptContract);
@@ -909,6 +912,7 @@ async function main(): Promise<void> {
     assert.equal(selfBootstrapResponse.statusCode, 201);
     const selfBootstrap = selfBootstrapResponse.json() as {
       run: {
+        id: string;
         workspace_root: string;
         harness_profile: {
           execution: {
@@ -931,6 +935,7 @@ async function main(): Promise<void> {
       };
       active_next_task: string;
       active_next_task_snapshot: string;
+      runtime_health_snapshot: string;
     };
     assert.equal(selfBootstrap.run.workspace_root, resolvedRootDir);
     assert.equal(selfBootstrap.run.harness_profile.version, 3);
@@ -958,6 +963,17 @@ async function main(): Promise<void> {
       selfBootstrap.active_next_task_snapshot.endsWith(
         SELF_BOOTSTRAP_NEXT_TASK_ACTIVE_ENTRY_SNAPSHOT_FILE_NAME
       )
+    );
+    assert.ok(
+      selfBootstrap.runtime_health_snapshot.endsWith("runtime-health-snapshot.json")
+    );
+    const selfBootstrapRuntimeHealthSnapshot = await getRunRuntimeHealthSnapshot(
+      workspacePaths,
+      selfBootstrap.run.id
+    );
+    assert.ok(
+      selfBootstrapRuntimeHealthSnapshot,
+      "self-bootstrap route should persist a runtime health snapshot"
     );
 
     const blockedRun = createRun({
@@ -1955,7 +1971,12 @@ async function main(): Promise<void> {
     assert.equal(blockerDetail?.heartbeat, null);
     assert.deepEqual(
       blockerDetail?.journal.map((entry) => entry.type),
-      ["attempt.created", "attempt.preflight.failed", "attempt.failed"]
+      [
+        "attempt.created",
+        "attempt.preflight.failed",
+        "attempt.failed",
+        "run.auto_resume.blocked"
+      ]
     );
     assert.equal(payload.run_health.status, "waiting_steer");
     assert.equal(payload.run.harness_profile.execution.effort, "high");
@@ -2072,7 +2093,8 @@ async function main(): Promise<void> {
     assert.equal(payload.worker_effort.reviewer.status, "unsupported");
     assert.equal(payload.worker_effort.synthesizer.requested_effort, "medium");
     assert.equal(payload.worker_effort.synthesizer.status, "unsupported");
-    assert.equal(payload.automation?.mode, "active");
+    assert.equal(payload.automation?.mode, "manual_only");
+    assert.equal(payload.automation?.reason_code, "automatic_resume_blocked");
     assert.equal(payload.policy_runtime?.stage, "execution");
     assert.equal(payload.policy_runtime?.approval_status, "approved");
     assert.equal(payload.policy_runtime?.proposed_signature, "verify-run-detail-policy");
@@ -2154,7 +2176,10 @@ async function main(): Promise<void> {
     );
     assert.equal(payload.latest_handoff_bundle?.source_refs.adversarial_verification, null);
     assert.equal(payload.run_brief?.latest_attempt_id, blockerAttempt.id);
-    assert.equal(payload.run_brief?.headline, blockerFailureContext.message);
+    assert.equal(
+      payload.run_brief?.headline,
+      settledHandoffRecoveryBlockedMessage
+    );
     assert.equal(payload.run_brief?.primary_focus, blockerAttempt.objective);
     assert.equal(payload.run_brief?.failure_signal?.failure_class, "preflight_blocked");
     assert.equal(
@@ -2213,9 +2238,14 @@ async function main(): Promise<void> {
     assert.equal(payload.working_context?.version, 1);
     assert.equal(payload.working_context?.source_attempt_id, blockerAttempt.id);
     assert.equal(payload.working_context?.current_focus, blockerAttempt.objective);
-    assert.equal(payload.working_context?.current_blocker?.summary, blockerFailureContext.message);
+    assert.equal(
+      payload.working_context?.current_blocker?.summary,
+      settledHandoffRecoveryBlockedMessage
+    );
     assert.ok(payload.working_context?.source_snapshot.current.ref?.endsWith("current.json"));
-    assert.equal(payload.working_context?.source_snapshot.automation.ref, null);
+    assert.ok(
+      payload.working_context?.source_snapshot.automation.ref?.endsWith("automation.json")
+    );
     assert.equal(
       payload.working_context?.source_snapshot.latest_attempt.attempt_id,
       blockerAttempt.id
@@ -2740,7 +2770,7 @@ async function main(): Promise<void> {
     assert.equal(runSummary?.latest_handoff_bundle?.source_refs.adversarial_verification, null);
     assert.equal(runSummary?.latest_handoff_bundle?.adversarial_verification, null);
     assert.equal(runSummary?.run_brief?.latest_attempt_id, blockerAttempt.id);
-    assert.equal(runSummary?.run_brief?.headline, blockerFailureContext.message);
+    assert.equal(runSummary?.run_brief?.headline, settledHandoffRecoveryBlockedMessage);
     assert.equal(runSummary?.run_brief?.summary, blockerFailureContext.message);
     assert.equal(runSummary?.run_brief?.primary_focus, blockerAttempt.objective);
     assert.equal(runSummary?.run_brief?.failure_signal?.failure_class, "preflight_blocked");

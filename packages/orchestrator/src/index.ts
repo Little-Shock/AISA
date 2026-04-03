@@ -6923,6 +6923,8 @@ export {
   type SelfBootstrapNextTaskSourceAnchor
 } from "./self-bootstrap-next-task.js";
 
+export { captureSelfBootstrapRuntimeHealthSnapshot } from "./self-bootstrap-runtime-health.js";
+
 export {
   buildRunWorkingContext,
   readRunWorkingContextView,

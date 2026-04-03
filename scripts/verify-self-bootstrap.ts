@@ -655,6 +655,7 @@ async function assertSupervisorRepairsWorkerOutputSchemaBlocker(sourceRoot: stri
 async function assertSupervisorDoesNotKeepRotatingPinnedRun(sourceRoot: string): Promise<{
   first_rotated_run_id: string | null;
   second_cycle_active_run_id: string | null;
+  rotated_runtime_health_snapshot: string | null;
 }> {
   const baseDir = await createTrackedVerifyTempDir(
     "aisa-self-bootstrap-rotate-pin-"
@@ -755,6 +756,13 @@ async function assertSupervisorDoesNotKeepRotatingPinnedRun(sourceRoot: string):
       firstRotatedRunId && firstRotatedRunId !== blockedRun.id,
       "first cycle should rotate to a replacement self-bootstrap run"
     );
+    const rotatedRuntimeHealthSnapshot = firstRotatedRunId
+      ? await getRunRuntimeHealthSnapshot(workspacePaths, firstRotatedRunId)
+      : null;
+    assert.ok(
+      rotatedRuntimeHealthSnapshot,
+      "replacement self-bootstrap run should persist a runtime health snapshot"
+    );
     assert.equal(
       (await listRuns(workspacePaths)).length,
       2,
@@ -782,11 +790,151 @@ async function assertSupervisorDoesNotKeepRotatingPinnedRun(sourceRoot: string):
 
     return {
       first_rotated_run_id: firstRotatedRunId,
-      second_cycle_active_run_id: secondState.active_run_id ?? null
+      second_cycle_active_run_id: secondState.active_run_id ?? null,
+      rotated_runtime_health_snapshot:
+        rotatedRuntimeHealthSnapshot
+          ? `runs/${firstRotatedRunId}/artifacts/runtime-health-snapshot.json`
+          : null
     };
   } finally {
     await app.close();
   }
+}
+
+async function assertSupervisorLeavesFailClosedWaitingRunPaused(sourceRoot: string): Promise<{
+  blocked_run_id: string;
+  blocking_reason: string | null;
+}> {
+  const baseDir = await createTrackedVerifyTempDir(
+    "aisa-self-bootstrap-blocked-waiting-"
+  );
+  const repoRoot = join(baseDir, "repo");
+  const runtimeDataRoot = join(baseDir, "runtime-data");
+  const managedWorkspaceRoot = join(baseDir, ".aisa-run-worktrees");
+  await createGitWorkspace(repoRoot);
+  await mkdir(managedWorkspaceRoot, { recursive: true });
+
+  const publishedActiveTask = await loadPublishedActiveTaskFixture(sourceRoot);
+  await seedSelfBootstrapActiveTask(repoRoot, publishedActiveTask.content);
+
+  const workspacePaths = resolveWorkspacePaths(runtimeDataRoot);
+  await ensureWorkspace(workspacePaths);
+  const blockedRun = createRun({
+    title: "AISA 自举下一步规划",
+    description: "Fail-closed waiting run should stay paused overnight.",
+    success_criteria: ["Do not relaunch when the last blocker is fail-closed."],
+    constraints: [],
+    owner_id: "test-owner",
+    workspace_root: repoRoot
+  });
+  const blockingReason =
+    "self-bootstrap blocked because active next task snapshot is missing or invalid while building execution contract: missing title";
+  await saveRun(workspacePaths, blockedRun);
+  await saveCurrentDecision(
+    workspacePaths,
+    createCurrentDecision({
+      run_id: blockedRun.id,
+      run_status: "waiting_steer",
+      recommended_next_action: "wait_for_human",
+      recommended_attempt_type: "research",
+      summary: "Self-bootstrap is paused on a fail-closed blocker.",
+      blocking_reason: blockingReason,
+      waiting_for_human: true,
+      updated_at: "2026-04-01T10:00:00.000Z"
+    })
+  );
+  await appendRunJournal(
+    workspacePaths,
+    createRunJournalEntry({
+      run_id: blockedRun.id,
+      type: "run.auto_resume.blocked",
+      payload: {
+        reason: "preflight_blocked_execution",
+        failure_class: "preflight_blocked",
+        failure_policy_mode: "fail_closed",
+        failure_code: "blocked_pnpm_verification_plan",
+        message:
+          "Preflight already proved the verifier plan is not runnable here, so automatic resume stays blocked."
+      },
+      ts: "2026-04-01T10:00:05.000Z"
+    })
+  );
+
+  const app = await buildServer({
+    runtimeRepoRoot: sourceRoot,
+    devRepoRoot: repoRoot,
+    runtimeDataRoot,
+    managedWorkspaceRoot,
+    startOrchestrator: false
+  });
+  const apiBaseUrl = await app.listen({
+    host: "127.0.0.1",
+    port: 0
+  });
+  const supervisorStateFile = join(runtimeDataRoot, "artifacts", "self-bootstrap-supervisor-state.json");
+
+  try {
+    const supervisorResult = await runTsxScript({
+      cwd: sourceRoot,
+      sourceRoot,
+      scriptPath: join(sourceRoot, "scripts", "supervise-self-bootstrap.ts"),
+      args: [
+        "--once",
+        "--api-base-url",
+        apiBaseUrl,
+        "--run-id",
+        blockedRun.id,
+        "--state-file",
+        supervisorStateFile,
+        "--waiting-relaunch-ms",
+        "1"
+      ],
+      extraEnv: {
+        AISA_RUNTIME_REPO_ROOT: sourceRoot,
+        AISA_DEV_REPO_ROOT: repoRoot,
+        AISA_RUNTIME_DATA_ROOT: runtimeDataRoot,
+        AISA_MANAGED_WORKSPACE_ROOT: managedWorkspaceRoot
+      }
+    });
+    assert.equal(
+      supervisorResult.exitCode,
+      0,
+      formatScriptFailure("scripts/supervise-self-bootstrap.ts", supervisorResult)
+    );
+  } finally {
+    await app.close();
+  }
+
+  const [current, journal, state] = await Promise.all([
+    getCurrentDecision(workspacePaths, blockedRun.id),
+    listRunJournal(workspacePaths, blockedRun.id),
+    readFile(supervisorStateFile, "utf8").then((content) =>
+      JSON.parse(content) as {
+        active_run_id?: string | null;
+        repair_log?: Array<{ action?: string; detail?: string }>;
+      }
+    )
+  ]);
+
+  assert.equal(current?.run_status, "waiting_steer");
+  assert.equal(current?.waiting_for_human, true);
+  assert.equal(current?.blocking_reason, blockingReason);
+  assert.ok(
+    !journal.some((entry) => entry.type === "run.launched"),
+    "fail-closed waiting run should not be relaunched by the supervisor"
+  );
+  assert.ok(
+    !state.repair_log?.some(
+      (entry) => entry.action === "launch_run" && entry.detail.includes("waiting_steer")
+    ),
+    "supervisor should not record a launch repair for a fail-closed waiting run"
+  );
+  assert.equal(state.active_run_id, blockedRun.id);
+
+  return {
+    blocked_run_id: blockedRun.id,
+    blocking_reason: current?.blocking_reason ?? null
+  };
 }
 
 async function assertSupervisorSuspendsSupersededSelfBootstrapRuns(sourceRoot: string): Promise<{
@@ -1336,6 +1484,8 @@ async function main(): Promise<void> {
       await assertSupervisorDoesNotKeepRotatingPinnedRun(sourceRoot);
     const supersededRunCleanup =
       await assertSupervisorSuspendsSupersededSelfBootstrapRuns(sourceRoot);
+    const blockedWaitingRun =
+      await assertSupervisorLeavesFailClosedWaitingRunPaused(sourceRoot);
 
     console.log(
       JSON.stringify(
@@ -1355,9 +1505,13 @@ async function main(): Promise<void> {
           repair_state_action: supervisorSchemaRepair.repair_state_action,
           first_rotated_run_id: pinnedRunRotation.first_rotated_run_id,
           second_cycle_active_run_id: pinnedRunRotation.second_cycle_active_run_id,
+          rotated_runtime_health_snapshot:
+            pinnedRunRotation.rotated_runtime_health_snapshot,
           suspended_run_id: supersededRunCleanup.suspended_run_id,
           suspended_attempt_id: supersededRunCleanup.stopped_attempt_id,
-          cleanup_active_run_id: supersededRunCleanup.active_run_id
+          cleanup_active_run_id: supersededRunCleanup.active_run_id,
+          blocked_waiting_run_id: blockedWaitingRun.blocked_run_id,
+          blocked_waiting_reason: blockedWaitingRun.blocking_reason
         },
         null,
         2

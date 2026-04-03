@@ -27,6 +27,7 @@ import { appendEvent, listEvents } from "@autoresearch/event-log";
 import {
   assessRunHealth,
   buildRuntimeWorkspaceScopeRoots,
+  captureSelfBootstrapRuntimeHealthSnapshot,
   createRunWorkspaceScopePolicy,
   deriveRunSurfaceFailureSignal,
   lockRunWorkspaceRoot,
@@ -91,6 +92,7 @@ import {
     saveRunPolicyRuntime,
     saveRun,
     saveRunAutomationControl,
+    saveRunRuntimeHealthSnapshot,
     saveRunSteer,
   saveSteer
 } from "@autoresearch/state-store";
@@ -1176,8 +1178,37 @@ export async function buildServer(
       run_status: "draft",
       summary: "Self-bootstrap run created. Waiting to launch."
     });
+    const runtimeHealthSnapshotRef = relative(
+      workspacePaths.rootDir,
+      resolveRunPaths(workspacePaths, run.id).runtimeHealthSnapshotFile
+    );
+    let runtimeHealthSnapshot;
+    try {
+      runtimeHealthSnapshot = await captureSelfBootstrapRuntimeHealthSnapshot({
+        runId: run.id,
+        workspaceRoot: runtimeLayout.devRepoRoot,
+        runtimeRepoRoot: runtimeLayout.runtimeRepoRoot
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return reply.code(400).send({ message });
+    }
+    const seededTemplate = buildSelfBootstrapRunTemplate({
+      workspaceRoot: runtimeLayout.devRepoRoot,
+      ownerId: body.owner_id,
+      focus: body.focus,
+      activeNextTask: {
+        path: activeNextTask.path,
+        ...activeNextTask.entry
+      },
+      runtimeHealthSnapshot: {
+        path: runtimeHealthSnapshotRef,
+        snapshot: runtimeHealthSnapshot
+      }
+    });
 
     await saveRun(workspacePaths, run);
+    await saveRunRuntimeHealthSnapshot(workspacePaths, runtimeHealthSnapshot);
     await saveCurrentDecision(workspacePaths, current);
     await appendRunJournal(
       workspacePaths,
@@ -1219,12 +1250,26 @@ export async function buildServer(
         }
       })
     );
+    await appendRunJournal(
+      workspacePaths,
+      createRunJournalEntry({
+        run_id: run.id,
+        type: "run.runtime_health_snapshot.captured",
+        payload: {
+          path: runtimeHealthSnapshotRef,
+          verify_runtime_status: runtimeHealthSnapshot.verify_runtime.status,
+          history_contract_drift_status:
+            runtimeHealthSnapshot.history_contract_drift.status,
+          drift_count: runtimeHealthSnapshot.history_contract_drift.drift_count
+        }
+      })
+    );
 
     let runSteer = null;
     if (body.seed_steer !== false) {
       runSteer = createRunSteer({
         run_id: run.id,
-        content: template.initialSteer
+        content: seededTemplate.initialSteer
       });
       await saveRunSteer(workspacePaths, runSteer);
       await appendRunJournal(
@@ -1271,7 +1316,8 @@ export async function buildServer(
       steer: runSteer,
       template: "self-bootstrap",
       active_next_task: activeNextTask.path,
-      active_next_task_snapshot: activeNextTaskSnapshotRef
+      active_next_task_snapshot: activeNextTaskSnapshotRef,
+      runtime_health_snapshot: runtimeHealthSnapshotRef
     });
   });
 

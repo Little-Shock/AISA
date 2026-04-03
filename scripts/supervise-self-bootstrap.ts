@@ -34,6 +34,7 @@ import {
   getAttemptRuntimeState,
   getCurrentDecision,
   getRun,
+  getRunAutomationControl,
   listAttempts,
   listRunJournal,
   listRuns,
@@ -86,6 +87,7 @@ type SupervisorState = {
 type RunSnapshot = {
   run: Run;
   current: CurrentDecision | null;
+  automation: Awaited<ReturnType<typeof getRunAutomationControl>>;
   attempts: Attempt[];
   journal: RunJournalEntry[];
   latestAttempt: Attempt | null;
@@ -654,9 +656,12 @@ async function loadRunSnapshot(
 ): Promise<RunSnapshot> {
   const workspacePaths = resolveWorkspacePaths(runtimeDataRoot);
   const run = await getRun(workspacePaths, runId);
-  const current = await getCurrentDecision(workspacePaths, runId);
-  const attempts = await listAttempts(workspacePaths, runId);
-  const journal = await listRunJournal(workspacePaths, runId);
+  const [current, automation, attempts, journal] = await Promise.all([
+    getCurrentDecision(workspacePaths, runId),
+    getRunAutomationControl(workspacePaths, runId),
+    listAttempts(workspacePaths, runId),
+    listRunJournal(workspacePaths, runId)
+  ]);
   const latestAttempt = attempts.at(-1) ?? null;
   const latestHeartbeat = latestAttempt
     ? await getAttemptHeartbeat(workspacePaths, runId, latestAttempt.id)
@@ -668,6 +673,7 @@ async function loadRunSnapshot(
   return {
     run,
     current,
+    automation,
     attempts,
     journal,
     latestAttempt,
@@ -691,6 +697,37 @@ function lastJournalEvent(snapshot: RunSnapshot, type: string): RunJournalEntry 
     }
   }
   return null;
+}
+
+function isAutoResumeResetBoundary(type: string): boolean {
+  return (
+    type === "run.steer.queued" ||
+    type === "run.launched" ||
+    type === "run.manual_recovery" ||
+    type === "attempt.checkpoint.created"
+  );
+}
+
+function hasRecentJournalEventSinceReset(
+  snapshot: RunSnapshot,
+  type: string
+): boolean {
+  for (let index = snapshot.journal.length - 1; index >= 0; index -= 1) {
+    const entry = snapshot.journal[index];
+    if (!entry) {
+      continue;
+    }
+
+    if (isAutoResumeResetBoundary(entry.type)) {
+      return false;
+    }
+
+    if (entry.type === type) {
+      return true;
+    }
+  }
+
+  return false;
 }
 
 function getMostRecentActivityTs(snapshot: RunSnapshot): string | null {
@@ -739,6 +776,29 @@ function hasGovernanceDeadEndBlocker(snapshot: RunSnapshot): boolean {
   return /治理层拦下了|已证伪方案|缺失工件|missing artifact|Objective referenced missing artifacts|excluded plan|dispatch blocked/i.test(
     blockingReason
   );
+}
+
+function hasSelfBootstrapSnapshotBlocker(snapshot: RunSnapshot): boolean {
+  const blockingReason = snapshot.current?.blocking_reason ?? "";
+  return /active next task snapshot is missing or invalid/i.test(blockingReason);
+}
+
+function hasSupervisorPauseBoundary(snapshot: RunSnapshot): boolean {
+  if (hasRecentJournalEventSinceReset(snapshot, "run.auto_resume.blocked")) {
+    return true;
+  }
+
+  const reasonCode = snapshot.automation?.reason_code ?? null;
+  if (
+    snapshot.automation?.mode === "manual_only" &&
+    (reasonCode === "automatic_resume_blocked" ||
+      reasonCode === "manual_recovery" ||
+      reasonCode === "superseded_self_bootstrap_run")
+  ) {
+    return true;
+  }
+
+  return hasSelfBootstrapSnapshotBlocker(snapshot);
 }
 
 function getLatestAttemptFailureEntry(snapshot: RunSnapshot): RunJournalEntry | null {
@@ -863,6 +923,10 @@ function shouldRelaunchWaitingRun(
     return false;
   }
 
+  if (hasSupervisorPauseBoundary(snapshot)) {
+    return false;
+  }
+
   if (hasHardBoundaryBlocker(snapshot)) {
     return false;
   }
@@ -893,6 +957,10 @@ function shouldRotateRun(snapshot: RunSnapshot): boolean {
   }
 
   if (snapshot.current?.run_status !== "waiting_steer") {
+    return false;
+  }
+
+  if (hasSupervisorPauseBoundary(snapshot)) {
     return false;
   }
 

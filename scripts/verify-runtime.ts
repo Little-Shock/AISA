@@ -103,6 +103,8 @@ type ScriptResult = {
 const SKIP_SELF_BOOTSTRAP_ENV = "AISA_VERIFY_RUNTIME_SKIP_SELF_BOOTSTRAP";
 const RUN_LOOP_FILTER_ENV = "AISA_VERIFY_RUN_LOOP_FILTER";
 const VERIFY_RUNTIME_SCOPE_ENV = "AISA_VERIFY_RUNTIME_SCOPE";
+const SELF_BOOTSTRAP_HEALTH_SNAPSHOT_SCOPE =
+  "self_bootstrap_health_snapshot";
 
 function getRequestedRunLoopFilter(): string | null {
   const raw = process.env[RUN_LOOP_FILTER_ENV]?.trim();
@@ -525,6 +527,40 @@ async function assertHistoryContractDriftClean(): Promise<HistoryContractDriftRe
   return report;
 }
 
+async function runSelfBootstrapHealthSnapshotReplay(): Promise<{
+  workerAdapter: WorkerAdapterReport;
+  driveRun: VerifyDriveRunReport;
+  runAutonomy: RunAutonomyReport;
+  governance: GovernanceReport;
+  policyRuntime: PolicyRuntimeReport;
+  historyContractDrift: HistoryContractDriftReport;
+}> {
+  await assertRunLoopReplay();
+  await assertControlApiSupervisorReplay();
+  await assertWorkingContextReplay();
+  await assertMaintenancePlaneReplay();
+  await assertDashboardControlSurfaceReplay();
+  await assertDashboardRunSteerReplay();
+  await assertRunStreamReplay();
+  const workerAdapter = await assertWorkerAdapterReplay();
+  const driveRun = await assertDriveRunReplay();
+  const runAutonomy = await assertRunAutonomyReplay();
+  const governance = await assertGovernanceReplay();
+  const policyRuntime = await assertPolicyRuntimeReplay();
+  await assertFailurePolicyReplay();
+  await assertHistoryContractDriftRepairReplay();
+  const historyContractDrift = await assertHistoryContractDriftClean();
+
+  return {
+    workerAdapter,
+    driveRun,
+    runAutonomy,
+    governance,
+    policyRuntime,
+    historyContractDrift
+  };
+}
+
 async function main(): Promise<void> {
   const requestedScope = getRequestedVerifyRuntimeScope();
   if (requestedScope === "run_loop_only") {
@@ -537,6 +573,59 @@ async function main(): Promise<void> {
           status: "passed"
         }
       })
+    );
+    return;
+  }
+  if (requestedScope === SELF_BOOTSTRAP_HEALTH_SNAPSHOT_SCOPE) {
+    const scopedReport = await runSelfBootstrapHealthSnapshotReplay();
+    console.log(
+      JSON.stringify(
+        {
+          summary:
+            "runtime focused replay passed for self_bootstrap_health_snapshot scope. recursive self-bootstrap entrypoints stayed excluded.",
+          scope: requestedScope,
+          skipped_suites: ["runtime_lanes", "run_detail_api", "self_bootstrap"],
+          worker_adapter: {
+            status: scopedReport.workerAdapter.status,
+            research_shell_reentry:
+              scopedReport.workerAdapter.research_shell_reentry,
+            runtime_event_stream:
+              scopedReport.workerAdapter.runtime_event_stream,
+            stalled_worker_guard:
+              scopedReport.workerAdapter.stalled_worker_guard,
+            malformed_findings_guard:
+              scopedReport.workerAdapter.malformed_findings_guard,
+            malformed_artifacts_guard:
+              scopedReport.workerAdapter.malformed_artifacts_guard
+          },
+          drive_run: {
+            status: "passed",
+            synced_self_bootstrap_artifacts:
+              scopedReport.driveRun.synced_self_bootstrap_artifacts ?? null
+          },
+          run_autonomy: {
+            status: "passed",
+            passed: scopedReport.runAutonomy.passed,
+            failed: scopedReport.runAutonomy.failed
+          },
+          governance: {
+            status: "passed",
+            passed: scopedReport.governance.passed,
+            failed: scopedReport.governance.failed
+          },
+          policy_runtime: {
+            status: "passed",
+            passed: scopedReport.policyRuntime.passed,
+            failed: scopedReport.policyRuntime.failed
+          },
+          history_contract_drift: {
+            status: scopedReport.historyContractDrift.status,
+            drift_count: scopedReport.historyContractDrift.drift_count
+          }
+        },
+        null,
+        2
+      )
     );
     return;
   }
