@@ -295,11 +295,12 @@ export async function buildServer(
   });
 
   const buildAttemptDetail = async (input: {
+    run: Awaited<ReturnType<typeof getRun>>;
     runId: string;
     attempt: Awaited<ReturnType<typeof listAttempts>>[number];
     journal: Awaited<ReturnType<typeof listRunJournal>>;
   }) => {
-    const { runId, attempt, journal } = input;
+    const { run, runId, attempt, journal } = input;
     const [
       contract,
       context,
@@ -331,6 +332,13 @@ export async function buildServer(
     return {
       attempt,
       contract,
+      effective_verifier_kit_profile: orchestrator.describeAttemptEffectiveVerifierKit({
+        run,
+        attemptType: attempt.attempt_type,
+        attemptContract: contract,
+        runtimeVerification,
+        adversarialVerification
+      }),
       context,
       failure_context: reviewPacket?.failure_context ?? null,
       result,
@@ -507,6 +515,7 @@ export async function buildServer(
     const attemptDetails = await Promise.all(
       attempts.map((attempt) =>
         buildAttemptDetail({
+          run,
           runId,
           attempt,
           journal
@@ -527,6 +536,7 @@ export async function buildServer(
       });
     const workerEffort = orchestrator.describeRunWorkerEffort(run);
     const harnessSlots = orchestrator.describeRunHarnessSlots(run);
+    const defaultVerifierKitProfile = orchestrator.describeRunDefaultVerifierKit(run);
 
     return {
       run,
@@ -559,6 +569,7 @@ export async function buildServer(
       working_context_degraded: workingContextView.working_context_degraded,
       run_health: runHealth,
       harness_slots: harnessSlots,
+      default_verifier_kit_profile: defaultVerifierKitProfile,
       worker_effort: workerEffort,
       attempts,
       attempt_details: attemptDetails,
@@ -614,6 +625,7 @@ export async function buildServer(
         staleAfterMs: runHealthStaleMs
       });
     const harnessSlots = orchestrator.describeRunHarnessSlots(run);
+    const defaultVerifierKitProfile = orchestrator.describeRunDefaultVerifierKit(run);
 
     return {
       run,
@@ -645,6 +657,7 @@ export async function buildServer(
       working_context_ref: workingContextView.working_context_ref,
       working_context_degraded: workingContextView.working_context_degraded,
       harness_slots: harnessSlots,
+      default_verifier_kit_profile: defaultVerifierKitProfile,
       worker_effort: orchestrator.describeRunWorkerEffort(run),
       run_health: runHealth,
       attempt_count: attempts.length,

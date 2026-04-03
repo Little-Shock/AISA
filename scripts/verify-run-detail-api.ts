@@ -83,6 +83,17 @@ type HarnessSlotsPayload = {
   final_synthesis: HarnessSlotPayload;
 };
 
+type VerifierKitProfilePayload = {
+  kit: string;
+  title: string;
+  detail: string;
+  command_policy: string;
+  preflight_expectations: string[];
+  runtime_expectations: string[];
+  adversarial_focus: string[];
+  source: string;
+};
+
 async function main(): Promise<void> {
   try {
   const rootDir = await createTrackedVerifyTempDir("aisa-run-detail-api-");
@@ -410,7 +421,22 @@ async function main(): Promise<void> {
         verification_commands:
           attemptContract.verification_plan?.commands.map((item) => item.command) ?? []
       },
+      toolchain_assessment: {
+        verifier_kit: "api",
+        command_policy: "contract_locked_commands",
+        has_package_json: true,
+        has_local_node_modules: true,
+        inferred_pnpm_commands: [],
+        blocked_pnpm_commands: [],
+        unrunnable_verification_commands: []
+      },
       checks: [
+        {
+          code: "verifier_kit_policy_loaded",
+          status: "passed",
+          message:
+            "API Task uses contract_locked_commands, so preflight requires explicit replay commands instead of auto-inferring workspace scripts."
+        },
         {
           code: "verification_plan",
           status: "passed",
@@ -1056,6 +1082,7 @@ async function main(): Promise<void> {
         };
       };
       harness_slots: HarnessSlotsPayload;
+      default_verifier_kit_profile: VerifierKitProfilePayload;
       worker_effort: {
         execution: { requested_effort: string; status: string };
         reviewer: { requested_effort: string; status: string };
@@ -1086,6 +1113,15 @@ async function main(): Promise<void> {
         contract: {
           verifier_kit: string | null;
         } | null;
+        toolchain_assessment: {
+          verifier_kit: string | null;
+          command_policy: string | null;
+        } | null;
+        checks: Array<{
+          code: string;
+          status: string;
+          message: string;
+        }>;
       } | null;
       latest_preflight_evaluation_ref: string | null;
       latest_runtime_verification: {
@@ -1185,6 +1221,7 @@ async function main(): Promise<void> {
       attempts: Array<{ id: string }>;
       attempt_details: Array<{
         attempt: { id: string; input_context_ref: string | null };
+        effective_verifier_kit_profile: VerifierKitProfilePayload | null;
         contract: {
           required_evidence: string[];
           adversarial_verification_required: boolean;
@@ -1308,6 +1345,16 @@ async function main(): Promise<void> {
       true
     );
     assert.equal(completedDetail?.contract?.verifier_kit, "api");
+    assert.equal(completedDetail?.effective_verifier_kit_profile?.kit, "api");
+    assert.equal(completedDetail?.effective_verifier_kit_profile?.title, "API Task");
+    assert.equal(
+      completedDetail?.effective_verifier_kit_profile?.command_policy,
+      "contract_locked_commands"
+    );
+    assert.equal(
+      completedDetail?.effective_verifier_kit_profile?.source,
+      "attempt_contract.verifier_kit"
+    );
     assert.deepEqual(completedDetail?.context, persistedContext);
     assert.equal(
       completedDetail?.failure_context,
@@ -1406,6 +1453,21 @@ async function main(): Promise<void> {
     ]);
     assert.equal(payload.harness_slots.execution.failure_semantics, "fail_closed");
     assert.equal(payload.harness_slots.execution.default_verifier_kit, "api");
+    assert.equal(payload.default_verifier_kit_profile.kit, "api");
+    assert.equal(payload.default_verifier_kit_profile.title, "API Task");
+    assert.equal(
+      payload.default_verifier_kit_profile.command_policy,
+      "contract_locked_commands"
+    );
+    assert.equal(
+      payload.default_verifier_kit_profile.source,
+      "run.harness_profile.execution.default_verifier_kit"
+    );
+    assert.ok(
+      payload.default_verifier_kit_profile.preflight_expectations.some((item) =>
+        item.includes("HTTP")
+      )
+    );
     assert.equal(payload.harness_slots.preflight_review.permission_boundary, "read_only");
     assert.deepEqual(payload.harness_slots.preflight_review.output_artifacts, [
       "artifacts/preflight-evaluation.json"
@@ -1437,6 +1499,19 @@ async function main(): Promise<void> {
     assert.equal(payload.latest_preflight_evaluation?.status, "passed");
     assert.equal(payload.latest_preflight_evaluation?.failure_class, null);
     assert.equal(payload.latest_preflight_evaluation?.contract?.verifier_kit, "api");
+    assert.equal(
+      payload.latest_preflight_evaluation?.toolchain_assessment?.verifier_kit,
+      "api"
+    );
+    assert.equal(
+      payload.latest_preflight_evaluation?.toolchain_assessment?.command_policy,
+      "contract_locked_commands"
+    );
+    assert.ok(
+      payload.latest_preflight_evaluation?.checks.some(
+        (check) => check.code === "verifier_kit_policy_loaded" && check.status === "passed"
+      )
+    );
     assert.ok(
       payload.latest_preflight_evaluation_ref?.endsWith("artifacts/preflight-evaluation.json")
     );
@@ -1582,6 +1657,7 @@ async function main(): Promise<void> {
           };
         };
         harness_slots: HarnessSlotsPayload;
+        default_verifier_kit_profile: VerifierKitProfilePayload;
         worker_effort: {
           execution: { requested_effort: string; status: string };
         };
@@ -1606,6 +1682,10 @@ async function main(): Promise<void> {
           failure_class: string | null;
           contract: {
             verifier_kit: string | null;
+          } | null;
+          toolchain_assessment: {
+            verifier_kit: string | null;
+            command_policy: string | null;
           } | null;
         } | null;
         latest_preflight_evaluation_ref: string | null;
@@ -1682,6 +1762,16 @@ async function main(): Promise<void> {
       "codex_cli_execution_worker"
     );
     assert.equal(runSummary?.harness_slots.execution.binding, "codex_cli_execution_worker");
+    assert.equal(runSummary?.default_verifier_kit_profile.kit, "api");
+    assert.equal(runSummary?.default_verifier_kit_profile.title, "API Task");
+    assert.equal(
+      runSummary?.default_verifier_kit_profile.command_policy,
+      "contract_locked_commands"
+    );
+    assert.equal(
+      runSummary?.default_verifier_kit_profile.source,
+      "run.harness_profile.execution.default_verifier_kit"
+    );
     assert.equal(
       runSummary?.harness_slots.execution.default_verifier_kit,
       "api"
@@ -1713,6 +1803,14 @@ async function main(): Promise<void> {
     assert.equal(runSummary?.latest_preflight_evaluation?.status, "passed");
     assert.equal(runSummary?.latest_preflight_evaluation?.failure_class, null);
     assert.equal(runSummary?.latest_preflight_evaluation?.contract?.verifier_kit, "api");
+    assert.equal(
+      runSummary?.latest_preflight_evaluation?.toolchain_assessment?.verifier_kit,
+      "api"
+    );
+    assert.equal(
+      runSummary?.latest_preflight_evaluation?.toolchain_assessment?.command_policy,
+      "contract_locked_commands"
+    );
     assert.ok(
       runSummary?.latest_preflight_evaluation_ref?.endsWith("artifacts/preflight-evaluation.json")
     );

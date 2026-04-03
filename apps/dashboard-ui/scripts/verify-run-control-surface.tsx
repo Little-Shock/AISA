@@ -90,6 +90,16 @@ async function main(): Promise<void> {
       "artifacts/preflight-evaluation.json"
     ]);
     assert.equal(runDetail.harness_slots.preflight_review.failure_semantics, "fail_closed");
+    assert.equal(runDetail.default_verifier_kit_profile.kit, fixture.expected_verifier_kit);
+    assert.equal(runDetail.default_verifier_kit_profile.title, "Web App Task");
+    assert.equal(
+      runDetail.default_verifier_kit_profile.command_policy,
+      "contract_locked_commands"
+    );
+    assert.equal(
+      runDetail.default_verifier_kit_profile.source,
+      "run.harness_profile.execution.default_verifier_kit"
+    );
     assert.equal(runDetail.policy_runtime?.stage, fixture.expected_policy_stage);
     assert.equal(
       runDetail.policy_runtime?.approval_status,
@@ -178,6 +188,11 @@ async function main(): Promise<void> {
       selectedRun?.harness_slots.final_synthesis.permission_boundary,
       "control_plane_only"
     );
+    assert.equal(selectedRun?.default_verifier_kit_profile.kit, fixture.expected_verifier_kit);
+    assert.equal(
+      selectedRun?.default_verifier_kit_profile.command_policy,
+      "contract_locked_commands"
+    );
 
     const selectedRunAttemptDetail =
       runDetail.attempt_details.find(
@@ -185,6 +200,18 @@ async function main(): Promise<void> {
       ) ??
       runDetail.attempt_details.at(-1) ??
       null;
+    assert.equal(
+      selectedRunAttemptDetail?.effective_verifier_kit_profile?.kit,
+      fixture.expected_verifier_kit
+    );
+    assert.equal(
+      selectedRunAttemptDetail?.effective_verifier_kit_profile?.title,
+      "Web App Task"
+    );
+    assert.equal(
+      selectedRunAttemptDetail?.effective_verifier_kit_profile?.command_policy,
+      "contract_locked_commands"
+    );
     const nowTs = Date.now();
     const overviewMarkup = renderToStaticMarkup(
       <RunOverviewPanel
@@ -248,6 +275,9 @@ async function main(): Promise<void> {
     assert.match(policyMarkup, /permission boundary: workspace_write/);
     assert.match(policyMarkup, /failure semantics: fail_closed/);
     assert.match(policyMarkup, /Output Artifacts/);
+    assert.match(policyMarkup, /Default Verifier Kit/);
+    assert.match(policyMarkup, /Web App Task/);
+    assert.match(policyMarkup, /Contract Locked Commands/);
     assert.match(
       policyMarkup,
       new RegExp(escapeRegExp(`default verifier kit: ${fixture.expected_verifier_kit}`))
@@ -258,6 +288,13 @@ async function main(): Promise<void> {
     );
     assert.match(verificationMarkup, /Verification Lane/);
     assert.match(verificationMarkup, /验证套件/);
+    assert.match(verificationMarkup, /Verifier Kit Contract/);
+    assert.match(verificationMarkup, /Web App Task/);
+    assert.match(verificationMarkup, /Contract Locked Commands/);
+    assert.match(
+      verificationMarkup,
+      /attempt_contract\.verifier_kit|run\.harness_profile\.execution\.default_verifier_kit/
+    );
     assert.match(
       verificationMarkup,
       new RegExp(escapeRegExp(fixture.expected_verifier_kit))

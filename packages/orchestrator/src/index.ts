@@ -201,6 +201,13 @@ import {
   describeRunHarnessSlots as buildRunHarnessSlotsView,
   type RunHarnessSlotsView
 } from "./slot-registry.js";
+import {
+  describeAttemptEffectiveVerifierKit as buildAttemptEffectiveVerifierKitView,
+  describeExecutionVerifierKit as buildExecutionVerifierKitView,
+  describeRunDefaultVerifierKit as buildRunDefaultVerifierKitView,
+  executionVerifierKitAllowsWorkspaceScriptInference,
+  type ExecutionVerifierKitView
+} from "./verifier-kit-registry.js";
 
 export interface OrchestratorOptions {
   attemptHeartbeatIntervalMs?: number;
@@ -356,9 +363,13 @@ export async function assessExecutionVerificationToolchain(input: {
   verifierKit?: ExecutionVerifierKit | null;
   verificationPlan?: ExecutionVerificationPlan | null;
 }): Promise<ExecutionVerificationToolchainAssessment> {
+  const verifierKit = input.verifierKit ?? DEFAULT_EXECUTION_VERIFIER_KIT;
+  const commandPolicy = executionVerifierKitAllowsWorkspaceScriptInference(verifierKit)
+    ? "workspace_script_inference"
+    : "contract_locked_commands";
   const scripts = await readWorkspacePackageScripts(input.workspaceRoot);
   const inferredCommands =
-    scripts === null || (input.verifierKit ?? DEFAULT_EXECUTION_VERIFIER_KIT) !== "repo"
+    scripts === null || commandPolicy !== "workspace_script_inference"
       ? []
       : buildDefaultExecutionVerificationCommandsFromScripts(scripts);
   const blockedPnpmCommands = (input.verificationPlan?.commands ?? [])
@@ -391,6 +402,8 @@ export async function assessExecutionVerificationToolchain(input: {
   );
 
   return {
+    verifier_kit: verifierKit,
+    command_policy: commandPolicy,
     has_package_json: scripts !== null,
     has_local_node_modules: hasLocalNodeModules,
     inferred_pnpm_commands: inferredCommands.map(
@@ -725,6 +738,26 @@ export class Orchestrator {
 
   describeRunHarnessSlots(run: Run): RunHarnessSlotsView {
     return buildRunHarnessSlotsView(run);
+  }
+
+  describeRunDefaultVerifierKit(run: Run): ExecutionVerifierKitView {
+    return buildRunDefaultVerifierKitView(run);
+  }
+
+  describeAttemptEffectiveVerifierKit(input: {
+    attemptType: Attempt["attempt_type"];
+    run: Run;
+    attemptContract?: Pick<AttemptContract, "attempt_type" | "verifier_kit"> | null;
+    runtimeVerification?: Pick<AttemptRuntimeVerification, "verifier_kit"> | null;
+    adversarialVerification?: Pick<AttemptAdversarialVerification, "verifier_kit"> | null;
+  }): ExecutionVerifierKitView | null {
+    return buildAttemptEffectiveVerifierKitView({
+      attemptType: input.attemptType,
+      attemptContract: input.attemptContract,
+      runtimeVerification: input.runtimeVerification,
+      adversarialVerification: input.adversarialVerification,
+      fallbackKit: resolveRunHarnessProfile(input.run).execution.default_verifier_kit
+    });
   }
 
   async tick(): Promise<void> {
@@ -1909,6 +1942,8 @@ export class Orchestrator {
     let current = await getCurrentDecision(this.workspacePaths, runId);
     let heartbeatTimer: NodeJS.Timeout | null = null;
     let heartbeatStarted = false;
+    let heartbeatClosed = false;
+    let heartbeatWritePromise: Promise<void> = Promise.resolve();
     let runtimeRestartRequest: RuntimeRestartRequest | null = null;
     let checkpointPreflight: GitCheckpointPreflight | null = null;
     const startLease = await this.tryAcquireRunDispatchLease(
@@ -1919,6 +1954,17 @@ export class Orchestrator {
       return;
     }
     let startLeaseReleased = false;
+    const enqueueHeartbeatWrite = (status: "active" | "released"): Promise<void> => {
+      heartbeatWritePromise = heartbeatWritePromise.then(() =>
+        this.writeAttemptHeartbeat({
+          runId,
+          attemptId: attempt.id,
+          startedAt: attempt.started_at ?? new Date().toISOString(),
+          status
+        })
+      );
+      return heartbeatWritePromise;
+    };
 
     try {
       run = await getRun(this.workspacePaths, runId);
@@ -2043,20 +2089,13 @@ export class Orchestrator {
           waiting_for_human: false
         })
       );
-      await this.writeAttemptHeartbeat({
-        runId,
-        attemptId: attempt.id,
-        startedAt: attempt.started_at ?? new Date().toISOString(),
-        status: "active"
-      });
+      await enqueueHeartbeatWrite("active");
       heartbeatStarted = true;
       heartbeatTimer = setInterval(() => {
-        void this.writeAttemptHeartbeat({
-          runId,
-          attemptId: attempt.id,
-          startedAt: attempt.started_at ?? new Date().toISOString(),
-          status: "active"
-        });
+        if (heartbeatClosed) {
+          return;
+        }
+        void enqueueHeartbeatWrite("active");
       }, this.attemptHeartbeatIntervalMs);
       heartbeatTimer.unref?.();
       await appendRunJournal(
@@ -2381,16 +2420,12 @@ export class Orchestrator {
       if (!startLeaseReleased) {
         await startLease.release();
       }
+      heartbeatClosed = true;
       if (heartbeatTimer) {
         clearInterval(heartbeatTimer);
       }
       if (heartbeatStarted) {
-        await this.writeAttemptHeartbeat({
-          runId,
-          attemptId: attempt.id,
-          startedAt: attempt.started_at ?? new Date().toISOString(),
-          status: "released"
-        });
+        await enqueueHeartbeatWrite("released");
       }
       if (runtimeRestartRequest) {
         await this.requestRuntimeRestart?.(runtimeRestartRequest);
@@ -4389,7 +4424,7 @@ export class Orchestrator {
     workspaceRoot: string,
     verifierKit: ExecutionVerifierKit = DEFAULT_EXECUTION_VERIFIER_KIT
   ): Promise<ExecutionVerificationPlan | undefined> {
-    if (verifierKit !== "repo") {
+    if (!executionVerifierKitAllowsWorkspaceScriptInference(verifierKit)) {
       return undefined;
     }
 
@@ -4415,6 +4450,7 @@ export class Orchestrator {
     assessment: ExecutionVerificationToolchainAssessment
   ): string | null {
     if (
+      assessment.command_policy === "workspace_script_inference" &&
       assessment.has_package_json &&
       !assessment.has_local_node_modules &&
       assessment.inferred_pnpm_commands.length > 0
@@ -4500,6 +4536,12 @@ export class Orchestrator {
       };
     }
 
+    const verifierKit =
+      resolveExecutionVerifierKit(input.attemptContract) ?? DEFAULT_EXECUTION_VERIFIER_KIT;
+    const verifierKitView = buildExecutionVerifierKitView({
+      kit: verifierKit,
+      source: "attempt_contract.verifier_kit"
+    });
     const checkpointPreflight = await captureAttemptCheckpointPreflight({
       run: input.run,
       attempt: input.attempt,
@@ -4507,7 +4549,7 @@ export class Orchestrator {
     });
     const assessment = await assessExecutionVerificationToolchain({
       workspaceRoot: input.attempt.workspace_root,
-      verifierKit: resolveExecutionVerifierKit(input.attemptContract),
+      verifierKit,
       verificationPlan: input.attemptContract.verification_plan ?? null
     });
     const contractSummary = this.buildAttemptContractPreflightSummary(input.attemptContract);
@@ -4534,6 +4576,14 @@ export class Orchestrator {
       failureReason = `Attempt ${input.attempt.id} is missing attempt_contract.json. Dispatch is blocked until the contract is recreated.`;
       addCheck("attempt_contract_present", "failed", failureReason);
     }
+
+    addCheck(
+      "verifier_kit_policy_loaded",
+      "passed",
+      verifierKitView.command_policy === "workspace_script_inference"
+        ? `${verifierKitView.title} uses workspace_script_inference, so preflight may infer replay commands from local workspace scripts when the repo toolchain is already present.`
+        : `${verifierKitView.title} uses contract_locked_commands, so preflight requires explicit replay commands instead of auto-inferring workspace scripts.`
+    );
 
     if (contractSummary?.requires_adversarial_verification) {
       addCheck(

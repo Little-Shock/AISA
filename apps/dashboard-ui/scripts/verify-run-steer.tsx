@@ -159,6 +159,17 @@ const fixtureRunDetail: RunDetail = {
       failure_semantics: "fail_closed"
     }
   },
+  default_verifier_kit_profile: {
+    kit: "repo",
+    title: "Repository Task",
+    detail:
+      "Repository-facing execution can infer replay from local workspace scripts when the repo toolchain is already present.",
+    command_policy: "workspace_script_inference",
+    preflight_expectations: ["Read package.json scripts before auto-inferring replay commands."],
+    runtime_expectations: ["Replay deterministic workspace scripts or contract-locked commands from the repo root."],
+    adversarial_focus: ["Probe repo-local toolchain assumptions and replay drift."],
+    source: "run.harness_profile.execution.default_verifier_kit"
+  },
   attempts: [
     {
       id: "att_fixture",

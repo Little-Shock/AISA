@@ -71,6 +71,13 @@ export const WorkerEffortLevelValues = ["low", "medium", "high"] as const;
 export const WorkerEffortLevelSchema = z.enum(WorkerEffortLevelValues);
 export const ExecutionVerifierKitValues = ["repo", "web", "api", "cli"] as const;
 export const ExecutionVerifierKitSchema = z.enum(ExecutionVerifierKitValues);
+export const ExecutionVerifierKitCommandPolicyValues = [
+  "workspace_script_inference",
+  "contract_locked_commands"
+] as const;
+export const ExecutionVerifierKitCommandPolicySchema = z.enum(
+  ExecutionVerifierKitCommandPolicyValues
+);
 export const DEFAULT_EXECUTION_VERIFIER_KIT = "repo" as const;
 export const RunHarnessSlotValues = [
   "research_or_planning",
@@ -738,6 +745,8 @@ export const AttemptCheckpointPreflightSchema = z.object({
 });
 
 export const ExecutionVerificationToolchainAssessmentSchema = z.object({
+  verifier_kit: ExecutionVerifierKitSchema.nullable().default(null),
+  command_policy: ExecutionVerifierKitCommandPolicySchema.nullable().default(null),
   has_package_json: z.boolean(),
   has_local_node_modules: z.boolean(),
   inferred_pnpm_commands: z.array(z.string().min(1)).default([]),
@@ -1250,6 +1259,9 @@ export type VerificationCommand = z.infer<typeof VerificationCommandSchema>;
 export type ExecutionVerificationPlan = z.infer<typeof ExecutionVerificationPlanSchema>;
 export type WorkerEffortLevel = z.infer<typeof WorkerEffortLevelSchema>;
 export type ExecutionVerifierKit = z.infer<typeof ExecutionVerifierKitSchema>;
+export type ExecutionVerifierKitCommandPolicy = z.infer<
+  typeof ExecutionVerifierKitCommandPolicySchema
+>;
 export type RunHarnessSlot = z.infer<typeof RunHarnessSlotSchema>;
 export type RunHarnessSlotBinding = z.infer<typeof RunHarnessSlotBindingSchema>;
 export type RunHarnessEffortPreference = z.infer<

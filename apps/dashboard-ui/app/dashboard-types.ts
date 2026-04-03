@@ -235,6 +235,21 @@ export type RunHarnessSlotsView = {
   final_synthesis: RunHarnessSlotView;
 };
 
+export type ExecutionVerifierKitCommandPolicy =
+  | "workspace_script_inference"
+  | "contract_locked_commands";
+
+export type ExecutionVerifierKitView = {
+  kit: "repo" | "web" | "api" | "cli";
+  title: string;
+  detail: string;
+  command_policy: ExecutionVerifierKitCommandPolicy;
+  preflight_expectations: string[];
+  runtime_expectations: string[];
+  adversarial_focus: string[];
+  source: string;
+};
+
 export type RunWorkingContextTaskRef = {
   task_id: string;
   title: string;
@@ -461,6 +476,7 @@ export type RunSummaryItem = {
   working_context_degraded: RunWorkingContextDegraded;
   run_health: RunHealthAssessment;
   harness_slots: RunHarnessSlotsView;
+  default_verifier_kit_profile: ExecutionVerifierKitView;
   attempt_count: number;
   latest_attempt: {
     id: string;
@@ -524,6 +540,7 @@ export type RunDetail = {
   working_context_degraded: RunWorkingContextDegraded;
   run_health: RunHealthAssessment;
   harness_slots: RunHarnessSlotsView;
+  default_verifier_kit_profile: ExecutionVerifierKitView;
   attempts: Array<{
     id: string;
     attempt_type: string;
@@ -549,6 +566,7 @@ export type RunDetail = {
       started_at: string | null;
       ended_at: string | null;
     };
+    effective_verifier_kit_profile: ExecutionVerifierKitView | null;
     contract: {
       objective: string;
       success_criteria: string[];

@@ -83,6 +83,19 @@ function workingContextDegradedReasonLabel(reasonCode: string | null | undefined
   }
 }
 
+function verifierKitCommandPolicyLabel(
+  commandPolicy: string | null | undefined
+): string {
+  switch (commandPolicy) {
+    case "workspace_script_inference":
+      return "Workspace Script Inference";
+    case "contract_locked_commands":
+      return "Contract Locked Commands";
+    default:
+      return "未知";
+  }
+}
+
 export function RunOverviewPanel({
   runDetail,
   selectedRun,
@@ -704,6 +717,7 @@ export function RunPolicyPanel({
   rejectBusy: boolean;
 }) {
   const policyRuntime = runDetail.policy_runtime;
+  const defaultVerifierKitProfile = runDetail.default_verifier_kit_profile;
   const harnessProfile = runDetail.run.harness_profile;
   const harnessSlots = [
     runDetail.harness_slots.research_or_planning,
@@ -799,6 +813,31 @@ export function RunPolicyPanel({
         ))}
       </div>
 
+      <SubPanel title="Default Verifier Kit" accent="emerald">
+        <SectionList
+          title="Kit Contract"
+          items={[
+            `kit: ${defaultVerifierKitProfile.kit}`,
+            `title: ${defaultVerifierKitProfile.title}`,
+            `command policy: ${verifierKitCommandPolicyLabel(defaultVerifierKitProfile.command_policy)}`,
+            `source: ${defaultVerifierKitProfile.source}`,
+            `detail: ${defaultVerifierKitProfile.detail}`
+          ]}
+        />
+        <SectionList
+          title="Preflight Expectations"
+          items={defaultVerifierKitProfile.preflight_expectations}
+        />
+        <SectionList
+          title="Runtime Expectations"
+          items={defaultVerifierKitProfile.runtime_expectations}
+        />
+        <SectionList
+          title="Adversarial Focus"
+          items={defaultVerifierKitProfile.adversarial_focus}
+        />
+      </SubPanel>
+
       <Textarea
         value={note}
         onChange={(event) => onNoteChange(event.target.value)}
@@ -838,10 +877,13 @@ export function RunVerificationPanel({
   const adversarialVerification =
     selectedRunAttemptDetail?.adversarial_verification ?? null;
   const evaluation = selectedRunAttemptDetail?.evaluation ?? null;
+  const verifierKitProfile =
+    selectedRunAttemptDetail?.effective_verifier_kit_profile ?? null;
   const contract = selectedRunAttemptDetail?.contract ?? null;
   const attempt = selectedRunAttemptDetail?.attempt ?? null;
   const verificationCommands = contract?.verification_plan?.commands ?? [];
   const verifierKit =
+    verifierKitProfile?.kit ??
     contract?.verifier_kit ??
     verification?.verifier_kit ??
     adversarialVerification?.verifier_kit ??
@@ -918,7 +960,7 @@ export function RunVerificationPanel({
             items={[
               `尝试：${attempt?.id ?? "暂无"}`,
               `类型：${attempt ? attemptTypeLabel(attempt.attempt_type) : "暂无"}`,
-              `验证套件：${verifierKit}`,
+              `验证套件：${verifierKitProfile?.title ?? verifierKit}`,
               `回放状态：${verificationStatusLabel}`,
               `失败码：${verification?.failure_code ?? "暂无"}`,
               `改动文件：${String(verification?.changed_files.length ?? 0)}`,
@@ -943,6 +985,31 @@ export function RunVerificationPanel({
                 return `${verdict} · ${command.purpose} · ${command.command} · ${command.exit_code}/${command.expected_exit_code}`;
               }) ?? []
             }
+          />
+        </SubPanel>
+
+        <SubPanel title="Verifier Kit Contract" accent="emerald">
+          <SectionList
+            title="Kit Contract"
+            items={[
+              `kit: ${verifierKit}`,
+              `title: ${verifierKitProfile?.title ?? "暂无"}`,
+              `command policy: ${verifierKitCommandPolicyLabel(verifierKitProfile?.command_policy)}`,
+              `source: ${verifierKitProfile?.source ?? "暂无"}`,
+              `detail: ${verifierKitProfile?.detail ?? "暂无"}`
+            ]}
+          />
+          <SectionList
+            title="Preflight Expectations"
+            items={verifierKitProfile?.preflight_expectations ?? []}
+          />
+          <SectionList
+            title="Runtime Expectations"
+            items={verifierKitProfile?.runtime_expectations ?? []}
+          />
+          <SectionList
+            title="Adversarial Focus"
+            items={verifierKitProfile?.adversarial_focus ?? []}
           />
         </SubPanel>
 

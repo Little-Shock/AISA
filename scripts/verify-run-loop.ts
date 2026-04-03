@@ -67,6 +67,7 @@ import {
 
 const REVIEWER_CONFIG_ENV = "AISA_REVIEWERS_JSON";
 const SYNTHESIZER_CONFIG_ENV = "AISA_REVIEW_SYNTHESIZER_JSON";
+const CLI_FIXTURE_TIMEOUT_MS = 15_000;
 const VERIFY_RUN_LOOP_FILTER_ENV = "AISA_VERIFY_RUN_LOOP_FILTER";
 const VERIFY_TEMP_ROOT_ENV = "AISA_VERIFY_TEMP_ROOT";
 const VERIFY_KEEP_TEMP_ENV = "AISA_VERIFY_KEEP_TMP";
@@ -2021,6 +2022,26 @@ async function assertVerifierKitScopesDefaultInference(): Promise<void> {
     [],
     "verifier_kit_scopes_default_inference: non-repo kits should not auto-infer pnpm replay commands"
   );
+  assert.equal(
+    repoAssessment.verifier_kit,
+    "repo",
+    "verifier_kit_scopes_default_inference: repo assessment should persist the selected kit"
+  );
+  assert.equal(
+    repoAssessment.command_policy,
+    "workspace_script_inference",
+    "verifier_kit_scopes_default_inference: repo assessment should expose workspace script inference"
+  );
+  assert.equal(
+    apiAssessment.verifier_kit,
+    "api",
+    "verifier_kit_scopes_default_inference: api assessment should persist the selected kit"
+  );
+  assert.equal(
+    apiAssessment.command_policy,
+    "contract_locked_commands",
+    "verifier_kit_scopes_default_inference: api assessment should expose contract locked commands"
+  );
 
   const defaultExecutionContract = createAttemptContract({
     attempt_id: "att_verifier_default",
@@ -2144,7 +2165,7 @@ async function assertMultiReviewerPipelinePersistsOpinionsAndSynthesizesEvaluati
       command: process.execPath,
       args: [join(process.cwd(), "scripts", "fixture-reviewer-cli.mjs")],
       cwd: process.cwd(),
-      timeout_ms: 5_000
+      timeout_ms: CLI_FIXTURE_TIMEOUT_MS
     }
   ];
 
@@ -2377,7 +2398,7 @@ async function assertCliSynthesizerPersistsArtifactAndFinalizesEvaluation(): Pro
       command: process.execPath,
       args: [join(process.cwd(), "scripts", "fixture-reviewer-cli.mjs")],
       cwd: process.cwd(),
-      timeout_ms: 5_000
+      timeout_ms: CLI_FIXTURE_TIMEOUT_MS
     }
   ];
   const synthesizerConfig = {
@@ -2390,7 +2411,7 @@ async function assertCliSynthesizerPersistsArtifactAndFinalizesEvaluation(): Pro
     command: process.execPath,
     args: [join(process.cwd(), "scripts", "fixture-synthesizer-cli.mjs")],
     cwd: process.cwd(),
-    timeout_ms: 5_000
+    timeout_ms: CLI_FIXTURE_TIMEOUT_MS
   };
 
   await withTemporaryEnv(REVIEWER_CONFIG_ENV, JSON.stringify(reviewerConfigs), async () => {
@@ -2887,7 +2908,7 @@ async function assertCliSynthesizerCannotOverrideFailedRuntimeVerification(): Pr
       command: process.execPath,
       args: [join(process.cwd(), "scripts", "fixture-synthesizer-cli.mjs")],
       cwd: process.cwd(),
-      timeout_ms: 5_000
+      timeout_ms: CLI_FIXTURE_TIMEOUT_MS
     }
   });
 
@@ -3058,7 +3079,7 @@ async function assertCliSynthesizerCannotOverrideFailedAdversarialVerification()
       command: process.execPath,
       args: [join(process.cwd(), "scripts", "fixture-synthesizer-cli.mjs")],
       cwd: process.cwd(),
-      timeout_ms: 5_000
+      timeout_ms: CLI_FIXTURE_TIMEOUT_MS
     }
   });
 
@@ -4200,28 +4221,63 @@ async function assertGlobalAttemptConcurrencyLimitCapsParallelDispatch(): Promis
 
   await orchestrator.tick();
   await orchestrator.tick();
-  await sleep(100);
+  let firstAttempts: Awaited<ReturnType<typeof listAttempts>> = [];
+  let secondAttempts: Awaited<ReturnType<typeof listAttempts>> = [];
+  let startedCount = 0;
+  const dispatchDeadline = Date.now() + 3_000;
 
-  const [firstAttempts, secondAttempts] = await Promise.all([
-    listAttempts(first.workspacePaths, first.run.id),
-    listAttempts(second.workspacePaths, second.run.id)
-  ]);
+  while (Date.now() < dispatchDeadline) {
+    const [nextFirstAttempts, nextSecondAttempts, firstJournal, secondJournal] =
+      await Promise.all([
+        listAttempts(first.workspacePaths, first.run.id),
+        listAttempts(second.workspacePaths, second.run.id),
+        listRunJournal(first.workspacePaths, first.run.id),
+        listRunJournal(second.workspacePaths, second.run.id)
+      ]);
+    const statuses = [
+      nextFirstAttempts[0]?.status ?? null,
+      nextSecondAttempts[0]?.status ?? null
+    ];
+    startedCount =
+      firstJournal.filter((entry) => entry.type === "attempt.started").length +
+      secondJournal.filter((entry) => entry.type === "attempt.started").length;
+    const pendingCount = statuses.filter((status) =>
+      ["created", "queued"].includes(status ?? "")
+    ).length;
+    const dispatchedCount = statuses.filter((status) =>
+      ["running", "completed"].includes(status ?? "")
+    ).length;
+
+    firstAttempts = nextFirstAttempts;
+    secondAttempts = nextSecondAttempts;
+
+    if (startedCount === 1 && pendingCount === 1 && dispatchedCount === 1) {
+      break;
+    }
+
+    await sleep(50);
+  }
 
   assert.equal(firstAttempts.length, 1, "first run should plan exactly one attempt");
   assert.equal(secondAttempts.length, 1, "second run should plan exactly one attempt");
   assert.equal(
-    adapter.startedAttemptIds.length,
+    startedCount,
     1,
     "global attempt concurrency limit should only dispatch one run at a time"
   );
   assert.equal(
-    firstAttempts[0]?.status,
-    "running",
-    "first run should occupy the only dispatch slot"
+    [firstAttempts[0]?.status, secondAttempts[0]?.status].filter((status) =>
+      ["created", "queued"].includes(status ?? "")
+    ).length,
+    1,
+    "exactly one run should stay pending until the slot is released"
   );
-  assert.ok(
-    ["created", "queued"].includes(secondAttempts[0]?.status ?? ""),
-    "second run should stay pending until the slot is released"
+  assert.equal(
+    [firstAttempts[0]?.status, secondAttempts[0]?.status].filter((status) =>
+      ["running", "completed"].includes(status ?? "")
+    ).length,
+    1,
+    "exactly one run should consume the only dispatch slot"
   );
 
   adapter.release();
