@@ -560,6 +560,14 @@ export async function getRunBrief(
   }
 }
 
+export async function readRunBriefStrict(
+  paths: WorkspacePaths,
+  runId: string
+): Promise<RunBrief> {
+  const runBrief = await readJsonFile<RunBrief>(resolveRunPaths(paths, runId).runBriefFile);
+  return RunBriefSchema.parse(runBrief);
+}
+
 export async function getRunWorkingContext(
   paths: WorkspacePaths,
   runId: string

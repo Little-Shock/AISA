@@ -370,6 +370,13 @@ export type RunWorkingContextDegraded = {
   summary: string | null;
 };
 
+export type RunBriefDegraded = {
+  is_degraded: boolean;
+  reason_code: string | null;
+  summary: string | null;
+  source_ref: string | null;
+};
+
 export type RunWorkingContextSourceSnapshotEntry = {
   ref: string | null;
   updated_at: string | null;
@@ -585,6 +592,8 @@ export type RunSummaryItem = {
   latest_handoff_bundle_ref: string | null;
   run_brief: RunBrief;
   run_brief_ref: string | null;
+  run_brief_invalid_reason: string | null;
+  run_brief_degraded: RunBriefDegraded;
   maintenance_plane: RunMaintenancePlane;
   maintenance_plane_ref: string | null;
   working_context: RunWorkingContext;
@@ -654,6 +663,8 @@ export type RunDetail = {
   latest_handoff_bundle_ref: string | null;
   run_brief: RunBrief;
   run_brief_ref: string | null;
+  run_brief_invalid_reason: string | null;
+  run_brief_degraded: RunBriefDegraded;
   maintenance_plane: RunMaintenancePlane;
   maintenance_plane_ref: string | null;
   working_context: RunWorkingContext;

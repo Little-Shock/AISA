@@ -167,6 +167,22 @@ export function RunOverviewPanel({
   const latestHandoff = runDetail.latest_handoff_bundle;
   const workingContext = runDetail.working_context;
   const workingContextDegraded = runDetail.working_context_degraded;
+  const runBriefDegraded = runDetail.run_brief_degraded;
+  const runBriefHeadlineText =
+    runBriefDegraded.is_degraded
+      ? runBriefDegraded.summary ??
+        runDetail.run_brief_invalid_reason ??
+        "run brief 已降级"
+      : runBrief?.headline ?? "暂无";
+  const runBriefRefText =
+    runBriefDegraded.source_ref ??
+    runDetail.run_brief_ref ??
+    "未落盘";
+  const runBriefBlockerText =
+    runBrief?.blocker_summary ??
+    runBriefDegraded.summary ??
+    runDetail.run_brief_invalid_reason ??
+    "暂无";
   const governanceStatus = governance ? statusLabel(governance.status) : "未建立";
   const healthStatus = runHealthLabel(runHealth?.status);
   const latestActivityLabel = runHealth?.latest_activity_at
@@ -333,6 +349,16 @@ export function RunOverviewPanel({
         </Callout>
       ) : null}
 
+      {runBriefDegraded.is_degraded ? (
+        <Callout tone="amber" title="Run Brief 降级">
+          {localizeUiText(
+            runBriefDegraded.summary ??
+              runDetail.run_brief_invalid_reason ??
+              "run brief 已退化，先修控制面摘要。"
+          )}
+        </Callout>
+      ) : null}
+
       {runBrief ? (
         <Callout tone={runBrief.waiting_for_human ? "rose" : "amber"} title="Run Brief">
           <strong>{localizeUiText(runBrief.headline)}</strong>
@@ -395,8 +421,8 @@ export function RunOverviewPanel({
             title="运行中现场"
             items={[
               `现场版本：${workingContext ? `v${String(workingContext.version)}` : "未落盘"}`,
-              `run brief：${localizeUiText(runBrief?.headline ?? "暂无")}`,
-              `run brief ref：${runDetail.run_brief_ref ?? "未落盘"}`,
+              `run brief：${localizeUiText(runBriefHeadlineText)}`,
+              `run brief ref：${runBriefRefText}`,
               `维护平面：${runDetail.maintenance_plane_ref ?? "未落盘"}`,
               `当前焦点：${localizeUiText(workingContext?.current_focus ?? "暂无")}`,
               `计划锚点：${workingContext?.plan_ref ?? "暂无"}`,
@@ -553,7 +579,7 @@ export function RunOverviewPanel({
           <SectionList
             title="现场卡点"
             items={[
-              `run brief blocker：${localizeUiText(runBrief?.blocker_summary ?? "暂无")}`,
+              `run brief blocker：${localizeUiText(runBriefBlockerText)}`,
               `统一失败信号：${failureSignal?.failure_code ?? failureSignal?.failure_class ?? "暂无"}`,
               `当前 blocker：${localizeUiText(workingContext?.current_blocker?.summary ?? runDetail.current?.blocking_reason ?? "暂无")}`,
               `blocker 锚点：${workingContext?.current_blocker?.ref ?? "暂无"}`,

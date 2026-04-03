@@ -249,17 +249,25 @@ function buildWorkingContextOutput(
 
 function buildRunBriefOutput(runBriefView: RunBriefView): RunMaintenanceOutput {
   const runBrief = runBriefView.run_brief;
+  const degraded = runBriefView.run_brief_degraded;
   return {
     key: "run_brief",
     label: "操作员摘要",
     plane: "maintenance",
-    status: !runBrief
+    status: degraded.is_degraded
+      ? "degraded"
+      : !runBrief
       ? "not_available"
       : runBrief.failure_signal
         ? "attention"
         : "ready",
     ref: runBriefView.run_brief_ref,
-    summary: runBrief?.headline ?? runBrief?.summary ?? null
+    summary:
+      degraded.summary ??
+      runBriefView.run_brief_invalid_reason ??
+      runBrief?.headline ??
+      runBrief?.summary ??
+      null
   };
 }
 
@@ -641,6 +649,8 @@ function buildSignalSources(input: {
     plane: "maintenance",
     ref: input.runBriefView.run_brief_ref,
     summary:
+      input.runBriefView.run_brief_degraded.summary ??
+      input.runBriefView.run_brief_invalid_reason ??
       input.runBriefView.run_brief?.headline ??
       input.runBriefView.run_brief?.summary ??
       null
@@ -765,6 +775,7 @@ export async function buildRunMaintenancePlane(
     current,
     runBrief: runBriefView.run_brief,
     runBriefRef: runBriefView.run_brief_ref,
+    runBriefDegraded: runBriefView.run_brief_degraded,
     preflight: latestEvidence.latestPreflight,
     preflightRef,
     runtimeVerification: latestEvidence.latestRuntimeVerification,

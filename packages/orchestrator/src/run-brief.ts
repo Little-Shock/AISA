@@ -18,9 +18,10 @@ import {
   getCurrentDecision,
   getRun,
   getRunAutomationControl,
-  getRunBrief,
   getRunGovernanceState,
+  listRunJournal,
   listAttempts,
+  readRunBriefStrict,
   resolveAttemptPaths,
   resolveRunPaths,
   saveRunBrief,
@@ -34,6 +35,20 @@ import {
 export type RunBriefView = {
   run_brief: RunBrief | null;
   run_brief_ref: string | null;
+  run_brief_invalid_reason: string | null;
+  run_brief_degraded: {
+    is_degraded: boolean;
+    reason_code: string | null;
+    summary: string | null;
+    source_ref: string | null;
+  };
+};
+
+const RUN_BRIEF_NOT_DEGRADED: RunBriefView["run_brief_degraded"] = {
+  is_degraded: false,
+  reason_code: null,
+  summary: null,
+  source_ref: null
 };
 
 function toTimestamp(value: string | null | undefined): number {
@@ -51,6 +66,44 @@ function buildRelativeRef(paths: WorkspacePaths, absolutePath: string): string {
 
 function buildRunBriefRef(paths: WorkspacePaths, runId: string): string {
   return buildRelativeRef(paths, resolveRunPaths(paths, runId).runBriefFile);
+}
+
+async function readRunBriefRefreshFailure(input: {
+  paths: WorkspacePaths;
+  runId: string;
+  runBriefRef: string;
+}): Promise<RunBriefView["run_brief_degraded"] & { detail: string | null } | null> {
+  const journal = await listRunJournal(input.paths, input.runId);
+  const latestFailure =
+    journal
+      .slice()
+      .reverse()
+      .find((entry) => entry.type === "run.run_brief.refresh_failed") ?? null;
+
+  if (!latestFailure) {
+    return null;
+  }
+
+  const payload =
+    latestFailure.payload && typeof latestFailure.payload === "object"
+      ? latestFailure.payload
+      : null;
+  const reasonCode =
+    payload && typeof payload.reason_code === "string" ? payload.reason_code : null;
+  const summary =
+    payload && typeof payload.summary === "string"
+      ? payload.summary
+      : "run brief 已退化。";
+  const detail =
+    payload && typeof payload.detail === "string" ? payload.detail : null;
+
+  return {
+    is_degraded: true,
+    reason_code: reasonCode,
+    summary,
+    source_ref: input.runBriefRef,
+    detail
+  };
 }
 
 function buildRunCurrentRef(paths: WorkspacePaths, runId: string): string {
@@ -446,10 +499,57 @@ export async function readRunBriefView(
   paths: WorkspacePaths,
   runId: string
 ): Promise<RunBriefView> {
-  const runBrief = await getRunBrief(paths, runId);
+  const runBriefRef = buildRunBriefRef(paths, runId);
 
-  return {
-    run_brief: runBrief,
-    run_brief_ref: runBrief ? buildRunBriefRef(paths, runId) : null
-  };
+  try {
+    const runBrief = await readRunBriefStrict(paths, runId);
+    return {
+      run_brief: runBrief,
+      run_brief_ref: runBriefRef,
+      run_brief_invalid_reason: null,
+      run_brief_degraded: RUN_BRIEF_NOT_DEGRADED
+    };
+  } catch (error) {
+    const err = error as NodeJS.ErrnoException;
+    const refreshFailure = await readRunBriefRefreshFailure({
+      paths,
+      runId,
+      runBriefRef
+    });
+    if (err?.code === "ENOENT" && !refreshFailure) {
+      return {
+        run_brief: null,
+        run_brief_ref: null,
+        run_brief_invalid_reason: null,
+        run_brief_degraded: RUN_BRIEF_NOT_DEGRADED
+      };
+    }
+
+    if (refreshFailure) {
+      return {
+        run_brief: null,
+        run_brief_ref: runBriefRef,
+        run_brief_invalid_reason: refreshFailure.detail,
+        run_brief_degraded: {
+          is_degraded: true,
+          reason_code: refreshFailure.reason_code,
+          summary: refreshFailure.summary,
+          source_ref: refreshFailure.source_ref
+        }
+      };
+    }
+
+    return {
+      run_brief: null,
+      run_brief_ref: runBriefRef,
+      run_brief_invalid_reason:
+        error instanceof Error ? error.message : String(error),
+      run_brief_degraded: {
+        is_degraded: true,
+        reason_code: "run_brief_unreadable",
+        summary: "run brief 文件不可读，控制面摘要已退化。",
+        source_ref: runBriefRef
+      }
+    };
+  }
 }

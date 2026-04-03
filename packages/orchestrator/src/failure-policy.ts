@@ -13,6 +13,13 @@ import {
   type RunWorkingContextDegradedState
 } from "@autoresearch/domain";
 
+type RunBriefDegradedSurface = {
+  is_degraded: boolean;
+  reason_code: string | null;
+  summary: string | null;
+  source_ref: string | null;
+};
+
 export type RunFailurePolicyEntry = {
   failure_class: RunFailureClass;
   policy_mode: RunFailurePolicyMode;
@@ -250,11 +257,30 @@ export function deriveFailureSignalFromRunBrief(input: {
   );
 }
 
+export function deriveFailureSignalFromRunBriefDegraded(input: {
+  degraded?: RunBriefDegradedSurface | null;
+  sourceRef?: string | null;
+}): RunFailureSignal | null {
+  if (!input.degraded?.is_degraded) {
+    return null;
+  }
+
+  return createRunFailureSignal({
+    failure_class: "run_brief_degraded",
+    policy_mode: normalizePolicyMode("run_brief_degraded"),
+    source_kind: "run_brief",
+    source_ref: input.degraded.source_ref ?? input.sourceRef ?? null,
+    failure_code: input.degraded.reason_code ?? null,
+    summary: input.degraded.summary ?? "run brief 已降级。"
+  });
+}
+
 export function deriveRunSurfaceFailureSignal(input: {
   latestAttempt: Attempt | null;
   current: CurrentDecision | null;
   runBrief?: RunBrief | null;
   runBriefRef?: string | null;
+  runBriefDegraded?: RunBriefDegradedSurface | null;
   preflight: AttemptPreflightEvaluation | null;
   preflightRef?: string | null;
   runtimeVerification: AttemptRuntimeVerification | null;
@@ -296,6 +322,10 @@ export function deriveRunSurfaceFailureSignal(input: {
     deriveFailureSignalFromWorkingContext({
       degraded: input.workingContextDegraded,
       sourceRef: input.workingContextRef ?? null
+    }),
+    deriveFailureSignalFromRunBriefDegraded({
+      degraded: input.runBriefDegraded ?? null,
+      sourceRef: input.runBriefRef ?? null
     })
   );
 }

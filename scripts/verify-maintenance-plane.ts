@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { rm } from "node:fs/promises";
+import { mkdir, rm } from "node:fs/promises";
 import { join } from "node:path";
 import {
   createAttempt,
@@ -203,6 +203,57 @@ async function main(): Promise<void> {
     "maintenance view should surface stale working context without rewriting mainline state"
   );
 
+  const writeFailedRunBriefRun = createRun({
+    title: "Maintenance run brief degraded verification",
+    description: "Run brief write failures should surface as a degraded maintenance output.",
+    success_criteria: ["Expose run brief write failures without mutating current decision."],
+    constraints: [],
+    owner_id: "test-owner",
+    workspace_root: rootDir
+  });
+  const writeFailedRunBriefCurrent = createCurrentDecision({
+    run_id: writeFailedRunBriefRun.id,
+    run_status: "waiting_steer",
+    recommended_next_action: "wait_for_human",
+    recommended_attempt_type: "execution",
+    summary: "Broken run brief path should surface a degraded maintenance state.",
+    blocking_reason: "Broken run brief path should surface a degraded maintenance state.",
+    waiting_for_human: true
+  });
+
+  await saveRun(workspacePaths, writeFailedRunBriefRun);
+  await saveCurrentDecision(workspacePaths, writeFailedRunBriefCurrent);
+  const writeFailedRunBriefPaths = resolveRunPaths(workspacePaths, writeFailedRunBriefRun.id);
+  await rm(writeFailedRunBriefPaths.runBriefFile, { force: true });
+  await mkdir(writeFailedRunBriefPaths.runBriefFile, { recursive: true });
+
+  const writeFailedRunBriefPlane = await refreshRunMaintenancePlane(
+    workspacePaths,
+    writeFailedRunBriefRun.id,
+    {
+      staleAfterMs: 60_000
+    }
+  );
+  const writeFailedRunBriefOutput =
+    writeFailedRunBriefPlane.outputs.find((item) => item.key === "run_brief") ?? null;
+  const writeFailedRunBriefSource =
+    writeFailedRunBriefPlane.signal_sources.find((item) => item.key === "run_brief") ?? null;
+  assert.equal(writeFailedRunBriefOutput?.status, "degraded");
+  assert.equal(
+    writeFailedRunBriefOutput?.summary,
+    "run brief 写入失败，控制面摘要已退化。"
+  );
+  assert.ok(writeFailedRunBriefOutput?.ref?.endsWith("run-brief.json"));
+  assert.equal(
+    writeFailedRunBriefPlane.blocked_diagnosis.summary,
+    "run brief 写入失败，控制面摘要已退化。"
+  );
+  assert.ok(
+    writeFailedRunBriefPlane.blocked_diagnosis.source_ref?.endsWith("run-brief.json")
+  );
+  assert.equal(writeFailedRunBriefSource?.summary, "run brief 写入失败，控制面摘要已退化。");
+  assert.ok(writeFailedRunBriefSource?.ref?.endsWith("run-brief.json"));
+
   const savedSnapshotRun = createRun({
     title: "Maintenance snapshot strategy verification",
     description: "Low reviewer effort should keep maintenance reads on the saved snapshot.",
@@ -316,6 +367,7 @@ async function main(): Promise<void> {
           verifier_summary_ref: verifierOutput?.ref ?? null,
           maintenance_plane_ref: `runs/${run.id}/artifacts/maintenance-plane.json`,
           working_context_after_current_move: workingContextOutput?.status ?? null,
+          run_brief_degraded_summary: writeFailedRunBriefOutput?.summary ?? null,
           saved_snapshot_strategy: savedSnapshotPolicyOutput?.summary ?? null
         },
         null,

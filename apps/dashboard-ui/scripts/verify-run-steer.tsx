@@ -94,6 +94,13 @@ const fixtureRunDetail: RunDetail = {
   latest_handoff_bundle_ref: null,
   run_brief: null,
   run_brief_ref: null,
+  run_brief_invalid_reason: null,
+  run_brief_degraded: {
+    is_degraded: false,
+    reason_code: null,
+    summary: null,
+    source_ref: null
+  },
   maintenance_plane: null,
   maintenance_plane_ref: null,
   working_context: null,

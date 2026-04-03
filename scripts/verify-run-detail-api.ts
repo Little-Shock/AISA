@@ -129,6 +129,13 @@ type WorkingContextSourceSnapshotPayload = {
   };
 };
 
+type RunBriefDegradedPayload = {
+  is_degraded: boolean;
+  reason_code: string | null;
+  summary: string | null;
+  source_ref: string | null;
+};
+
 type EffectivePolicyBundlePayload = {
   profile_version: number;
   verification_discipline: {
@@ -1174,6 +1181,57 @@ async function main(): Promise<void> {
       invalidSummaryPayload.runs.find((item) => item.run.id === invalidPolicyRun.id) ?? null;
     assert.match(invalidRunSummary?.policy_runtime_invalid_reason ?? "", /policy|json|parse/i);
 
+    const invalidRunBriefRun = createRun({
+      title: "Invalid run brief surface verification",
+      description: "Ensure unreadable run brief is surfaced instead of silently disappearing.",
+      success_criteria: ["Expose the invalid run brief state in run detail and summary."],
+      constraints: [],
+      owner_id: "test-owner",
+      workspace_root: projectRoot
+    });
+    await saveRun(workspacePaths, invalidRunBriefRun);
+    await saveCurrentDecision(
+      workspacePaths,
+      createCurrentDecision({
+        run_id: invalidRunBriefRun.id,
+        run_status: "waiting_steer",
+        summary: "Invalid run brief should be surfaced.",
+        blocking_reason: "Corrupted run brief should stay visible to the operator.",
+        waiting_for_human: true
+      })
+    );
+    await refreshRunOperatorSurface(workspacePaths, invalidRunBriefRun.id);
+    await writeFile(
+      resolveRunPaths(workspacePaths, invalidRunBriefRun.id).runBriefFile,
+      "{\n",
+      "utf8"
+    );
+
+    const writeFailedRunBriefRun = createRun({
+      title: "Write failed run brief verification",
+      description:
+        "Ensure run brief refresh failures become a visible degraded control-plane surface.",
+      success_criteria: ["Surface run.run_brief.refresh_failed in run detail and summary."],
+      constraints: [],
+      owner_id: "test-owner",
+      workspace_root: projectRoot
+    });
+    await saveRun(workspacePaths, writeFailedRunBriefRun);
+    await saveCurrentDecision(
+      workspacePaths,
+      createCurrentDecision({
+        run_id: writeFailedRunBriefRun.id,
+        run_status: "waiting_steer",
+        summary: "Broken run brief path should surface an explicit degraded state.",
+        blocking_reason: "run brief path is broken and should not be hidden.",
+        waiting_for_human: true
+      })
+    );
+    const writeFailedRunBriefPaths = resolveRunPaths(workspacePaths, writeFailedRunBriefRun.id);
+    await rm(writeFailedRunBriefPaths.runBriefFile, { force: true });
+    await mkdir(writeFailedRunBriefPaths.runBriefFile, { recursive: true });
+    await refreshRunOperatorSurface(workspacePaths, writeFailedRunBriefRun.id);
+
     const staleRun = createRun({
       title: "Stale run health verification",
       description: "Ensure control-api exposes zombie running attempts clearly.",
@@ -1380,6 +1438,14 @@ async function main(): Promise<void> {
       method: "GET",
       url: `/runs/${run.id}`
     });
+    const invalidRunBriefResponse = await app.inject({
+      method: "GET",
+      url: `/runs/${invalidRunBriefRun.id}`
+    });
+    const writeFailedRunBriefResponse = await app.inject({
+      method: "GET",
+      url: `/runs/${writeFailedRunBriefRun.id}`
+    });
     const staleResponse = await app.inject({
       method: "GET",
       url: `/runs/${staleRun.id}`
@@ -1398,6 +1464,8 @@ async function main(): Promise<void> {
     });
 
     assert.equal(response.statusCode, 200);
+    assert.equal(invalidRunBriefResponse.statusCode, 200);
+    assert.equal(writeFailedRunBriefResponse.statusCode, 200);
     assert.equal(staleResponse.statusCode, 200);
     assert.equal(staleWorkingContextResponse.statusCode, 200);
     assert.equal(writeFailedWorkingContextResponse.statusCode, 200);
@@ -1532,6 +1600,8 @@ async function main(): Promise<void> {
         }>;
       } | null;
       run_brief_ref: string | null;
+      run_brief_invalid_reason: string | null;
+      run_brief_degraded: RunBriefDegradedPayload;
       maintenance_plane: {
         blocked_diagnosis: {
           status: string;
@@ -1629,6 +1699,68 @@ async function main(): Promise<void> {
         stderr_excerpt: string;
         journal: Array<{ type: string }>;
       }>;
+    };
+    const invalidRunBriefPayload = invalidRunBriefResponse.json() as {
+      failure_signal: {
+        failure_class: string;
+        failure_code: string | null;
+        policy_mode: string;
+        summary: string;
+        source_ref: string | null;
+      } | null;
+      run_brief: null;
+      run_brief_ref: string | null;
+      run_brief_invalid_reason: string | null;
+      run_brief_degraded: RunBriefDegradedPayload;
+      maintenance_plane: {
+        blocked_diagnosis: {
+          status: string;
+          summary: string | null;
+          source_ref: string | null;
+        };
+        outputs: Array<{
+          key: string;
+          status: string;
+          ref: string | null;
+          summary: string | null;
+        }>;
+        signal_sources: Array<{
+          key: string;
+          ref: string | null;
+          summary: string | null;
+        }>;
+      } | null;
+    };
+    const writeFailedRunBriefPayload = writeFailedRunBriefResponse.json() as {
+      failure_signal: {
+        failure_class: string;
+        failure_code: string | null;
+        policy_mode: string;
+        summary: string;
+        source_ref: string | null;
+      } | null;
+      run_brief: null;
+      run_brief_ref: string | null;
+      run_brief_invalid_reason: string | null;
+      run_brief_degraded: RunBriefDegradedPayload;
+      maintenance_plane: {
+        blocked_diagnosis: {
+          status: string;
+          summary: string | null;
+          source_ref: string | null;
+        };
+        outputs: Array<{
+          key: string;
+          status: string;
+          ref: string | null;
+          summary: string | null;
+        }>;
+        signal_sources: Array<{
+          key: string;
+          ref: string | null;
+          summary: string | null;
+        }>;
+      } | null;
     };
     const stalePayload = staleResponse.json() as {
       run_health: {
@@ -2030,6 +2162,8 @@ async function main(): Promise<void> {
       "blocked_pnpm_verification_plan"
     );
     assert.ok(payload.run_brief_ref?.endsWith("run-brief.json"));
+    assert.equal(payload.run_brief_invalid_reason, null);
+    assert.equal(payload.run_brief_degraded.is_degraded, false);
     assert.ok(payload.maintenance_plane_ref?.endsWith("artifacts/maintenance-plane.json"));
     assert.equal(payload.maintenance_plane?.blocked_diagnosis.status, "attention");
     assert.equal(
@@ -2150,6 +2284,118 @@ async function main(): Promise<void> {
     assert.equal(
       writeFailedWorkingContextPayload.run_brief?.failure_signal?.failure_class,
       "working_context_degraded"
+    );
+    assert.equal(invalidRunBriefPayload.run_brief, null);
+    assert.ok(invalidRunBriefPayload.run_brief_ref?.endsWith("run-brief.json"));
+    assert.match(
+      invalidRunBriefPayload.run_brief_invalid_reason ?? "",
+      /json|parse|unexpected end/i
+    );
+    assert.equal(invalidRunBriefPayload.run_brief_degraded.is_degraded, true);
+    assert.equal(
+      invalidRunBriefPayload.run_brief_degraded.reason_code,
+      "run_brief_unreadable"
+    );
+    assert.equal(
+      invalidRunBriefPayload.run_brief_degraded.summary,
+      "run brief 文件不可读，控制面摘要已退化。"
+    );
+    assert.ok(
+      invalidRunBriefPayload.run_brief_degraded.source_ref?.endsWith("run-brief.json")
+    );
+    assert.equal(
+      invalidRunBriefPayload.failure_signal?.failure_class,
+      "run_brief_degraded"
+    );
+    assert.equal(invalidRunBriefPayload.failure_signal?.policy_mode, "soft_degrade");
+    assert.equal(
+      invalidRunBriefPayload.failure_signal?.summary,
+      "run brief 文件不可读，控制面摘要已退化。"
+    );
+    assert.ok(
+      invalidRunBriefPayload.failure_signal?.source_ref?.endsWith("run-brief.json")
+    );
+    assert.equal(
+      invalidRunBriefPayload.maintenance_plane?.blocked_diagnosis.summary,
+      "run brief 文件不可读，控制面摘要已退化。"
+    );
+    assert.ok(
+      invalidRunBriefPayload.maintenance_plane?.blocked_diagnosis.source_ref?.endsWith(
+        "run-brief.json"
+      )
+    );
+    assert.ok(
+      invalidRunBriefPayload.maintenance_plane?.outputs.some(
+        (item) =>
+          item.key === "run_brief" &&
+          item.status === "degraded" &&
+          item.ref?.endsWith("run-brief.json") &&
+          item.summary === "run brief 文件不可读，控制面摘要已退化。"
+      )
+    );
+    assert.ok(
+      invalidRunBriefPayload.maintenance_plane?.signal_sources.some(
+        (item) =>
+          item.key === "run_brief" &&
+          item.ref?.endsWith("run-brief.json") &&
+          item.summary === "run brief 文件不可读，控制面摘要已退化。"
+      )
+    );
+    assert.equal(writeFailedRunBriefPayload.run_brief, null);
+    assert.ok(writeFailedRunBriefPayload.run_brief_ref?.endsWith("run-brief.json"));
+    assert.match(
+      writeFailedRunBriefPayload.run_brief_invalid_reason ?? "",
+      /EISDIR|directory/i
+    );
+    assert.equal(writeFailedRunBriefPayload.run_brief_degraded.is_degraded, true);
+    assert.equal(
+      writeFailedRunBriefPayload.run_brief_degraded.reason_code,
+      "run_brief_write_failed"
+    );
+    assert.equal(
+      writeFailedRunBriefPayload.run_brief_degraded.summary,
+      "run brief 写入失败，控制面摘要已退化。"
+    );
+    assert.ok(
+      writeFailedRunBriefPayload.run_brief_degraded.source_ref?.endsWith("run-brief.json")
+    );
+    assert.equal(
+      writeFailedRunBriefPayload.failure_signal?.failure_class,
+      "run_brief_degraded"
+    );
+    assert.equal(writeFailedRunBriefPayload.failure_signal?.policy_mode, "soft_degrade");
+    assert.equal(
+      writeFailedRunBriefPayload.failure_signal?.summary,
+      "run brief 写入失败，控制面摘要已退化。"
+    );
+    assert.ok(
+      writeFailedRunBriefPayload.failure_signal?.source_ref?.endsWith("run-brief.json")
+    );
+    assert.equal(
+      writeFailedRunBriefPayload.maintenance_plane?.blocked_diagnosis.summary,
+      "run brief 写入失败，控制面摘要已退化。"
+    );
+    assert.ok(
+      writeFailedRunBriefPayload.maintenance_plane?.blocked_diagnosis.source_ref?.endsWith(
+        "run-brief.json"
+      )
+    );
+    assert.ok(
+      writeFailedRunBriefPayload.maintenance_plane?.outputs.some(
+        (item) =>
+          item.key === "run_brief" &&
+          item.status === "degraded" &&
+          item.ref?.endsWith("run-brief.json") &&
+          item.summary === "run brief 写入失败，控制面摘要已退化。"
+      )
+    );
+    assert.ok(
+      writeFailedRunBriefPayload.maintenance_plane?.signal_sources.some(
+        (item) =>
+          item.key === "run_brief" &&
+          item.ref?.endsWith("run-brief.json") &&
+          item.summary === "run brief 写入失败，控制面摘要已退化。"
+      )
     );
     assert.equal(missingRunBriefPayload.run_brief, null);
     assert.equal(missingRunBriefPayload.run_brief_ref, null);
@@ -2328,6 +2574,8 @@ async function main(): Promise<void> {
           } | null;
         } | null;
         run_brief_ref: string | null;
+        run_brief_invalid_reason: string | null;
+        run_brief_degraded: RunBriefDegradedPayload;
         policy_runtime: {
           stage: string;
           approval_status: string;
@@ -2354,6 +2602,12 @@ async function main(): Promise<void> {
       }>;
     };
     const runSummary = runsPayload.runs.find((item) => item.run.id === run.id);
+    const invalidRunBriefSummary = runsPayload.runs.find(
+      (item) => item.run.id === invalidRunBriefRun.id
+    );
+    const writeFailedRunBriefSummary = runsPayload.runs.find(
+      (item) => item.run.id === writeFailedRunBriefRun.id
+    );
     const missingRunBriefSummary = runsPayload.runs.find(
       (item) => item.run.id === missingRunBriefRun.id
     );
@@ -2495,6 +2749,8 @@ async function main(): Promise<void> {
       "blocked_pnpm_verification_plan"
     );
     assert.ok(runSummary?.run_brief_ref?.endsWith("run-brief.json"));
+    assert.equal(runSummary?.run_brief_invalid_reason, null);
+    assert.equal(runSummary?.run_brief_degraded.is_degraded, false);
     assert.ok(runSummary?.maintenance_plane_ref?.endsWith("artifacts/maintenance-plane.json"));
     assert.equal(runSummary?.maintenance_plane?.blocked_diagnosis.status, "attention");
     assert.ok(
@@ -2518,6 +2774,62 @@ async function main(): Promise<void> {
       )
     );
     assert.equal(runSummary?.task_focus, blockerAttempt.objective);
+    assert.equal(invalidRunBriefSummary?.run_brief, null);
+    assert.ok(invalidRunBriefSummary?.run_brief_ref?.endsWith("run-brief.json"));
+    assert.match(
+      invalidRunBriefSummary?.run_brief_invalid_reason ?? "",
+      /json|parse|unexpected end/i
+    );
+    assert.equal(invalidRunBriefSummary?.run_brief_degraded.is_degraded, true);
+    assert.equal(
+      invalidRunBriefSummary?.run_brief_degraded.reason_code,
+      "run_brief_unreadable"
+    );
+    assert.equal(
+      invalidRunBriefSummary?.failure_signal?.failure_class,
+      "run_brief_degraded"
+    );
+    assert.equal(
+      invalidRunBriefSummary?.failure_signal?.summary,
+      "run brief 文件不可读，控制面摘要已退化。"
+    );
+    assert.ok(
+      invalidRunBriefSummary?.maintenance_plane?.outputs.some(
+        (item) =>
+          item.key === "run_brief" &&
+          item.plane === "maintenance" &&
+          item.status === "degraded" &&
+          item.summary === "run brief 文件不可读，控制面摘要已退化。"
+      )
+    );
+    assert.equal(writeFailedRunBriefSummary?.run_brief, null);
+    assert.ok(writeFailedRunBriefSummary?.run_brief_ref?.endsWith("run-brief.json"));
+    assert.match(
+      writeFailedRunBriefSummary?.run_brief_invalid_reason ?? "",
+      /EISDIR|directory/i
+    );
+    assert.equal(writeFailedRunBriefSummary?.run_brief_degraded.is_degraded, true);
+    assert.equal(
+      writeFailedRunBriefSummary?.run_brief_degraded.reason_code,
+      "run_brief_write_failed"
+    );
+    assert.equal(
+      writeFailedRunBriefSummary?.failure_signal?.failure_class,
+      "run_brief_degraded"
+    );
+    assert.equal(
+      writeFailedRunBriefSummary?.failure_signal?.summary,
+      "run brief 写入失败，控制面摘要已退化。"
+    );
+    assert.ok(
+      writeFailedRunBriefSummary?.maintenance_plane?.outputs.some(
+        (item) =>
+          item.key === "run_brief" &&
+          item.plane === "maintenance" &&
+          item.status === "degraded" &&
+          item.summary === "run brief 写入失败，控制面摘要已退化。"
+      )
+    );
     assert.equal(missingRunBriefSummary?.run_brief, null);
     assert.equal(missingRunBriefSummary?.run_brief_ref, null);
     assert.equal(

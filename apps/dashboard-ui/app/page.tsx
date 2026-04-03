@@ -348,6 +348,8 @@ export default function Page() {
               latest_handoff_bundle_ref: nextDetail.latest_handoff_bundle_ref,
               run_brief: nextDetail.run_brief,
               run_brief_ref: nextDetail.run_brief_ref,
+              run_brief_invalid_reason: nextDetail.run_brief_invalid_reason,
+              run_brief_degraded: nextDetail.run_brief_degraded,
               maintenance_plane: nextDetail.maintenance_plane,
               maintenance_plane_ref: nextDetail.maintenance_plane_ref,
               working_context: nextDetail.working_context,
