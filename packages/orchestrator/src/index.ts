@@ -144,10 +144,10 @@ import {
 } from "@autoresearch/state-store";
 import { ContextManager } from "@autoresearch/context-manager";
 import {
-  CodexCliWorkerAdapter,
+  type WorkerAdapter,
   isWorkerWritebackParseError,
-  resolveCodexCliWorkerEffort,
-  type CodexCliWorkerEffortSetting
+  resolveExecutionWorkerEffort,
+  type ExecutionWorkerEffortSetting
 } from "@autoresearch/worker-adapters";
 import {
   captureAttemptCheckpointPreflight,
@@ -257,7 +257,7 @@ export type RunWorkerEffortSlotView = {
 };
 
 export type RunWorkerEffortView = {
-  execution: CodexCliWorkerEffortSetting;
+  execution: ExecutionWorkerEffortSetting;
   reviewer: RunWorkerEffortSlotView;
   synthesizer: RunWorkerEffortSlotView;
 };
@@ -855,7 +855,7 @@ export class Orchestrator {
 
   constructor(
     private readonly workspacePaths: WorkspacePaths,
-    private readonly adapter: CodexCliWorkerAdapter,
+    private readonly adapter: WorkerAdapter,
     private readonly contextManager = new ContextManager(),
     private readonly pollIntervalMs = 1500,
     options: OrchestratorOptions = {}
@@ -949,10 +949,15 @@ export class Orchestrator {
     const harnessProfile = resolveRunHarnessProfile(run);
 
     return {
-      execution: resolveCodexCliWorkerEffort({
-        requestedEffort: harnessProfile.execution.effort,
-        source: "run.harness_profile.execution.effort"
-      }),
+      execution:
+        this.adapter.resolveExecutionEffort?.({
+          requestedEffort: harnessProfile.execution.effort,
+          source: "run.harness_profile.execution.effort"
+        }) ??
+        resolveExecutionWorkerEffort({
+          requestedEffort: harnessProfile.execution.effort,
+          source: "run.harness_profile.execution.effort"
+        }),
       reviewer: this.buildJudgeEffortView({
         requestedEffort: harnessProfile.reviewer.effort,
         source: "run.harness_profile.reviewer.effort",
@@ -1126,6 +1131,11 @@ export class Orchestrator {
     await saveBranch(this.workspacePaths, branch);
 
     try {
+      if (!this.adapter.runBranchTask) {
+        throw new Error(
+          `Worker adapter ${this.adapter.type} does not support branch execution.`
+        );
+      }
       const execution = await this.adapter.runBranchTask({
         goal,
         branch,
@@ -3475,8 +3485,8 @@ export class Orchestrator {
     return `runs/${runId}/attempts/${attemptId}/context.json`;
   }
 
-  private buildAttemptCodexOutputRef(runId: string, attemptId: string): string {
-    return `runs/${runId}/attempts/${attemptId}/codex-output.json`;
+  private buildAttemptWorkerOutputRef(runId: string, attemptId: string): string {
+    return `runs/${runId}/attempts/${attemptId}/worker-output.json`;
   }
 
   private buildAttemptResultRef(runId: string, attemptId: string): string {
@@ -3537,7 +3547,8 @@ export class Orchestrator {
         field_path: error.fieldPath,
         issue_code: error.issueCode,
         repair_hint: error.repairHint,
-        raw_output_file: this.buildAttemptCodexOutputRef(runId, attemptId)
+        raw_output_file:
+          error.rawOutputFile ?? this.buildAttemptWorkerOutputRef(runId, attemptId)
       };
     }
 

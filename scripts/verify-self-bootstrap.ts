@@ -490,11 +490,11 @@ async function assertSupervisorRepairsWorkerOutputSchemaBlocker(sourceRoot: stri
       ended_at: new Date().toISOString()
     }
   );
-  const rawOutputFile = `runs/${run.id}/attempts/${failedAttempt.id}/codex-output.json`;
+  const rawOutputFile = `runs/${run.id}/attempts/${failedAttempt.id}/worker-output.json`;
   const attemptPaths = resolveAttemptPaths(workspacePaths, run.id, failedAttempt.id);
   await mkdir(attemptPaths.attemptDir, { recursive: true });
   await writeFile(
-    join(attemptPaths.attemptDir, "codex-output.json"),
+    attemptPaths.rawOutputFile,
     JSON.stringify(
       {
         summary: "Keep the existing handoff-first conclusion.",

@@ -813,7 +813,7 @@ function getWorkerOutputSchemaBlocker(snapshot: RunSnapshot): WorkerOutputSchema
     typeof payload?.raw_output_file === "string" && payload.raw_output_file.length > 0
       ? payload.raw_output_file
       : attemptId
-        ? `runs/${snapshot.run.id}/attempts/${attemptId}/codex-output.json`
+        ? `runs/${snapshot.run.id}/attempts/${attemptId}/worker-output.json`
         : null;
 
   return {

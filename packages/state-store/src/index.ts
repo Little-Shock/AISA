@@ -133,7 +133,11 @@ export interface AttemptPaths {
   metaFile: string;
   contractFile: string;
   contextFile: string;
+  taskSpecFile: string;
+  promptFile: string;
+  rawOutputFile: string;
   resultFile: string;
+  reportFile: string;
   evaluationFile: string;
   evaluationSynthesisFile: string;
   reviewInputPacketFile: string;
@@ -201,7 +205,11 @@ export function resolveAttemptPaths(
     metaFile: join(attemptDir, "meta.json"),
     contractFile: join(attemptDir, "attempt_contract.json"),
     contextFile: join(attemptDir, "context.json"),
+    taskSpecFile: join(attemptDir, "task-spec.json"),
+    promptFile: join(attemptDir, "worker-prompt.md"),
+    rawOutputFile: join(attemptDir, "worker-output.json"),
     resultFile: join(attemptDir, "result.json"),
+    reportFile: join(attemptDir, "report.md"),
     evaluationFile: join(attemptDir, "evaluation.json"),
     evaluationSynthesisFile: join(attemptDir, "evaluation_synthesis.json"),
     reviewInputPacketFile: join(attemptDir, "review_input_packet.json"),
@@ -261,6 +269,8 @@ export function resolveBranchArtifactPaths(
     stdoutFile: join(branchDir, "stdout.log"),
     stderrFile: join(branchDir, "stderr.log"),
     taskSpecFile: join(branchDir, "task-spec.json"),
+    promptFile: join(branchDir, "worker-prompt.md"),
+    rawOutputFile: join(branchDir, "worker-output.json"),
     writebackFile: join(branchDir, "writeback.json"),
     reportFile: join(branchDir, "report.md"),
     evalFile: join(branchDir, "judge.json")

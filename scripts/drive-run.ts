@@ -29,12 +29,13 @@ import {
   CodexCliWorkerAdapter,
   loadCodexCliConfig,
   resolveSandboxForAttempt,
+  type WorkerAdapter,
   type CodexCliConfig
 } from "../packages/worker-adapters/src/index.ts";
 
 export { resolveSandboxForAttempt } from "../packages/worker-adapters/src/index.ts";
 
-type AttemptAdapter = Pick<CodexCliWorkerAdapter, "type" | "runAttemptTask">;
+type AttemptAdapter = Pick<WorkerAdapter, "type" | "runAttemptTask">;
 
 type CliOptions = {
   runId?: string;
@@ -98,7 +99,7 @@ export async function driveRun(input: {
     }));
   const orchestrator = new Orchestrator(
     workspacePaths,
-    input.adapter as never,
+    input.adapter,
     undefined,
     input.pollIntervalMs ?? 1500,
     {

@@ -16,6 +16,7 @@ import {
 } from "../packages/state-store/src/index.ts";
 import {
   CodexCliWorkerAdapter,
+  isWorkerWritebackParseError,
   loadCodexCliConfig,
   prepareResearchShellGuard
 } from "../packages/worker-adapters/src/index.ts";
@@ -311,7 +312,7 @@ async function main(): Promise<void> {
     );
   }
 
-  const prompt = await readFile(join(attemptPaths.attemptDir, "worker-prompt.md"), "utf8");
+  const prompt = await readFile(attemptPaths.promptFile, "utf8");
   assert.match(
     prompt,
     /Write all user-facing natural language fields in concise Chinese\./
@@ -735,15 +736,19 @@ async function main(): Promise<void> {
       assert.match(message, /Worker writeback schema invalid at artifacts\[0\]/);
       assert.match(message, /Expected object, received string/);
       assert.match(message, /artifacts 必须是对象数组/);
+      if (!isWorkerWritebackParseError(error)) {
+        return false;
+      }
+      assert.equal(
+        error.rawOutputFile,
+        `runs/${run.id}/attempts/${invalidArtifactsFixture.attempt.id}/worker-output.json`
+      );
       return true;
     }
   );
 
   const executionPrompt = await readFile(
-    join(
-      resolveAttemptPaths(workspacePaths, run.id, invalidArtifactsFixture.attempt.id).attemptDir,
-      "worker-prompt.md"
-    ),
+    resolveAttemptPaths(workspacePaths, run.id, invalidArtifactsFixture.attempt.id).promptFile,
     "utf8"
   );
   assert.match(

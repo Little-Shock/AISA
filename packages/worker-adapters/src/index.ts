@@ -11,7 +11,7 @@ import {
   writeFile
 } from "node:fs/promises";
 import { spawn } from "node:child_process";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import type {
   Attempt,
   AttemptContract,
@@ -53,7 +53,7 @@ export interface CodexCliConfig {
   stallKillGraceMs?: number;
 }
 
-export interface BranchExecutionResult {
+export interface WorkerTaskExecutionResult {
   writeback: WorkerWriteback;
   reportMarkdown: string;
   exitCode: number;
@@ -64,18 +64,21 @@ export class WorkerWritebackParseError extends Error {
   readonly fieldPath: string | null;
   readonly issueCode: string | null;
   readonly repairHint: string | null;
+  readonly rawOutputFile: string | null;
 
   constructor(input: {
     message: string;
     fieldPath?: string | null;
     issueCode?: string | null;
     repairHint?: string | null;
+    rawOutputFile?: string | null;
   }) {
     super(input.message);
     this.name = "WorkerWritebackParseError";
     this.fieldPath = input.fieldPath ?? null;
     this.issueCode = input.issueCode ?? null;
     this.repairHint = input.repairHint ?? null;
+    this.rawOutputFile = input.rawOutputFile ?? null;
   }
 }
 
@@ -88,6 +91,8 @@ export function isWorkerWritebackParseError(
 export const CODEX_CLI_EXECUTION_EFFORT_CONFIG_KEY = "model_reasoning_effort";
 export const CODEX_CLI_EXECUTION_EFFORT_APPLIED_DETAIL =
   `当前 execution 入口会通过 Codex CLI 配置键 ${CODEX_CLI_EXECUTION_EFFORT_CONFIG_KEY} 原生透传 effort。`;
+export const EXECUTION_WORKER_EFFORT_APPLIED_DETAIL =
+  CODEX_CLI_EXECUTION_EFFORT_APPLIED_DETAIL;
 
 export type CodexCliWorkerEffortSetting = {
   requested_effort: WorkerEffortLevel;
@@ -97,6 +102,8 @@ export type CodexCliWorkerEffortSetting = {
   applied: boolean;
   detail: string;
 };
+
+export type ExecutionWorkerEffortSetting = CodexCliWorkerEffortSetting;
 
 const RESEARCH_ALLOWED_COMMANDS = [
   "awk",
@@ -145,6 +152,28 @@ export interface ResearchShellGuard {
   env: NodeJS.ProcessEnv;
   allowedCommands: string[];
   blockedCommands: string[];
+}
+
+export interface WorkerAdapter {
+  readonly type: string;
+  runBranchTask?(input: {
+    goal: Goal;
+    branch: Branch;
+    contextSnapshot: ContextSnapshot;
+    workspacePaths: WorkspacePaths;
+  }): Promise<WorkerTaskExecutionResult>;
+  resolveExecutionEffort?(input: {
+    requestedEffort?: WorkerEffortLevel | null;
+    source?: string;
+  }): ExecutionWorkerEffortSetting;
+  runAttemptTask(input: {
+    run: Run;
+    attempt: Attempt;
+    attemptContract: AttemptContract;
+    context: unknown;
+    worker_effort?: ExecutionWorkerEffortSetting;
+    workspacePaths: WorkspacePaths;
+  }): Promise<WorkerTaskExecutionResult>;
 }
 
 export function resolveSandboxForAttempt(
@@ -1287,16 +1316,23 @@ export class CodexCliWorkerAdapter {
     };
   }
 
+  resolveExecutionEffort(input: {
+    requestedEffort?: WorkerEffortLevel | null;
+    source?: string;
+  } = {}): ExecutionWorkerEffortSetting {
+    return resolveExecutionWorkerEffort(input);
+  }
+
   async runBranchTask(input: {
     goal: Goal;
     branch: Branch;
     contextSnapshot: ContextSnapshot;
     workspacePaths: WorkspacePaths;
-  }): Promise<BranchExecutionResult> {
+  }): Promise<WorkerTaskExecutionResult> {
     const { goal, branch, contextSnapshot, workspacePaths } = input;
     const branchPaths = resolveBranchArtifactPaths(workspacePaths, goal.id, branch.id);
-    const outputFile = join(branchPaths.branchDir, "codex-output.json");
-    const promptFile = join(branchPaths.branchDir, "worker-prompt.md");
+    const outputFile = branchPaths.rawOutputFile;
+    const promptFile = branchPaths.promptFile;
 
     await mkdir(branchPaths.outputDir, { recursive: true });
 
@@ -1385,7 +1421,9 @@ export class CodexCliWorkerAdapter {
     }
 
     const rawOutput = await readFile(outputFile, "utf8");
-    const parsed = parseWritebackFromText(rawOutput);
+    const parsed = parseWritebackFromText(rawOutput, {
+      rawOutputFile: relative(workspacePaths.rootDir, outputFile)
+    });
     const reportMarkdown = buildBranchReportMarkdown(goal, branch, parsed);
 
     await Promise.all([
@@ -1405,13 +1443,13 @@ export class CodexCliWorkerAdapter {
     attempt: Attempt;
     attemptContract: AttemptContract;
     context: unknown;
-    worker_effort?: CodexCliWorkerEffortSetting;
+    worker_effort?: ExecutionWorkerEffortSetting;
     workspacePaths: WorkspacePaths;
-  }): Promise<BranchExecutionResult> {
+  }): Promise<WorkerTaskExecutionResult> {
     const { run, attempt, attemptContract, context, workspacePaths } = input;
     const attemptPaths = resolveAttemptPaths(workspacePaths, run.id, attempt.id);
-    const outputFile = join(attemptPaths.attemptDir, "codex-output.json");
-    const promptFile = join(attemptPaths.attemptDir, "worker-prompt.md");
+    const outputFile = attemptPaths.rawOutputFile;
+    const promptFile = attemptPaths.promptFile;
     const sandbox = resolveSandboxForAttempt(
       this.config.sandbox,
       attempt.attempt_type
@@ -1427,7 +1465,7 @@ export class CodexCliWorkerAdapter {
     const prompt = buildCodexAttemptPrompt(run, attempt, attemptContract, context);
     await Promise.all([
       writeJsonFile(attemptPaths.contextFile, context),
-      writeJsonFile(join(attemptPaths.attemptDir, "task-spec.json"), {
+      writeJsonFile(attemptPaths.taskSpecFile, {
         run_id: run.id,
         attempt_id: attempt.id,
         attempt_type: attempt.attempt_type,
@@ -1560,12 +1598,14 @@ export class CodexCliWorkerAdapter {
       });
       await runtimeTracker.waitForIdle();
 
-      const parsed = parseWritebackFromText(rawOutput);
+      const parsed = parseWritebackFromText(rawOutput, {
+        rawOutputFile: relative(workspacePaths.rootDir, outputFile)
+      });
       const reportMarkdown = buildAttemptReportMarkdown(run, attempt, parsed);
 
       await Promise.all([
         writeJsonFile(attemptPaths.resultFile, parsed),
-        writeTextFile(join(attemptPaths.attemptDir, "report.md"), reportMarkdown)
+        writeTextFile(attemptPaths.reportFile, reportMarkdown)
       ]);
 
       runtimeTracker.finalizeSuccess(rawOutput);
@@ -1622,6 +1662,13 @@ export function resolveCodexCliWorkerEffort(input: {
     applied: true,
     detail: CODEX_CLI_EXECUTION_EFFORT_APPLIED_DETAIL
   };
+}
+
+export function resolveExecutionWorkerEffort(input: {
+  requestedEffort?: WorkerEffortLevel | null;
+  source?: string;
+} = {}): ExecutionWorkerEffortSetting {
+  return resolveCodexCliWorkerEffort(input);
 }
 
 function buildCodexWorkerPrompt(
@@ -1859,7 +1906,9 @@ function buildWritebackParseError(error: {
     code?: string;
     message: string;
   }>;
-}): WorkerWritebackParseError {
+}, options: {
+  rawOutputFile?: string | null;
+} = {}): WorkerWritebackParseError {
   const issue = error.issues[0];
   const fieldPath = issue ? formatIssuePath(issue.path) : null;
   const issueMessage =
@@ -1880,12 +1929,16 @@ function buildWritebackParseError(error: {
     message: `${baseMessage} ${repairHint}`.trim(),
     fieldPath,
     issueCode: issue?.code ?? null,
-    repairHint
+    repairHint,
+    rawOutputFile: options.rawOutputFile
   });
 }
 
 function detectCommonWritebackContractError(
-  value: unknown
+  value: unknown,
+  options: {
+    rawOutputFile?: string | null;
+  } = {}
 ): WorkerWritebackParseError | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     return null;
@@ -1911,7 +1964,8 @@ function detectCommonWritebackContractError(
       return new WorkerWritebackParseError({
         message: `Worker writeback schema invalid at ${fieldPath}: Expected object, received ${received} ${repairHint}`,
         fieldPath,
-        repairHint
+        repairHint,
+        rawOutputFile: options.rawOutputFile
       });
     }
   }
@@ -1919,19 +1973,24 @@ function detectCommonWritebackContractError(
   return null;
 }
 
-function parseWritebackFromText(text: string): WorkerWriteback {
+function parseWritebackFromText(
+  text: string,
+  options: {
+    rawOutputFile?: string | null;
+  } = {}
+): WorkerWriteback {
   const trimmed = text.trim();
   const candidate = trimmed.startsWith("```")
     ? trimmed.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "")
     : trimmed;
   const parsedJson = JSON.parse(candidate);
-  const commonContractError = detectCommonWritebackContractError(parsedJson);
+  const commonContractError = detectCommonWritebackContractError(parsedJson, options);
   if (commonContractError) {
     throw commonContractError;
   }
   const parsed = WorkerWritebackSchema.safeParse(parsedJson);
   if (!parsed.success) {
-    throw buildWritebackParseError(parsed.error);
+    throw buildWritebackParseError(parsed.error, options);
   }
 
   return parsed.data;

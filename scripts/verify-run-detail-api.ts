@@ -2312,6 +2312,11 @@ async function main(): Promise<void> {
     assert.equal(healthResponse.statusCode, 200);
     const healthPayload = healthResponse.json() as {
       status: string;
+      execution_adapter: {
+        type: string;
+        command: string;
+        model: string | null;
+      };
       degraded_run_count: number;
       degraded_runs: Array<{
         run_id: string;
@@ -2320,6 +2325,9 @@ async function main(): Promise<void> {
       }>;
     };
     assert.equal(healthPayload.status, "degraded");
+    assert.equal(healthPayload.execution_adapter.type, "codex");
+    assert.equal(healthPayload.execution_adapter.command, "codex");
+    assert.equal(healthPayload.execution_adapter.model, null);
     assert.equal(healthPayload.degraded_run_count, 1);
     assert.deepEqual(
       healthPayload.degraded_runs.map((runHealth) => ({

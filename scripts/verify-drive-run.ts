@@ -600,7 +600,7 @@ async function main(hostJudgeConfig: HostJudgeConfigSnapshot): Promise<void> {
     workspaceRoot: rootDir,
     repositoryRoot: rootDir,
     runId: run.id,
-    adapter: adapter as never,
+    adapter,
     pollIntervalMs: 50,
     maxPolls: 200,
     autoApprovePendingExecution: true
@@ -1117,7 +1117,7 @@ async function verifyExecutionAttemptRuntimeStateTransitionsAcrossVerification()
 
   const orchestrator = new Orchestrator(
     workspacePaths,
-    new CompletedRuntimeStateExecutionAdapter() as never,
+    new CompletedRuntimeStateExecutionAdapter(),
     undefined,
     10
   );
@@ -1191,7 +1191,7 @@ async function verifyDriveRunDoesNotLeaveRunningAttemptBehind(): Promise<void> {
     workspaceRoot: rootDir,
     repositoryRoot: rootDir,
     runId: run.id,
-    adapter: new DelayedResearchAdapter() as never,
+    adapter: new DelayedResearchAdapter(),
     pollIntervalMs: 10,
     maxPolls: 1
   });
@@ -1390,7 +1390,7 @@ async function assertSteeredExecutionDoesNotReuseMismatchedContract(): Promise<v
 
   const orchestrator = new Orchestrator(
     workspacePaths,
-    new SingleResearchPassAdapter() as never,
+    new SingleResearchPassAdapter(),
     undefined,
     60_000
   );
@@ -1492,7 +1492,7 @@ async function assertDriveRunHonorsRuntimeLayoutScope(): Promise<void> {
     workspaceRoot: runtimeDataRoot,
     repositoryRoot: runtimeRepoRoot,
     runId: run.id,
-    adapter: new SingleResearchPassAdapter() as never,
+    adapter: new SingleResearchPassAdapter(),
     pollIntervalMs: 50,
     maxPolls: 40,
     stopAfterCompletedAttempts: 1
@@ -1528,7 +1528,7 @@ async function settleFirstResearchAttempt(input: {
 }> {
   const orchestrator = new Orchestrator(
     input.workspacePaths,
-    input.adapter as never,
+    input.adapter,
     undefined,
     10
   );

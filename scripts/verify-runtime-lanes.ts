@@ -543,12 +543,20 @@ async function verifyControlApiUsesSeparateRuntimeLayout(): Promise<void> {
     });
     assert.equal(healthResponse.statusCode, 200);
     const healthPayload = healthResponse.json() as {
+      execution_adapter: {
+        type: string;
+        command: string;
+        model: string | null;
+      };
       runtime_layout: {
         dev_repo_root: string;
         runtime_repo_root: string;
         runtime_data_root: string;
       };
     };
+    assert.equal(healthPayload.execution_adapter.type, "codex");
+    assert.equal(healthPayload.execution_adapter.command, "codex");
+    assert.equal(healthPayload.execution_adapter.model, null);
     assert.equal(healthPayload.runtime_layout.dev_repo_root, layout.devRepoRoot);
     assert.equal(healthPayload.runtime_layout.runtime_repo_root, layout.runtimeRepoRoot);
     assert.equal(healthPayload.runtime_layout.runtime_data_root, layout.runtimeDataRoot);

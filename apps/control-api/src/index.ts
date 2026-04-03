@@ -406,7 +406,8 @@ export async function buildServer(
   const workspacePaths = resolveWorkspacePaths(runtimeLayout.runtimeDataRoot);
   const defaultRunWorkspaceRoot = runtimeLayout.devRepoRoot;
   const contextManager = new ContextManager();
-  const adapter = new CodexCliWorkerAdapter(loadCodexCliConfig(process.env));
+  const adapterConfig = loadCodexCliConfig(process.env);
+  const adapter = new CodexCliWorkerAdapter(adapterConfig);
   const app = Fastify({
     logger: true
   });
@@ -936,8 +937,11 @@ export async function buildServer(
 
     return {
       status: degradedRuns.length > 0 ? "degraded" : "ok",
-      codex_command: process.env.CODEX_CLI_COMMAND ?? "codex",
-      codex_model: process.env.CODEX_MODEL ?? null,
+      execution_adapter: {
+        type: adapter.type,
+        command: adapterConfig.command,
+        model: adapterConfig.model ?? null
+      },
       runtime_layout: {
         repository_root: runtimeLayout.repositoryRoot,
         dev_repo_root: runtimeLayout.devRepoRoot,

@@ -1763,7 +1763,7 @@ async function assertExecutionEffortNativeConfigReachesCodexCli(): Promise<void>
 
   const taskSpec = JSON.parse(
     await readFile(
-      join(resolveAttemptPaths(workspacePaths, run.id, attempt.id).attemptDir, "task-spec.json"),
+      resolveAttemptPaths(workspacePaths, run.id, attempt.id).taskSpecFile,
       "utf8"
     )
   ) as {
