@@ -383,11 +383,26 @@ function buildReviewPacketOutput(input: {
 }
 
 function buildVerifierOutput(input: {
+  preflight: Awaited<ReturnType<typeof getAttemptPreflightEvaluation>> | null;
+  preflightRef: string | null;
   runtimeVerification: AttemptRuntimeVerification | null;
   runtimeVerificationRef: string | null;
   adversarialVerification: AttemptAdversarialVerification | null;
   adversarialVerificationRef: string | null;
 }): RunMaintenanceOutput {
+  if (input.preflight?.status === "failed") {
+    return {
+      key: "verifier_summary",
+      label: "验证摘要",
+      plane: "maintenance",
+      status: "attention",
+      ref: input.preflightRef,
+      summary:
+        input.preflight.failure_reason ??
+        `status=${input.preflight.status}`
+    };
+  }
+
   if (!input.runtimeVerification && !input.adversarialVerification) {
     return {
       key: "verifier_summary",
@@ -775,6 +790,8 @@ export async function buildRunMaintenancePlane(
         : null
   });
   const verifierOutput = buildVerifierOutput({
+    preflight: latestEvidence.latestPreflight,
+    preflightRef,
     runtimeVerification: latestEvidence.latestRuntimeVerification,
     runtimeVerificationRef,
     adversarialVerification: latestEvidence.latestAdversarialVerification,

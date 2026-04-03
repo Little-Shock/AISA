@@ -1713,6 +1713,8 @@ async function main(): Promise<void> {
         outputs: Array<{
           key: string;
           status: string;
+          ref: string | null;
+          summary: string | null;
         }>;
       } | null;
     };
@@ -2054,6 +2056,16 @@ async function main(): Promise<void> {
       )
     );
     assert.ok(
+      payload.maintenance_plane?.outputs.some(
+        (item) =>
+          item.key === "verifier_summary" &&
+          item.plane === "maintenance" &&
+          item.status === "attention" &&
+          item.ref?.endsWith("artifacts/preflight-evaluation.json") &&
+          item.summary === blockerFailureContext.message
+      )
+    );
+    assert.ok(
       payload.maintenance_plane?.signal_sources.some(
         (item) => item.key === "handoff_bundle" && item.plane === "mainline"
       )
@@ -2204,6 +2216,15 @@ async function main(): Promise<void> {
         (item) => item.key === "run_brief" && item.status === "not_available"
       )
     );
+    assert.ok(
+      missingRunBriefPayload.maintenance_plane?.outputs.some(
+        (item) =>
+          item.key === "verifier_summary" &&
+          item.status === "attention" &&
+          item.ref?.endsWith("artifacts/preflight-evaluation.json") &&
+          item.summary === missingRunBriefFailureReason
+      )
+    );
 
     const runsResponse = await app.inject({
       method: "GET",
@@ -2322,6 +2343,9 @@ async function main(): Promise<void> {
           outputs: Array<{
             key: string;
             plane: string;
+            status: string;
+            ref: string | null;
+            summary: string | null;
           }>;
         } | null;
         maintenance_plane_ref: string | null;
@@ -2483,6 +2507,16 @@ async function main(): Promise<void> {
         (item) => item.key === "policy_runtime" && item.plane === "maintenance"
       )
     );
+    assert.ok(
+      runSummary?.maintenance_plane?.outputs.some(
+        (item) =>
+          item.key === "verifier_summary" &&
+          item.plane === "maintenance" &&
+          item.status === "attention" &&
+          item.ref?.endsWith("artifacts/preflight-evaluation.json") &&
+          item.summary === blockerFailureContext.message
+      )
+    );
     assert.equal(runSummary?.task_focus, blockerAttempt.objective);
     assert.equal(missingRunBriefSummary?.run_brief, null);
     assert.equal(missingRunBriefSummary?.run_brief_ref, null);
@@ -2509,6 +2543,16 @@ async function main(): Promise<void> {
     assert.ok(
       missingRunBriefSummary?.maintenance_plane?.outputs.some(
         (item) => item.key === "run_brief" && item.plane === "maintenance"
+      )
+    );
+    assert.ok(
+      missingRunBriefSummary?.maintenance_plane?.outputs.some(
+        (item) =>
+          item.key === "verifier_summary" &&
+          item.plane === "maintenance" &&
+          item.status === "attention" &&
+          item.ref?.endsWith("artifacts/preflight-evaluation.json") &&
+          item.summary === missingRunBriefFailureReason
       )
     );
     assert.equal(

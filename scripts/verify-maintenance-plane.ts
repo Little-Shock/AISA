@@ -153,6 +153,12 @@ async function main(): Promise<void> {
   const missingRunBriefOutput =
     missingRunBriefView.maintenance_plane?.outputs.find((item) => item.key === "run_brief") ??
     null;
+  const verifierOutput =
+    maintenancePlane.outputs.find((item) => item.key === "verifier_summary") ?? null;
+  const missingRunBriefVerifierOutput =
+    missingRunBriefView.maintenance_plane?.outputs.find(
+      (item) => item.key === "verifier_summary"
+    ) ?? null;
   assert.equal(
     missingRunBriefView.maintenance_plane?.blocked_diagnosis.summary,
     preflight.failure_reason
@@ -163,6 +169,14 @@ async function main(): Promise<void> {
     )
   );
   assert.equal(missingRunBriefOutput?.status, "not_available");
+  assert.equal(verifierOutput?.status, "attention");
+  assert.equal(verifierOutput?.summary, preflight.failure_reason);
+  assert.ok(verifierOutput?.ref?.endsWith("artifacts/preflight-evaluation.json"));
+  assert.equal(missingRunBriefVerifierOutput?.status, "attention");
+  assert.equal(missingRunBriefVerifierOutput?.summary, preflight.failure_reason);
+  assert.ok(
+    missingRunBriefVerifierOutput?.ref?.endsWith("artifacts/preflight-evaluation.json")
+  );
 
   await saveCurrentDecision(
     workspacePaths,
@@ -298,6 +312,8 @@ async function main(): Promise<void> {
           blocked_diagnosis_source_ref: maintenancePlane.blocked_diagnosis.source_ref,
           missing_run_brief_blocked_summary:
             missingRunBriefView.maintenance_plane?.blocked_diagnosis.summary ?? null,
+          verifier_summary_status: verifierOutput?.status ?? null,
+          verifier_summary_ref: verifierOutput?.ref ?? null,
           maintenance_plane_ref: `runs/${run.id}/artifacts/maintenance-plane.json`,
           working_context_after_current_move: workingContextOutput?.status ?? null,
           saved_snapshot_strategy: savedSnapshotPolicyOutput?.summary ?? null
