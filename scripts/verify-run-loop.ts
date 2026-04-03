@@ -1947,6 +1947,7 @@ async function assertRunHarnessPolicyBundleDefaults(): Promise<void> {
   );
   const slots = orchestrator.describeRunHarnessSlots(configuredRun);
   const gates = orchestrator.describeRunHarnessGates(configuredRun);
+  const effectivePolicy = orchestrator.describeRunEffectivePolicyBundle(configuredRun);
 
   assert.equal(slots.research_or_planning.expected_binding, "codex_cli_research_worker");
   assert.equal(slots.research_or_planning.binding_status, "aligned");
@@ -1998,6 +1999,47 @@ async function assertRunHarnessPolicyBundleDefaults(): Promise<void> {
   assert.equal(
     gates.postflight_adversarial.source,
     "run.harness_profile.gates.postflight_adversarial.mode"
+  );
+  assert.equal(
+    effectivePolicy.verification_discipline.level,
+    "deterministic_plus_adversarial"
+  );
+  assert.equal(effectivePolicy.verification_discipline.default_verifier_kit, "web");
+  assert.equal(
+    effectivePolicy.verification_discipline.command_policy,
+    "contract_locked_commands"
+  );
+  assert.equal(effectivePolicy.operator_brief.intensity, "standard");
+  assert.equal(effectivePolicy.operator_brief.evidence_ref_budget, 6);
+  assert.equal(effectivePolicy.maintenance_refresh.strategy, "live_recompute");
+  assert.equal(effectivePolicy.maintenance_refresh.refreshes_on_read, true);
+  assert.equal(effectivePolicy.recovery.active_run, "working_context_first");
+  assert.equal(effectivePolicy.recovery.settled_run, "handoff_first");
+  assert.equal(effectivePolicy.recovery.auto_resume_from_settled_handoff, true);
+
+  const lowReviewerRun = updateRun(run, {
+    harness_profile: {
+      reviewer: {
+        effort: "low"
+      },
+      synthesizer: {
+        effort: "high"
+      }
+    }
+  });
+  const lowReviewerPolicy = orchestrator.describeRunEffectivePolicyBundle(lowReviewerRun);
+  assert.equal(lowReviewerPolicy.operator_brief.intensity, "expanded");
+  assert.equal(lowReviewerPolicy.operator_brief.evidence_ref_budget, 8);
+  assert.equal(
+    lowReviewerPolicy.maintenance_refresh.strategy,
+    "saved_boundary_snapshot"
+  );
+  assert.equal(lowReviewerPolicy.maintenance_refresh.refreshes_on_read, false);
+  assert.equal(lowReviewerPolicy.recovery.settled_run, "manual_only");
+  assert.equal(lowReviewerPolicy.recovery.auto_resume_from_settled_handoff, false);
+  assert.equal(
+    lowReviewerPolicy.recovery.source,
+    "run.harness_profile.reviewer.effort"
   );
 }
 

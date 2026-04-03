@@ -164,6 +164,105 @@ async function main(): Promise<void> {
     "maintenance view should surface stale working context without rewriting mainline state"
   );
 
+  const savedSnapshotRun = createRun({
+    title: "Maintenance snapshot strategy verification",
+    description: "Low reviewer effort should keep maintenance reads on the saved snapshot.",
+    success_criteria: ["Return the saved maintenance snapshot instead of recomputing on read."],
+    constraints: [],
+    owner_id: "test-owner",
+    workspace_root: rootDir,
+    harness_profile: {
+      reviewer: {
+        effort: "low"
+      }
+    }
+  });
+  const savedSnapshotAttempt = createAttempt({
+    run_id: savedSnapshotRun.id,
+    attempt_type: "execution",
+    worker: "codex",
+    objective: "Persist a saved maintenance snapshot for later reads.",
+    success_criteria: ["Low reviewer policy should expose a saved maintenance snapshot strategy."],
+    workspace_root: rootDir
+  });
+  const savedSnapshotContract = createAttemptContract({
+    attempt_id: savedSnapshotAttempt.id,
+    run_id: savedSnapshotRun.id,
+    attempt_type: "execution",
+    objective: savedSnapshotAttempt.objective,
+    success_criteria: savedSnapshotAttempt.success_criteria,
+    required_evidence: ["Write a saved maintenance snapshot without mutating current.json."]
+  });
+  const savedSnapshotCurrent = createCurrentDecision({
+    run_id: savedSnapshotRun.id,
+    run_status: "waiting_steer",
+    latest_attempt_id: savedSnapshotAttempt.id,
+    recommended_next_action: "wait_for_human",
+    recommended_attempt_type: "execution",
+    summary: "Saved snapshot should stay readable after current changes.",
+    blocking_reason: "Saved snapshot should stay readable after current changes.",
+    waiting_for_human: true
+  });
+
+  await saveRun(workspacePaths, savedSnapshotRun);
+  await saveAttempt(workspacePaths, savedSnapshotAttempt);
+  await saveAttemptContract(workspacePaths, savedSnapshotContract);
+  await saveCurrentDecision(workspacePaths, savedSnapshotCurrent);
+
+  const savedSnapshotPlane = await refreshRunMaintenancePlane(
+    workspacePaths,
+    savedSnapshotRun.id,
+    {
+      staleAfterMs: 60_000
+    }
+  );
+  assert.ok(
+    savedSnapshotPlane.outputs.some((item) => item.key === "effective_policy"),
+    "maintenance plane should expose the effective policy output"
+  );
+  assert.ok(
+    savedSnapshotPlane.signal_sources.some((item) => item.key === "effective_policy"),
+    "maintenance plane should expose the effective policy source"
+  );
+
+  await saveCurrentDecision(
+    workspacePaths,
+    createCurrentDecision({
+      run_id: savedSnapshotRun.id,
+      run_status: "waiting_steer",
+      latest_attempt_id: savedSnapshotAttempt.id,
+      recommended_next_action: "wait_for_human",
+      recommended_attempt_type: "execution",
+      summary: "Current moved after the saved maintenance snapshot.",
+      blocking_reason: "Current moved after the saved maintenance snapshot.",
+      waiting_for_human: true
+    })
+  );
+  const savedSnapshotView = await readRunMaintenancePlaneView(
+    workspacePaths,
+    savedSnapshotRun.id,
+    {
+      staleAfterMs: 60_000
+    }
+  );
+  const savedSnapshotWorkingContextOutput =
+    savedSnapshotView.maintenance_plane?.outputs.find(
+      (item) => item.key === "working_context"
+    ) ?? null;
+  const savedSnapshotPolicyOutput =
+    savedSnapshotView.maintenance_plane?.outputs.find(
+      (item) => item.key === "effective_policy"
+    ) ?? null;
+  assert.equal(
+    savedSnapshotWorkingContextOutput?.status,
+    "ready",
+    "low reviewer policy should keep the saved maintenance snapshot on read"
+  );
+  assert.ok(
+    savedSnapshotPolicyOutput?.summary?.includes("saved boundary snapshot")
+  );
+  assert.ok(savedSnapshotView.maintenance_plane_ref?.endsWith("maintenance-plane.json"));
+
     console.log(
       JSON.stringify(
         {
@@ -172,7 +271,8 @@ async function main(): Promise<void> {
           attempt_id: attempt.id,
           blocked_diagnosis: maintenancePlane.blocked_diagnosis.status,
           maintenance_plane_ref: `runs/${run.id}/artifacts/maintenance-plane.json`,
-          working_context_after_current_move: workingContextOutput?.status ?? null
+          working_context_after_current_move: workingContextOutput?.status ?? null,
+          saved_snapshot_strategy: savedSnapshotPolicyOutput?.summary ?? null
         },
         null,
         2

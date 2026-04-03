@@ -785,6 +785,7 @@ export function RunPolicyPanel({
   const policyRuntime = runDetail.policy_runtime;
   const policyActivity = runDetail.policy_activity ?? [];
   const defaultVerifierKitProfile = runDetail.default_verifier_kit_profile;
+  const effectivePolicyBundle = runDetail.effective_policy_bundle;
   const harnessProfile = runDetail.run.harness_profile;
   const harnessGates = [
     runDetail.harness_gates.preflight_review,
@@ -900,6 +901,21 @@ export function RunPolicyPanel({
           `postflight adversarial gate：${harnessGateModeLabel(
             harnessProfile.gates.postflight_adversarial.mode
           )}`
+        ]}
+      />
+
+      <SectionList
+        title="Effective Policy Bundle"
+        items={[
+          `verification discipline: ${effectivePolicyBundle.verification_discipline.level}`,
+          `default verifier kit: ${effectivePolicyBundle.verification_discipline.default_verifier_kit}`,
+          `command policy: ${effectivePolicyBundle.verification_discipline.command_policy}`,
+          `operator brief intensity: ${effectivePolicyBundle.operator_brief.intensity}`,
+          `operator brief evidence refs: ${String(
+            effectivePolicyBundle.operator_brief.evidence_ref_budget
+          )}`,
+          `maintenance refresh: ${effectivePolicyBundle.maintenance_refresh.strategy}`,
+          `settled recovery: ${effectivePolicyBundle.recovery.settled_run}`
         ]}
       />
 

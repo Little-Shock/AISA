@@ -764,6 +764,7 @@ export async function buildServer(
     const harnessGates = orchestrator.describeRunHarnessGates(run);
     const harnessSlots = orchestrator.describeRunHarnessSlots(run);
     const defaultVerifierKitProfile = orchestrator.describeRunDefaultVerifierKit(run);
+    const effectivePolicyBundle = orchestrator.describeRunEffectivePolicyBundle(run);
 
     return {
       run,
@@ -799,6 +800,7 @@ export async function buildServer(
       harness_gates: harnessGates,
       harness_slots: harnessSlots,
       default_verifier_kit_profile: defaultVerifierKitProfile,
+      effective_policy_bundle: effectivePolicyBundle,
       worker_effort: workerEffort,
       attempts,
       attempt_details: attemptDetails,
@@ -856,6 +858,7 @@ export async function buildServer(
     const harnessGates = orchestrator.describeRunHarnessGates(run);
     const harnessSlots = orchestrator.describeRunHarnessSlots(run);
     const defaultVerifierKitProfile = orchestrator.describeRunDefaultVerifierKit(run);
+    const effectivePolicyBundle = orchestrator.describeRunEffectivePolicyBundle(run);
 
     return {
       run,
@@ -888,6 +891,7 @@ export async function buildServer(
       harness_gates: harnessGates,
       harness_slots: harnessSlots,
       default_verifier_kit_profile: defaultVerifierKitProfile,
+      effective_policy_bundle: effectivePolicyBundle,
       worker_effort: orchestrator.describeRunWorkerEffort(run),
       run_health: runHealth,
       attempt_count: attempts.length,

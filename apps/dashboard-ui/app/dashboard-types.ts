@@ -315,6 +315,37 @@ export type ExecutionVerifierKitView = {
   source: string;
 };
 
+export type RunEffectivePolicyBundleView = {
+  profile_version: number;
+  verification_discipline: {
+    level: string;
+    default_verifier_kit: string;
+    command_policy: string;
+    summary: string;
+    source_refs: string[];
+  };
+  operator_brief: {
+    intensity: string;
+    evidence_ref_budget: number;
+    summary_style: string;
+    source: string;
+    detail: string;
+  };
+  maintenance_refresh: {
+    strategy: string;
+    refreshes_on_read: boolean;
+    source: string;
+    detail: string;
+  };
+  recovery: {
+    active_run: string;
+    settled_run: string;
+    auto_resume_from_settled_handoff: boolean;
+    source: string;
+    detail: string;
+  };
+};
+
 export type RunWorkingContextTaskRef = {
   task_id: string;
   title: string;
@@ -563,6 +594,7 @@ export type RunSummaryItem = {
   harness_gates: RunHarnessGatesView;
   harness_slots: RunHarnessSlotsView;
   default_verifier_kit_profile: ExecutionVerifierKitView;
+  effective_policy_bundle: RunEffectivePolicyBundleView;
   attempt_count: number;
   latest_attempt: {
     id: string;
@@ -631,6 +663,7 @@ export type RunDetail = {
   harness_gates: RunHarnessGatesView;
   harness_slots: RunHarnessSlotsView;
   default_verifier_kit_profile: ExecutionVerifierKitView;
+  effective_policy_bundle: RunEffectivePolicyBundleView;
   attempts: Array<{
     id: string;
     attempt_type: string;

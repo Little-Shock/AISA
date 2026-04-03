@@ -223,6 +223,41 @@ const fixtureRunDetail: RunDetail = {
     adversarial_focus: ["Probe repo-local toolchain assumptions and replay drift."],
     source: "run.harness_profile.execution.default_verifier_kit"
   },
+  effective_policy_bundle: {
+    profile_version: 3,
+    verification_discipline: {
+      level: "deterministic_plus_adversarial",
+      default_verifier_kit: "repo",
+      command_policy: "workspace_script_inference",
+      summary: "Fixture profile keeps deterministic replay plus adversarial verification.",
+      source_refs: [
+        "run.harness_profile.gates.preflight_review.mode",
+        "run.harness_profile.gates.deterministic_runtime.mode",
+        "run.harness_profile.gates.postflight_adversarial.mode",
+        "run.harness_profile.execution.default_verifier_kit"
+      ]
+    },
+    operator_brief: {
+      intensity: "standard",
+      evidence_ref_budget: 6,
+      summary_style: "headline_plus_focus",
+      source: "run.harness_profile.synthesizer.effort",
+      detail: "Fixture synthesizer effort keeps the brief concise but useful."
+    },
+    maintenance_refresh: {
+      strategy: "live_recompute",
+      refreshes_on_read: true,
+      source: "run.harness_profile.reviewer.effort",
+      detail: "Fixture reviewer effort keeps maintenance reads live."
+    },
+    recovery: {
+      active_run: "working_context_first",
+      settled_run: "handoff_first",
+      auto_resume_from_settled_handoff: true,
+      source: "run.harness_profile.reviewer.effort",
+      detail: "Fixture reviewer effort allows settled handoff recovery."
+    }
+  },
   attempts: [
     {
       id: "att_fixture",

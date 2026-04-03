@@ -135,6 +135,16 @@ async function main(): Promise<void> {
       runDetail.default_verifier_kit_profile.source,
       "run.harness_profile.execution.default_verifier_kit"
     );
+    assert.equal(
+      runDetail.effective_policy_bundle.verification_discipline.level,
+      "deterministic_plus_adversarial"
+    );
+    assert.equal(runDetail.effective_policy_bundle.operator_brief.intensity, "standard");
+    assert.equal(
+      runDetail.effective_policy_bundle.maintenance_refresh.strategy,
+      "live_recompute"
+    );
+    assert.equal(runDetail.effective_policy_bundle.recovery.settled_run, "handoff_first");
     assert.equal(runDetail.policy_runtime?.stage, fixture.expected_policy_stage);
     assert.equal(
       runDetail.policy_runtime?.approval_status,
@@ -251,6 +261,12 @@ async function main(): Promise<void> {
       selectedRun?.default_verifier_kit_profile.command_policy,
       "contract_locked_commands"
     );
+    assert.equal(selectedRun?.effective_policy_bundle.operator_brief.intensity, "standard");
+    assert.equal(
+      selectedRun?.effective_policy_bundle.maintenance_refresh.strategy,
+      "live_recompute"
+    );
+    assert.equal(selectedRun?.effective_policy_bundle.recovery.settled_run, "handoff_first");
 
     const selectedRunAttemptDetail =
       runDetail.attempt_details.find(
@@ -338,10 +354,14 @@ async function main(): Promise<void> {
     assert.match(policyMarkup, /开启 Killswitch/);
     assert.match(policyMarkup, /清除 Killswitch/);
     assert.match(policyMarkup, /Harness Profile/);
+    assert.match(policyMarkup, /Effective Policy Bundle/);
     assert.match(policyMarkup, /Preflight Gate/);
     assert.match(policyMarkup, /Deterministic Runtime Gate/);
     assert.match(policyMarkup, /Postflight Adversarial Gate/);
     assert.match(policyMarkup, /postflight adversarial gate：硬门/);
+    assert.match(policyMarkup, /operator brief intensity: standard/);
+    assert.match(policyMarkup, /maintenance refresh: live_recompute/);
+    assert.match(policyMarkup, /settled recovery: handoff_first/);
     assert.match(policyMarkup, /待批执行契约/);
     assert.match(policyMarkup, /最近策略活动/);
     assert.match(

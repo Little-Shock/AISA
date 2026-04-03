@@ -528,7 +528,13 @@ async function maybeApprovePendingExecutionPolicy(
   return true;
 }
 
-async function bootstrapRun(title: string, runTitle?: string): Promise<{
+async function bootstrapRun(
+  title: string,
+  runTitle?: string,
+  runOverrides?: {
+    harness_profile?: Parameters<typeof createRun>[0]["harness_profile"];
+  }
+): Promise<{
   run: Run;
   workspacePaths: ReturnType<typeof resolveWorkspacePaths>;
   rootDir: string;
@@ -545,7 +551,8 @@ async function bootstrapRun(title: string, runTitle?: string): Promise<{
     success_criteria: ["Produce the next valid move without defaulting to human wait."],
     constraints: [],
     owner_id: "test",
-    workspace_root: rootDir
+    workspace_root: rootDir,
+    harness_profile: runOverrides?.harness_profile
   });
 
   await saveRun(workspacePaths, run);
@@ -1760,6 +1767,138 @@ async function verifyRecoveryAutoResumesExecution(): Promise<void> {
     scheduledEntry?.payload.handoff_bundle_ref,
     `runs/${run.id}/attempts/${orphanedExecution.id}/artifacts/handoff_bundle.json`,
     "scheduled auto-resume should point at the consumed handoff bundle"
+  );
+}
+
+async function verifyLowReviewerProfileBlocksSettledAutoResume(): Promise<void> {
+  const { run, workspacePaths, detachedRuntimeLayout } = await bootstrapRun(
+    "low-reviewer-profile-blocks-settled-auto-resume",
+    undefined,
+    {
+      harness_profile: {
+        reviewer: {
+          effort: "low"
+        }
+      }
+    }
+  );
+
+  const settledExecution = updateAttempt(
+    createAttempt({
+      run_id: run.id,
+      attempt_type: "execution",
+      worker: "fake-codex",
+      objective: "Keep the settled handoff ready for profile-based recovery gating.",
+      success_criteria: run.success_criteria,
+      workspace_root: run.workspace_root
+    }),
+    {
+      status: "failed",
+      started_at: new Date().toISOString(),
+      ended_at: new Date().toISOString()
+    }
+  );
+  const attemptContract = createAttemptContract({
+    attempt_id: settledExecution.id,
+    run_id: run.id,
+    attempt_type: settledExecution.attempt_type,
+    objective: settledExecution.objective,
+    success_criteria: settledExecution.success_criteria,
+    required_evidence: ["Leave a settled handoff bundle for the next pickup."]
+  });
+  const currentSnapshot = createCurrentDecision({
+    run_id: run.id,
+    latest_attempt_id: settledExecution.id,
+    run_status: "waiting_steer",
+    recommended_next_action: "wait_for_human",
+    recommended_attempt_type: "execution",
+    summary: "Settled handoff is present, but low reviewer profile should keep recovery manual.",
+    blocking_reason:
+      "Settled handoff is present, but low reviewer profile should keep recovery manual.",
+    waiting_for_human: true
+  });
+
+  await saveAttempt(workspacePaths, settledExecution);
+  await saveAttemptContract(workspacePaths, attemptContract);
+  await saveCurrentDecision(workspacePaths, currentSnapshot);
+  await appendRunJournal(
+    workspacePaths,
+    createRunJournalEntry({
+      run_id: run.id,
+      attempt_id: settledExecution.id,
+      type: "attempt.failed",
+      payload: {
+        message: currentSnapshot.blocking_reason
+      }
+    })
+  );
+  await saveAttemptHandoffBundle(
+    workspacePaths,
+    createAttemptHandoffBundle({
+      attempt: settledExecution,
+      approved_attempt_contract: attemptContract,
+      current_decision_snapshot: currentSnapshot,
+      source_refs: {
+        run_contract: `runs/${run.id}/contract.json`,
+        attempt_meta: `runs/${run.id}/attempts/${settledExecution.id}/meta.json`,
+        attempt_contract: `runs/${run.id}/attempts/${settledExecution.id}/attempt_contract.json`,
+        preflight_evaluation: null,
+        current_decision: `runs/${run.id}/current.json`,
+        review_packet: null,
+        runtime_verification: null,
+        adversarial_verification: null
+      }
+    })
+  );
+
+  const orchestrator = new Orchestrator(
+    workspacePaths,
+    new RecoveryExecutionAdapter() as never,
+    undefined,
+    60_000,
+    {
+      runtimeLayout: detachedRuntimeLayout,
+      waitingHumanAutoResumeMs: 30,
+      maxAutomaticResumeCycles: 2
+    }
+  );
+
+  await wait(40);
+  await settle(orchestrator, {
+    workspacePaths,
+    runId: run.id,
+    iterations: 8,
+    delayMs: 80
+  });
+
+  const current = await getCurrentDecision(workspacePaths, run.id);
+  const attempts = await listAttempts(workspacePaths, run.id);
+  const journal = await listRunJournal(workspacePaths, run.id);
+  const blockedEntry = journal.find((entry) => entry.type === "run.auto_resume.blocked");
+
+  assert.ok(current, "current decision must exist");
+  assert.equal(current.run_status, "waiting_steer");
+  assert.equal(current.waiting_for_human, true);
+  assert.deepEqual(
+    attempts.map((attempt) => attempt.status),
+    ["failed"],
+    "low reviewer recovery policy should block auto-resume from a settled handoff"
+  );
+  assert.ok(
+    !journal.some((entry) => entry.type === "run.auto_resume.scheduled"),
+    "low reviewer recovery policy should not schedule automatic resume"
+  );
+  assert.ok(blockedEntry, "expected a machine-readable auto-resume blocker");
+  assert.equal(blockedEntry?.payload.reason, "profile_manual_recovery");
+  assert.equal(
+    blockedEntry?.payload.handoff_bundle_ref,
+    `runs/${run.id}/attempts/${settledExecution.id}/artifacts/handoff_bundle.json`,
+    "profile blocker should still point at the consumed handoff bundle"
+  );
+  assert.match(
+    String(blockedEntry?.payload.message),
+    /manual recovery|reviewer/i,
+    "profile blocker should explain why low reviewer policy disables settled auto-resume"
   );
 }
 
@@ -3482,6 +3621,10 @@ async function main(): Promise<void> {
       {
         id: "recovery_auto_resumes_execution",
         run: verifyRecoveryAutoResumesExecution
+      },
+      {
+        id: "low_reviewer_profile_blocks_settled_auto_resume",
+        run: verifyLowReviewerProfileBlocksSettledAutoResume
       }
     ];
     const results: CaseResult[] = [];

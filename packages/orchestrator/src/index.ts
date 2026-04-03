@@ -212,6 +212,10 @@ import {
   executionVerifierKitAllowsWorkspaceScriptInference,
   type ExecutionVerifierKitView
 } from "./verifier-kit-registry.js";
+import {
+  describeRunEffectivePolicyBundle as buildRunEffectivePolicyBundleView,
+  type RunEffectivePolicyBundleView
+} from "./effective-policy-bundle.js";
 
 export interface OrchestratorOptions {
   attemptHeartbeatIntervalMs?: number;
@@ -976,6 +980,10 @@ export class Orchestrator {
 
   describeRunDefaultVerifierKit(run: Run): ExecutionVerifierKitView {
     return buildRunDefaultVerifierKitView(run);
+  }
+
+  describeRunEffectivePolicyBundle(run: Run): RunEffectivePolicyBundleView {
+    return buildRunEffectivePolicyBundleView(run);
   }
 
   describeAttemptEffectiveVerifierKit(input: {
@@ -5562,6 +5570,10 @@ export class Orchestrator {
       this.workspacePaths,
       input.runId
     );
+    const run = await getRun(this.workspacePaths, input.runId);
+    const effectivePolicyBundle = run
+      ? this.describeRunEffectivePolicyBundle(run)
+      : null;
     const latestAttemptIsSettled =
       input.latestAttempt?.status === "completed" || input.latestAttempt?.status === "failed";
     const canRecoverFromSettledHandoff =
@@ -5585,6 +5597,19 @@ export class Orchestrator {
 
     if (!input.latestAttempt) {
       return null;
+    }
+
+    if (
+      canRecoverFromSettledHandoff &&
+      effectivePolicyBundle &&
+      !effectivePolicyBundle.recovery.auto_resume_from_settled_handoff
+    ) {
+      return {
+        reason: "profile_manual_recovery",
+        message:
+          "Low reviewer effort keeps settled handoff recovery in manual recovery mode, so automatic resume stays blocked.",
+        handoffBundleRef: input.latestHandoffBundleRef
+      };
     }
 
     const preflightBlocker =
@@ -6909,3 +6934,8 @@ export {
   type RefreshRunMaintenancePlaneOptions,
   type RunMaintenancePlaneView
 } from "./maintenance-plane.js";
+
+export {
+  describeRunEffectivePolicyBundle,
+  type RunEffectivePolicyBundleView
+} from "./effective-policy-bundle.js";

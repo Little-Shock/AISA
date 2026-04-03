@@ -129,6 +129,37 @@ type WorkingContextSourceSnapshotPayload = {
   };
 };
 
+type EffectivePolicyBundlePayload = {
+  profile_version: number;
+  verification_discipline: {
+    level: string;
+    default_verifier_kit: string;
+    command_policy: string;
+    summary: string;
+    source_refs: string[];
+  };
+  operator_brief: {
+    intensity: string;
+    evidence_ref_budget: number;
+    summary_style: string;
+    source: string;
+    detail: string;
+  };
+  maintenance_refresh: {
+    strategy: string;
+    refreshes_on_read: boolean;
+    source: string;
+    detail: string;
+  };
+  recovery: {
+    active_run: string;
+    settled_run: string;
+    auto_resume_from_settled_handoff: boolean;
+    source: string;
+    detail: string;
+  };
+};
+
 async function main(): Promise<void> {
   try {
   const rootDir = await createTrackedVerifyTempDir("aisa-run-detail-api-");
@@ -1317,6 +1348,7 @@ async function main(): Promise<void> {
       harness_gates: HarnessGatesPayload;
       harness_slots: HarnessSlotsPayload;
       default_verifier_kit_profile: VerifierKitProfilePayload;
+      effective_policy_bundle: EffectivePolicyBundlePayload;
       worker_effort: {
         execution: { requested_effort: string; status: string };
         reviewer: { requested_effort: string; status: string };
@@ -1753,6 +1785,38 @@ async function main(): Promise<void> {
       payload.harness_slots.final_synthesis.permission_boundary,
       "control_plane_only"
     );
+    assert.equal(payload.effective_policy_bundle.profile_version, 3);
+    assert.equal(
+      payload.effective_policy_bundle.verification_discipline.level,
+      "deterministic_plus_adversarial"
+    );
+    assert.equal(
+      payload.effective_policy_bundle.verification_discipline.default_verifier_kit,
+      "api"
+    );
+    assert.equal(
+      payload.effective_policy_bundle.verification_discipline.command_policy,
+      "contract_locked_commands"
+    );
+    assert.equal(payload.effective_policy_bundle.operator_brief.intensity, "standard");
+    assert.equal(payload.effective_policy_bundle.operator_brief.evidence_ref_budget, 6);
+    assert.equal(
+      payload.effective_policy_bundle.maintenance_refresh.strategy,
+      "saved_boundary_snapshot"
+    );
+    assert.equal(
+      payload.effective_policy_bundle.maintenance_refresh.refreshes_on_read,
+      false
+    );
+    assert.equal(
+      payload.effective_policy_bundle.recovery.active_run,
+      "working_context_first"
+    );
+    assert.equal(payload.effective_policy_bundle.recovery.settled_run, "manual_only");
+    assert.equal(
+      payload.effective_policy_bundle.recovery.auto_resume_from_settled_handoff,
+      false
+    );
     assert.ok(
       payload.harness_slots.execution.input_contract.includes(
         "attempt_contract.json with replayable verification commands"
@@ -1875,6 +1939,11 @@ async function main(): Promise<void> {
       )
     );
     assert.ok(
+      payload.maintenance_plane?.outputs.some(
+        (item) => item.key === "effective_policy" && item.plane === "maintenance"
+      )
+    );
+    assert.ok(
       payload.maintenance_plane?.signal_sources.some(
         (item) => item.key === "handoff_bundle" && item.plane === "mainline"
       )
@@ -1984,6 +2053,7 @@ async function main(): Promise<void> {
         harness_gates: HarnessGatesPayload;
         harness_slots: HarnessSlotsPayload;
         default_verifier_kit_profile: VerifierKitProfilePayload;
+        effective_policy_bundle: EffectivePolicyBundlePayload;
         worker_effort: {
           execution: { requested_effort: string; status: string };
         };
@@ -2139,6 +2209,12 @@ async function main(): Promise<void> {
     assert.ok(runSummary?.policy_runtime_ref?.endsWith("policy-runtime.json"));
     assert.equal(runSummary?.policy_runtime_invalid_reason, null);
     assert.equal(runSummary?.run_health.status, "waiting_steer");
+    assert.equal(runSummary?.effective_policy_bundle.operator_brief.intensity, "standard");
+    assert.equal(
+      runSummary?.effective_policy_bundle.maintenance_refresh.strategy,
+      "saved_boundary_snapshot"
+    );
+    assert.equal(runSummary?.effective_policy_bundle.recovery.settled_run, "manual_only");
     assert.equal(runSummary?.working_context_degraded.is_degraded, false);
     assert.equal(runSummary?.working_context?.version, 1);
     assert.ok(runSummary?.working_context?.source_snapshot.current.ref?.endsWith("current.json"));

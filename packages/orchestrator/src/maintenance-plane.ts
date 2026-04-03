@@ -27,6 +27,7 @@ import {
   getAttemptRuntimeVerification,
   getAttemptHandoffBundle,
   getCurrentDecision,
+  getRun,
   getRunGovernanceState,
   getRunMaintenancePlane,
   getRunRuntimeHealthSnapshot,
@@ -49,6 +50,10 @@ import {
   type RunWorkingContextView
 } from "./working-context.js";
 import { assessRunHealth } from "./run-health.js";
+import {
+  describeRunEffectivePolicyBundle,
+  type RunEffectivePolicyBundleView
+} from "./effective-policy-bundle.js";
 
 export type RunMaintenancePlaneView = {
   maintenance_plane: RunMaintenancePlane | null;
@@ -300,6 +305,24 @@ function buildRunHealthOutput(runHealth: RunHealthAssessment): RunMaintenanceOut
   };
 }
 
+function buildEffectivePolicyOutput(
+  effectivePolicyBundle: RunEffectivePolicyBundleView
+): RunMaintenanceOutput {
+  const refreshSummary =
+    effectivePolicyBundle.maintenance_refresh.strategy === "saved_boundary_snapshot"
+      ? "saved boundary snapshot"
+      : "live recompute";
+
+  return {
+    key: "effective_policy",
+    label: "有效策略包",
+    plane: "maintenance",
+    status: "ready",
+    ref: null,
+    summary: `Maintenance reads use ${refreshSummary}; settled recovery stays ${effectivePolicyBundle.recovery.settled_run}.`
+  };
+}
+
 function buildHistoryContractDriftOutput(input: {
   runtimeHealthSnapshot: Awaited<ReturnType<typeof getRunRuntimeHealthSnapshot>> | null;
   snapshotRef: string | null;
@@ -488,6 +511,7 @@ function buildSignalSources(input: {
   historyContractDriftOutput: RunMaintenanceOutput;
   reviewPacketOutput: RunMaintenanceOutput;
   verifierOutput: RunMaintenanceOutput;
+  effectivePolicyBundle: RunEffectivePolicyBundleView | null;
   latestEvidence: LatestEvidenceArtifacts;
 }): RunMaintenanceSource[] {
   const sources: RunMaintenanceSource[] = [];
@@ -578,6 +602,17 @@ function buildSignalSources(input: {
       input.runBriefView.run_brief?.summary ??
       null
   });
+  if (input.effectivePolicyBundle) {
+    sources.push({
+      key: "effective_policy",
+      label: "有效策略包",
+      plane: "maintenance",
+      ref: null,
+      summary:
+        input.effectivePolicyBundle.verification_discipline.summary ??
+        input.effectivePolicyBundle.maintenance_refresh.detail
+    });
+  }
   sources.push({
     key: "run_health",
     label: "运行健康",
@@ -622,6 +657,7 @@ export async function buildRunMaintenancePlane(
   options: RefreshRunMaintenancePlaneOptions
 ): Promise<RunMaintenancePlane> {
   const [
+    run,
     current,
     governance,
     policyRuntimeSurface,
@@ -631,6 +667,7 @@ export async function buildRunMaintenancePlane(
     runtimeHealthSnapshot
   ] =
     await Promise.all([
+      getRun(paths, runId),
       getCurrentDecision(paths, runId),
       getRunGovernanceState(paths, runId),
       readRunPolicyRuntimeSurface(paths, runId),
@@ -639,6 +676,9 @@ export async function buildRunMaintenancePlane(
       readRunBriefView(paths, runId),
       getRunRuntimeHealthSnapshot(paths, runId)
     ]);
+  const effectivePolicyBundle = run
+    ? describeRunEffectivePolicyBundle(run)
+    : null;
   const policyRuntime = policyRuntimeSurface.policyRuntime;
   const latestAttempt = pickLatestAttempt(attempts, current);
   const latestEvidence = await resolveLatestEvidenceArtifacts({
@@ -709,6 +749,7 @@ export async function buildRunMaintenancePlane(
         policyRuntimeRef: policyRuntimeSurface.policyRuntimeRef,
         policyRuntimeInvalidReason: policyRuntimeSurface.policyRuntimeInvalidReason
       }),
+      ...(effectivePolicyBundle ? [buildEffectivePolicyOutput(effectivePolicyBundle)] : []),
       buildWorkingContextOutput(workingContextView),
       buildRunBriefOutput(runBriefView),
       buildRunHealthOutput(runHealth),
@@ -731,6 +772,7 @@ export async function buildRunMaintenancePlane(
       historyContractDriftOutput,
       reviewPacketOutput,
       verifierOutput,
+      effectivePolicyBundle,
       latestEvidence
     }),
     blocked_diagnosis: blockedDiagnosis
@@ -823,7 +865,23 @@ export async function readRunMaintenancePlaneView(
   runId: string,
   options: RefreshRunMaintenancePlaneOptions = { staleAfterMs: 60_000 }
 ): Promise<RunMaintenancePlaneView> {
-  const savedMaintenancePlane = await getRunMaintenancePlane(paths, runId);
+  const [run, savedMaintenancePlane] = await Promise.all([
+    getRun(paths, runId),
+    getRunMaintenancePlane(paths, runId)
+  ]);
+  const effectivePolicyBundle = run
+    ? describeRunEffectivePolicyBundle(run)
+    : null;
+  if (
+    savedMaintenancePlane &&
+    effectivePolicyBundle &&
+    !effectivePolicyBundle.maintenance_refresh.refreshes_on_read
+  ) {
+    return {
+      maintenance_plane: savedMaintenancePlane,
+      maintenance_plane_ref: buildRunMaintenancePlaneRef(paths, runId)
+    };
+  }
   const maintenancePlane = await buildRunMaintenancePlane(paths, runId, {
     staleAfterMs: options.staleAfterMs
   });
