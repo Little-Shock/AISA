@@ -7,6 +7,7 @@ import {
   createAttemptAdversarialVerification,
   createAttemptContract,
   createAttemptHandoffBundle,
+  createAttemptPreflightEvaluation,
   createRunAutomationControl,
   createCurrentDecision,
   createRun,
@@ -40,6 +41,7 @@ import {
   saveAttempt,
   saveAttemptContract,
   saveAttemptHandoffBundle,
+  saveAttemptPreflightEvaluation,
   saveAttemptResult,
   saveAttemptRuntimeVerification,
   saveCurrentDecision,
@@ -639,6 +641,29 @@ async function writeExecutionWorkspacePackage(rootDir: string): Promise<void> {
   );
   await mkdir(join(rootDir, "node_modules"), { recursive: true });
   await writeFile(join(rootDir, "node_modules", ".placeholder"), "toolchain\n", "utf8");
+}
+
+async function writeExecutionWorkspacePackageWithoutNodeModules(
+  rootDir: string
+): Promise<void> {
+  await writeFile(
+    join(rootDir, "package.json"),
+    JSON.stringify(
+      {
+        name: "aisa-autonomy-temp",
+        private: true,
+        packageManager: "pnpm@10.27.0",
+        scripts: {
+          typecheck: 'node -e "process.exit(0)"',
+          test: 'node -e "process.exit(0)"',
+          "verify:runtime": 'node -e "process.exit(0)"'
+        }
+      },
+      null,
+      2
+    ) + "\n",
+    "utf8"
+  );
 }
 
 async function writeAdversarialVerificationFixture(
@@ -1306,6 +1331,198 @@ async function verifyNoGitChangesBlocksAutoResume(): Promise<void> {
     blockedEntry?.payload.handoff_bundle_ref,
     `runs/${run.id}/attempts/${completedExecution.id}/artifacts/handoff_bundle.json`,
     "blocked auto-resume should point at the consumed handoff bundle"
+  );
+}
+
+async function verifyPreflightBlockedExecutionBlocksAutoResume(): Promise<void> {
+  const { run, workspacePaths, rootDir, detachedRuntimeLayout } = await bootstrapRun(
+    "preflight-blocked-execution-blocks-auto-resume"
+  );
+  await writeExecutionWorkspacePackageWithoutNodeModules(rootDir);
+  await initializeGitRepo(rootDir);
+
+  const failedExecution = updateAttempt(
+    createAttempt({
+      run_id: run.id,
+      attempt_type: "execution",
+      worker: "fake-codex",
+      objective:
+        "Stop automatic resume when preflight already proved the verifier plan is not runnable here.",
+      success_criteria: run.success_criteria,
+      workspace_root: run.workspace_root
+    }),
+    {
+      status: "failed",
+      ended_at: new Date().toISOString()
+    }
+  );
+  const failureReason = [
+    `Execution attempt ${failedExecution.id} is blocked before dispatch because attempt_contract.json asks runtime to replay pnpm typecheck, pnpm verify:runtime.`,
+    `${rootDir} has no local node_modules, so those pnpm commands are not replayable here.`,
+    "Add the local verifier toolchain or replace the pnpm commands with direct replay commands."
+  ].join(" ");
+  const attemptContract = createAttemptContract({
+    run_id: run.id,
+    attempt_id: failedExecution.id,
+    attempt_type: "execution",
+    objective: failedExecution.objective,
+    success_criteria: failedExecution.success_criteria,
+    required_evidence: [
+      "git-visible workspace changes",
+      "replayable verification output"
+    ],
+    adversarial_verification_required: true,
+    verification_plan: {
+      commands: [
+        {
+          purpose: "typecheck the workspace after the change",
+          command: "pnpm typecheck"
+        },
+        {
+          purpose: "replay the runtime regression suite after the change",
+          command: "pnpm verify:runtime"
+        }
+      ]
+    }
+  });
+  const preflightEvaluation = createAttemptPreflightEvaluation({
+    run_id: run.id,
+    attempt_id: failedExecution.id,
+    attempt_type: "execution",
+    status: "failed",
+    failure_code: "blocked_pnpm_verification_plan",
+    failure_reason: failureReason
+  });
+  const currentSnapshot = createCurrentDecision({
+    run_id: run.id,
+    latest_attempt_id: failedExecution.id,
+    run_status: "waiting_steer",
+    recommended_next_action: "wait_for_human",
+    recommended_attempt_type: "execution",
+    summary: "显式 pnpm 回放被 preflight 挡住了。",
+    blocking_reason: failureReason,
+    waiting_for_human: true
+  });
+
+  await saveAttempt(workspacePaths, failedExecution);
+  await saveAttemptContract(workspacePaths, attemptContract);
+  await saveAttemptPreflightEvaluation(workspacePaths, preflightEvaluation);
+  await saveCurrentDecision(workspacePaths, currentSnapshot);
+  await appendRunJournal(
+    workspacePaths,
+    createRunJournalEntry({
+      run_id: run.id,
+      attempt_id: failedExecution.id,
+      type: "attempt.preflight.failed",
+      payload: {
+        status: "failed",
+        failure_code: preflightEvaluation.failure_code,
+        failure_reason: failureReason,
+        artifact_path: "artifacts/preflight-evaluation.json"
+      }
+    })
+  );
+  await appendRunJournal(
+    workspacePaths,
+    createRunJournalEntry({
+      run_id: run.id,
+      attempt_id: failedExecution.id,
+      type: "attempt.failed",
+      payload: {
+        message: failureReason
+      }
+    })
+  );
+  await saveAttemptHandoffBundle(
+    workspacePaths,
+    createAttemptHandoffBundle({
+      attempt: failedExecution,
+      approved_attempt_contract: attemptContract,
+      preflight_evaluation: preflightEvaluation,
+      current_decision_snapshot: currentSnapshot,
+      source_refs: {
+        run_contract: `runs/${run.id}/contract.json`,
+        attempt_meta: `runs/${run.id}/attempts/${failedExecution.id}/meta.json`,
+        attempt_contract: `runs/${run.id}/attempts/${failedExecution.id}/attempt_contract.json`,
+        preflight_evaluation: `runs/${run.id}/attempts/${failedExecution.id}/artifacts/preflight-evaluation.json`,
+        current_decision: `runs/${run.id}/current.json`,
+        review_packet: null,
+        runtime_verification: null,
+        adversarial_verification: null
+      }
+    })
+  );
+
+  const orchestrator = new Orchestrator(
+    workspacePaths,
+    new AutoResumeExecutionAdapter() as never,
+    undefined,
+    60_000,
+    {
+      runtimeLayout: detachedRuntimeLayout,
+      waitingHumanAutoResumeMs: 30,
+      maxAutomaticResumeCycles: 2
+    }
+  );
+
+  await wait(40);
+  await settle(orchestrator, {
+    workspacePaths,
+    runId: run.id,
+    iterations: 8,
+    delayMs: 80
+  });
+
+  const current = await getCurrentDecision(workspacePaths, run.id);
+  const attempts = await listAttempts(workspacePaths, run.id);
+  const journal = await listRunJournal(workspacePaths, run.id);
+  const handoffBundle = await getAttemptHandoffBundle(
+    workspacePaths,
+    run.id,
+    failedExecution.id
+  );
+  const blockedEntry = journal.find((entry) => entry.type === "run.auto_resume.blocked");
+
+  assert.ok(current, "current decision must exist");
+  assert.equal(current.run_status, "waiting_steer");
+  assert.equal(current.waiting_for_human, true);
+  assert.equal(current.recommended_next_action, "wait_for_human");
+  assert.deepEqual(
+    attempts.map((attempt) => attempt.status),
+    ["failed"],
+    "preflight-blocked execution should fail closed instead of spawning another execution"
+  );
+  assert.ok(
+    !journal.some((entry) => entry.type === "run.auto_resume.scheduled"),
+    "preflight-blocked execution should not schedule automatic resume"
+  );
+  assert.ok(handoffBundle, "expected a machine-readable handoff bundle");
+  assert.equal(
+    handoffBundle?.failure_signal?.source_kind,
+    "preflight_evaluation",
+    "handoff bundle should preserve the preflight failure source"
+  );
+  assert.equal(
+    handoffBundle?.failure_signal?.failure_code,
+    "blocked_pnpm_verification_plan",
+    "handoff bundle should preserve the preflight failure code"
+  );
+  assert.equal(
+    handoffBundle?.source_refs.preflight_evaluation,
+    `runs/${run.id}/attempts/${failedExecution.id}/artifacts/preflight-evaluation.json`,
+    "handoff bundle should point at preflight evaluation"
+  );
+  assert.ok(blockedEntry, "expected a machine-readable auto-resume blocker");
+  assert.equal(blockedEntry?.payload.reason, "preflight_blocked");
+  assert.equal(blockedEntry?.payload.failure_code, "blocked_pnpm_verification_plan");
+  assert.equal(
+    blockedEntry?.payload.handoff_bundle_ref,
+    `runs/${run.id}/attempts/${failedExecution.id}/artifacts/handoff_bundle.json`,
+    "blocked auto-resume should point at the consumed handoff bundle"
+  );
+  assert.ok(
+    String(blockedEntry?.payload.message).includes("no local node_modules"),
+    "blocked auto-resume should surface the original preflight failure"
   );
 }
 
@@ -3193,6 +3410,10 @@ async function main(): Promise<void> {
       {
         id: "no_git_changes_blocks_auto_resume",
         run: verifyNoGitChangesBlocksAutoResume
+      },
+      {
+        id: "preflight_blocked_execution_blocks_auto_resume",
+        run: verifyPreflightBlockedExecutionBlocksAutoResume
       },
       {
         id: "rate_limited_execution_retries_quickly",

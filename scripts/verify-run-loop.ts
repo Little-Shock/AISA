@@ -142,6 +142,7 @@ type ScenarioDriver =
   | "execution_missing_local_toolchain_blocks_dispatch"
   | "execution_workspace_not_git_repo_blocks_dispatch"
   | "execution_missing_verification_cwd_blocks_dispatch"
+  | "execution_blocked_pnpm_verification_plan_blocks_dispatch"
   | "execution_unrunnable_verification_command_blocks_dispatch"
   | "execution_parse_failure"
   | "orphaned_running_attempt"
@@ -597,6 +598,7 @@ class ScenarioAdapter {
       [
         "execution_workspace_not_git_repo_blocks_dispatch",
         "execution_missing_verification_cwd_blocks_dispatch",
+        "execution_blocked_pnpm_verification_plan_blocks_dispatch",
         "execution_unrunnable_verification_command_blocks_dispatch"
       ].includes(this.driver) &&
       input.attempt.attempt_type === "execution"
@@ -688,6 +690,7 @@ class ScenarioAdapter {
       this.driver === "execution_missing_local_toolchain_blocks_dispatch" ||
       this.driver === "execution_workspace_not_git_repo_blocks_dispatch" ||
       this.driver === "execution_missing_verification_cwd_blocks_dispatch" ||
+      this.driver === "execution_blocked_pnpm_verification_plan_blocks_dispatch" ||
       this.driver === "execution_unrunnable_verification_command_blocks_dispatch" ||
       this.driver === "execution_retry_after_recovery_preserves_contract"
         ? this.buildHappyPathWriteback(input.attempt, nextCount)
@@ -709,6 +712,19 @@ class ScenarioAdapter {
       const nextAttemptVerificationPlan =
         this.driver === "execution_missing_local_toolchain_blocks_dispatch"
           ? undefined
+          : this.driver === "execution_blocked_pnpm_verification_plan_blocks_dispatch"
+            ? {
+                commands: [
+                  {
+                    purpose: "typecheck the workspace before dispatch",
+                    command: "pnpm typecheck"
+                  },
+                  {
+                    purpose: "replay the runtime regression suite before dispatch",
+                    command: "pnpm verify:runtime"
+                  }
+                ]
+              }
           : this.driver === "execution_missing_verification_cwd_blocks_dispatch"
             ? {
                 commands: [
@@ -1071,6 +1087,7 @@ function shouldAutoApprovePendingExecution(driver: ScenarioDriver): boolean {
     "execution_missing_local_toolchain_blocks_dispatch",
     "execution_workspace_not_git_repo_blocks_dispatch",
     "execution_missing_verification_cwd_blocks_dispatch",
+    "execution_blocked_pnpm_verification_plan_blocks_dispatch",
     "execution_unrunnable_verification_command_blocks_dispatch",
     "execution_parse_failure",
     "execution_retry_after_recovery_preserves_contract"
@@ -3970,6 +3987,11 @@ async function runCase(scenario: ScenarioCase): Promise<ScenarioObservation> {
     await seedPackageJsonScriptsWithoutNodeModules(rootDir);
   }
 
+  if (scenario.driver === "execution_blocked_pnpm_verification_plan_blocks_dispatch") {
+    await seedPackageJsonScriptsWithoutNodeModules(rootDir);
+    await initializeGitRepo(rootDir, false);
+  }
+
   if (scenario.driver === "orphaned_running_attempt") {
     await seedOrphanedRunningAttempt({ run, workspacePaths });
   }
@@ -5192,6 +5214,40 @@ function assertCase(scenario: ScenarioCase, observation: ScenarioObservation): v
     assert.ok(
       executionPacket.preflight_evaluation_failure_reason?.includes("not a git repository"),
       `${scenario.id}: preflight should explain that no git baseline can be captured`
+    );
+  }
+
+  if (scenario.driver === "execution_blocked_pnpm_verification_plan_blocks_dispatch") {
+    const executionPacket = observation.review_packets.find(
+      (packet) => packet.attempt_status === "failed"
+    );
+    assert.ok(executionPacket, `${scenario.id}: expected a failed execution review packet`);
+    assert.equal(executionPacket.attempt_started_at, null);
+    assert.equal(executionPacket.has_result, false);
+    assert.equal(executionPacket.has_runtime_verification, false);
+    assert.equal(executionPacket.has_preflight_evaluation, true);
+    assert.equal(executionPacket.preflight_evaluation_status, "failed");
+    assert.equal(
+      executionPacket.preflight_evaluation_failure_code,
+      "blocked_pnpm_verification_plan"
+    );
+    assert.ok(
+      executionPacket.preflight_evaluation_failure_reason?.includes("asks runtime to replay"),
+      `${scenario.id}: preflight should say the contract locked pnpm replay`
+    );
+    assert.ok(
+      executionPacket.preflight_evaluation_failure_reason?.includes("no local node_modules"),
+      `${scenario.id}: preflight should surface the missing local toolchain`
+    );
+    assert.equal(
+      executionPacket.attempt_contract_has_verification_plan,
+      true,
+      `${scenario.id}: execution contract should keep its explicit verification plan`
+    );
+    assert.deepEqual(
+      executionPacket.attempt_contract_verification_commands,
+      ["pnpm typecheck", "pnpm verify:runtime"],
+      `${scenario.id}: execution contract should preserve the explicit pnpm replay commands`
     );
   }
 

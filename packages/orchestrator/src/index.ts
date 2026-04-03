@@ -4910,6 +4910,8 @@ export class Orchestrator {
   }): Promise<{
     reason: string;
     message: string;
+    failureClass?: string;
+    failurePolicyMode?: string;
     failureCode?: string;
     handoffBundleRef?: string | null;
   } | null> {
@@ -5007,6 +5009,17 @@ export class Orchestrator {
 
     if (!input.latestAttempt) {
       return null;
+    }
+
+    const preflightBlocker =
+      input.latestAttempt.attempt_type === "execution"
+        ? this.getAutomaticResumePreflightBlocker({
+            handoffBundle: input.latestHandoffBundle,
+            handoffBundleRef: input.latestHandoffBundleRef
+          })
+        : null;
+    if (preflightBlocker) {
+      return preflightBlocker;
     }
 
     const runtimeVerificationBlocker =
@@ -5410,6 +5423,34 @@ export class Orchestrator {
     return {
       delayMs: this.waitingHumanAutoResumeMs,
       maxCycles: this.maxAutomaticResumeCycles
+    };
+  }
+
+  private getAutomaticResumePreflightBlocker(input: {
+    handoffBundle: AttemptHandoffBundle | null;
+    handoffBundleRef: string | null;
+  }): {
+    reason: string;
+    message: string;
+    failureClass?: string;
+    failurePolicyMode?: string;
+    failureCode?: string;
+    handoffBundleRef?: string | null;
+  } | null {
+    if (input.handoffBundle?.failure_signal?.source_kind !== "preflight_evaluation") {
+      return null;
+    }
+
+    return {
+      reason: "preflight_blocked",
+      failureClass: "preflight_blocked",
+      failurePolicyMode:
+        input.handoffBundle.failure_signal.policy_mode ?? "fail_closed",
+      failureCode: input.handoffBundle.failure_signal.failure_code ?? undefined,
+      message:
+        input.handoffBundle.failure_signal.summary ??
+        "上一轮 execution 在 preflight 被挡住，自动续跑已暂停。",
+      handoffBundleRef: input.handoffBundleRef
     };
   }
 

@@ -101,6 +101,18 @@ type ScriptResult = {
 };
 
 const SKIP_SELF_BOOTSTRAP_ENV = "AISA_VERIFY_RUNTIME_SKIP_SELF_BOOTSTRAP";
+const RUN_LOOP_FILTER_ENV = "AISA_VERIFY_RUN_LOOP_FILTER";
+const VERIFY_RUNTIME_SCOPE_ENV = "AISA_VERIFY_RUNTIME_SCOPE";
+
+function getRequestedRunLoopFilter(): string | null {
+  const raw = process.env[RUN_LOOP_FILTER_ENV]?.trim();
+  return raw && raw.length > 0 ? raw : null;
+}
+
+function getRequestedVerifyRuntimeScope(): string | null {
+  const raw = process.env[VERIFY_RUNTIME_SCOPE_ENV]?.trim();
+  return raw && raw.length > 0 ? raw : null;
+}
 
 function runTsxScript(
   scriptPath: string,
@@ -228,6 +240,19 @@ async function assertRunLoopReplay(): Promise<RunLoopReport> {
     "scripts/verify-run-loop.ts",
     result.stdout
   );
+  const requestedFilter = getRequestedRunLoopFilter();
+  if (requestedFilter) {
+    assert.ok(
+      report.results.length > 0,
+      `run-loop 过滤回放必须至少返回一条结果。filter=${requestedFilter}`
+    );
+    assert.ok(
+      report.results.some((entry) => entry.id.includes(requestedFilter)),
+      `run-loop 过滤回放必须包含 filter=${requestedFilter} 对应的 case。`
+    );
+    return report;
+  }
+
   const preflightFailClosedCase = report.results.find(
     (entry) => entry.id === "execution-missing-local-toolchain-blocks-dispatch"
   );
@@ -239,6 +264,19 @@ async function assertRunLoopReplay(): Promise<RunLoopReport> {
     preflightFailClosedCase.status,
     "pass",
     "execution preflight fail-closed smoke 必须通过。"
+  );
+
+  const blockedPnpmShadowDispatchCase = report.results.find(
+    (entry) => entry.id === "execution-blocked-pnpm-verification-plan-blocks-dispatch"
+  );
+  assert.ok(
+    blockedPnpmShadowDispatchCase,
+    "run-loop 回归必须包含 execution-blocked-pnpm-verification-plan-blocks-dispatch。"
+  );
+  assert.equal(
+    blockedPnpmShadowDispatchCase.status,
+    "pass",
+    "shadow dispatch smoke 必须在 dispatch 前拦住缺本地依赖的显式 pnpm 回放。"
   );
 
   const shadowDispatchCase = report.results.find(
@@ -488,6 +526,21 @@ async function assertHistoryContractDriftClean(): Promise<HistoryContractDriftRe
 }
 
 async function main(): Promise<void> {
+  const requestedScope = getRequestedVerifyRuntimeScope();
+  if (requestedScope === "run_loop_only") {
+    await assertRunLoopReplay();
+    console.log(
+      JSON.stringify({
+        summary: "runtime focused replay passed for run_loop_only scope.",
+        scope: requestedScope,
+        run_loop: {
+          status: "passed"
+        }
+      })
+    );
+    return;
+  }
+
   await assertRunLoopReplay();
   await assertControlApiSupervisorReplay();
   await assertRuntimeLaneReplay();
