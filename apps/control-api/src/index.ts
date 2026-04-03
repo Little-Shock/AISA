@@ -526,6 +526,7 @@ export async function buildServer(
         staleAfterMs: runHealthStaleMs
       });
     const workerEffort = orchestrator.describeRunWorkerEffort(run);
+    const harnessSlots = orchestrator.describeRunHarnessSlots(run);
 
     return {
       run,
@@ -557,6 +558,7 @@ export async function buildServer(
       working_context_ref: workingContextView.working_context_ref,
       working_context_degraded: workingContextView.working_context_degraded,
       run_health: runHealth,
+      harness_slots: harnessSlots,
       worker_effort: workerEffort,
       attempts,
       attempt_details: attemptDetails,
@@ -611,6 +613,7 @@ export async function buildServer(
         latestHeartbeat,
         staleAfterMs: runHealthStaleMs
       });
+    const harnessSlots = orchestrator.describeRunHarnessSlots(run);
 
     return {
       run,
@@ -641,6 +644,7 @@ export async function buildServer(
       working_context: workingContextView.working_context,
       working_context_ref: workingContextView.working_context_ref,
       working_context_degraded: workingContextView.working_context_degraded,
+      harness_slots: harnessSlots,
       worker_effort: orchestrator.describeRunWorkerEffort(run),
       run_health: runHealth,
       attempt_count: attempts.length,

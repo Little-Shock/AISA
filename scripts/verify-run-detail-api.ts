@@ -58,6 +58,31 @@ import {
   createTrackedVerifyTempDir
 } from "./verify-temp.ts";
 
+type HarnessSlotPayload = {
+  slot: string;
+  title: string;
+  binding: string;
+  expected_binding: string;
+  binding_status: string;
+  binding_matches_registry: boolean;
+  source: string;
+  detail: string;
+  input_contract: string[];
+  permission_boundary: string;
+  output_artifacts: string[];
+  failure_semantics: string;
+};
+
+type HarnessSlotsPayload = {
+  research_or_planning: HarnessSlotPayload;
+  execution: HarnessSlotPayload & {
+    default_verifier_kit: string;
+  };
+  preflight_review: HarnessSlotPayload;
+  postflight_review: HarnessSlotPayload;
+  final_synthesis: HarnessSlotPayload;
+};
+
 async function main(): Promise<void> {
   try {
   const rootDir = await createTrackedVerifyTempDir("aisa-run-detail-api-");
@@ -1030,6 +1055,7 @@ async function main(): Promise<void> {
           };
         };
       };
+      harness_slots: HarnessSlotsPayload;
       worker_effort: {
         execution: { requested_effort: string; status: string };
         reviewer: { requested_effort: string; status: string };
@@ -1366,6 +1392,34 @@ async function main(): Promise<void> {
       payload.run.harness_profile.slots.postflight_review.binding,
       "attempt_adversarial_verification"
     );
+    assert.equal(payload.harness_slots.execution.binding, "codex_cli_execution_worker");
+    assert.equal(
+      payload.harness_slots.execution.expected_binding,
+      "codex_cli_execution_worker"
+    );
+    assert.equal(payload.harness_slots.execution.binding_status, "aligned");
+    assert.equal(payload.harness_slots.execution.binding_matches_registry, true);
+    assert.equal(payload.harness_slots.execution.permission_boundary, "workspace_write");
+    assert.deepEqual(payload.harness_slots.execution.output_artifacts, [
+      "result.json",
+      "worker-declared artifacts under artifacts/"
+    ]);
+    assert.equal(payload.harness_slots.execution.failure_semantics, "fail_closed");
+    assert.equal(payload.harness_slots.execution.default_verifier_kit, "api");
+    assert.equal(payload.harness_slots.preflight_review.permission_boundary, "read_only");
+    assert.deepEqual(payload.harness_slots.preflight_review.output_artifacts, [
+      "artifacts/preflight-evaluation.json"
+    ]);
+    assert.equal(payload.harness_slots.preflight_review.failure_semantics, "fail_closed");
+    assert.equal(
+      payload.harness_slots.final_synthesis.permission_boundary,
+      "control_plane_only"
+    );
+    assert.ok(
+      payload.harness_slots.execution.input_contract.includes(
+        "attempt_contract.json with replayable verification commands"
+      )
+    );
     assert.equal(payload.worker_effort.execution.requested_effort, "high");
     assert.equal(payload.worker_effort.execution.status, "applied");
     assert.equal(payload.worker_effort.reviewer.requested_effort, "low");
@@ -1527,6 +1581,7 @@ async function main(): Promise<void> {
             };
           };
         };
+        harness_slots: HarnessSlotsPayload;
         worker_effort: {
           execution: { requested_effort: string; status: string };
         };
@@ -1625,6 +1680,24 @@ async function main(): Promise<void> {
     assert.equal(
       runSummary?.run.harness_profile.slots.execution.binding,
       "codex_cli_execution_worker"
+    );
+    assert.equal(runSummary?.harness_slots.execution.binding, "codex_cli_execution_worker");
+    assert.equal(
+      runSummary?.harness_slots.execution.default_verifier_kit,
+      "api"
+    );
+    assert.equal(runSummary?.harness_slots.execution.binding_status, "aligned");
+    assert.equal(
+      runSummary?.harness_slots.execution.permission_boundary,
+      "workspace_write"
+    );
+    assert.equal(runSummary?.harness_slots.preflight_review.failure_semantics, "fail_closed");
+    assert.deepEqual(runSummary?.harness_slots.preflight_review.output_artifacts, [
+      "artifacts/preflight-evaluation.json"
+    ]);
+    assert.equal(
+      runSummary?.harness_slots.final_synthesis.permission_boundary,
+      "control_plane_only"
     );
     assert.equal(runSummary?.worker_effort.execution.requested_effort, "high");
     assert.equal(runSummary?.worker_effort.execution.status, "applied");

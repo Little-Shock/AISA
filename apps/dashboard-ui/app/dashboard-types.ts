@@ -196,6 +196,45 @@ export type RunHarnessProfileView = {
   };
 };
 
+export type RunHarnessSlotBindingStatus = "aligned" | "binding_mismatch";
+
+export type RunHarnessSlotPermissionBoundary =
+  | "read_only"
+  | "workspace_write"
+  | "control_plane_only";
+
+export type RunHarnessSlotFailureSemantics = "fail_closed" | "fail_open";
+
+export type RunHarnessSlotView = {
+  slot:
+    | "research_or_planning"
+    | "execution"
+    | "preflight_review"
+    | "postflight_review"
+    | "final_synthesis";
+  title: string;
+  binding: string;
+  expected_binding: string;
+  binding_status: RunHarnessSlotBindingStatus;
+  binding_matches_registry: boolean;
+  source: string;
+  detail: string;
+  input_contract: string[];
+  permission_boundary: RunHarnessSlotPermissionBoundary;
+  output_artifacts: string[];
+  failure_semantics: RunHarnessSlotFailureSemantics;
+};
+
+export type RunHarnessSlotsView = {
+  research_or_planning: RunHarnessSlotView;
+  execution: RunHarnessSlotView & {
+    default_verifier_kit: string;
+  };
+  preflight_review: RunHarnessSlotView;
+  postflight_review: RunHarnessSlotView;
+  final_synthesis: RunHarnessSlotView;
+};
+
 export type RunWorkingContextTaskRef = {
   task_id: string;
   title: string;
@@ -421,6 +460,7 @@ export type RunSummaryItem = {
   working_context_ref: string | null;
   working_context_degraded: RunWorkingContextDegraded;
   run_health: RunHealthAssessment;
+  harness_slots: RunHarnessSlotsView;
   attempt_count: number;
   latest_attempt: {
     id: string;
@@ -483,6 +523,7 @@ export type RunDetail = {
   working_context_ref: string | null;
   working_context_degraded: RunWorkingContextDegraded;
   run_health: RunHealthAssessment;
+  harness_slots: RunHarnessSlotsView;
   attempts: Array<{
     id: string;
     attempt_type: string;

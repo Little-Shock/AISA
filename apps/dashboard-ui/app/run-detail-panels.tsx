@@ -705,6 +705,16 @@ export function RunPolicyPanel({
 }) {
   const policyRuntime = runDetail.policy_runtime;
   const harnessProfile = runDetail.run.harness_profile;
+  const harnessSlots = [
+    runDetail.harness_slots.research_or_planning,
+    runDetail.harness_slots.execution,
+    runDetail.harness_slots.preflight_review,
+    runDetail.harness_slots.postflight_review,
+    runDetail.harness_slots.final_synthesis
+  ];
+  const slotMismatches = harnessSlots.filter(
+    (slotView) => slotView.binding_status === "binding_mismatch"
+  );
   const canApprove = policyRuntime?.approval_status === "pending";
   const canReject = policyRuntime?.approval_status === "pending";
 
@@ -741,16 +751,53 @@ export function RunPolicyPanel({
       />
 
       <SectionList
-        title="Harness 槽位"
+        title="Harness Profile"
         items={[
           `profile 版本：${String(harnessProfile.version)}`,
-          `research_or_planning：${harnessProfile.slots.research_or_planning.binding}`,
-          `execution：${harnessProfile.slots.execution.binding} · 默认 verifier kit ${harnessProfile.execution.default_verifier_kit}`,
-          `preflight_review：${harnessProfile.slots.preflight_review.binding}`,
-          `postflight_review：${harnessProfile.slots.postflight_review.binding}`,
-          `final_synthesis：${harnessProfile.slots.final_synthesis.binding}`
+          `execution effort：${harnessProfile.execution.effort}`,
+          `reviewer effort：${harnessProfile.reviewer.effort}`,
+          `synthesizer effort：${harnessProfile.synthesizer.effort}`
         ]}
       />
+
+      {slotMismatches.length > 0 ? (
+        <Callout tone="amber" title="Slot Registry 漂移">
+          {slotMismatches
+            .map(
+              (slotView) =>
+                `${slotView.slot} expected ${slotView.expected_binding} but got ${slotView.binding}`
+            )
+            .join(" | ")}
+        </Callout>
+      ) : null}
+
+      <div className="mt-4 grid gap-3">
+        {harnessSlots.map((slotView) => (
+          <SubPanel
+            key={slotView.slot}
+            title={slotView.title}
+            accent={slotView.binding_status === "aligned" ? "emerald" : "amber"}
+          >
+            <SectionList
+              title="Registry Contract"
+              items={[
+                `binding: ${slotView.binding}`,
+                `expected binding: ${slotView.expected_binding}`,
+                `binding status: ${slotView.binding_status}`,
+                `permission boundary: ${slotView.permission_boundary}`,
+                `failure semantics: ${slotView.failure_semantics}`,
+                `source: ${slotView.source}`,
+                `detail: ${slotView.detail}`,
+                slotView.slot === "execution"
+                  ? `default verifier kit: ${runDetail.harness_slots.execution.default_verifier_kit}`
+                  : null
+              ].filter((item): item is string => item !== null)}
+            />
+            <SectionList title="Input Contract" items={slotView.input_contract} />
+            <SectionList title="Output Artifacts" items={slotView.output_artifacts} />
+          </SubPanel>
+        ))}
+      </div>
 
       <Textarea
         value={note}

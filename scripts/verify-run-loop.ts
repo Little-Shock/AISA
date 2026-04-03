@@ -1926,9 +1926,76 @@ async function assertRunHarnessPolicyBundleDefaults(): Promise<void> {
   );
   const slots = orchestrator.describeRunHarnessSlots(configuredRun);
 
+  assert.equal(slots.research_or_planning.expected_binding, "codex_cli_research_worker");
+  assert.equal(slots.research_or_planning.binding_status, "aligned");
+  assert.equal(slots.research_or_planning.permission_boundary, "read_only");
+  assert.deepEqual(slots.research_or_planning.output_artifacts, [
+    "result.json",
+    "attempt_contract.json when execution is recommended"
+  ]);
+  assert.equal(slots.research_or_planning.failure_semantics, "fail_open");
   assert.equal(slots.execution.default_verifier_kit, "web");
   assert.equal(slots.execution.binding, "codex_cli_execution_worker");
+  assert.equal(slots.execution.expected_binding, "codex_cli_execution_worker");
+  assert.equal(slots.execution.binding_status, "aligned");
+  assert.equal(slots.execution.permission_boundary, "workspace_write");
+  assert.deepEqual(slots.execution.output_artifacts, [
+    "result.json",
+    "worker-declared artifacts under artifacts/"
+  ]);
+  assert.equal(slots.execution.failure_semantics, "fail_closed");
+  assert.equal(slots.preflight_review.permission_boundary, "read_only");
+  assert.deepEqual(slots.preflight_review.output_artifacts, [
+    "artifacts/preflight-evaluation.json"
+  ]);
+  assert.equal(slots.preflight_review.failure_semantics, "fail_closed");
   assert.equal(slots.postflight_review.binding, "attempt_adversarial_verification");
+  assert.equal(slots.postflight_review.permission_boundary, "read_only");
+  assert.deepEqual(slots.postflight_review.output_artifacts, [
+    "artifacts/adversarial-verification.json"
+  ]);
+  assert.equal(slots.postflight_review.failure_semantics, "fail_closed");
+  assert.equal(slots.final_synthesis.permission_boundary, "control_plane_only");
+  assert.deepEqual(slots.final_synthesis.output_artifacts, [
+    "evaluation.json",
+    "review_opinions.ndjson",
+    "artifacts/handoff_bundle.json"
+  ]);
+  assert.equal(slots.final_synthesis.failure_semantics, "fail_closed");
+}
+
+async function assertRunHarnessSlotBindingMismatchDetection(): Promise<void> {
+  const rootDir = await createVerifyTempDir("aisa-harness-slot-mismatch-");
+  const { run } = await bootstrapRun(rootDir, "harness-slot-mismatch");
+  const mismatchedRun = updateRun(run, {
+    harness_profile: {
+      execution: {
+        effort: "high",
+        default_verifier_kit: "cli"
+      },
+      slots: {
+        execution: {
+          binding: "attempt_dispatch_preflight"
+        }
+      }
+    }
+  });
+  const orchestrator = new Orchestrator(
+    resolveWorkspacePaths(rootDir),
+    new ContextCaptureAdapter() as never,
+    undefined,
+    60_000
+  );
+  const slots = orchestrator.describeRunHarnessSlots(mismatchedRun);
+
+  assert.equal(slots.execution.binding, "attempt_dispatch_preflight");
+  assert.equal(slots.execution.expected_binding, "codex_cli_execution_worker");
+  assert.equal(slots.execution.binding_status, "binding_mismatch");
+  assert.equal(slots.execution.binding_matches_registry, false);
+  assert.equal(slots.execution.permission_boundary, "workspace_write");
+  assert.equal(slots.execution.failure_semantics, "fail_closed");
+  assert.equal(slots.execution.default_verifier_kit, "cli");
+  assert.equal(slots.preflight_review.binding_status, "aligned");
 }
 
 async function assertVerifierKitScopesDefaultInference(): Promise<void> {
@@ -5444,6 +5511,20 @@ async function main(): Promise<void> {
     } catch (error) {
       results.push({
         id: "run_harness_policy_bundle_defaults",
+        status: "fail",
+        error: error instanceof Error ? error.message : String(error)
+      });
+    }
+
+    try {
+      await assertRunHarnessSlotBindingMismatchDetection();
+      results.push({
+        id: "run_harness_slot_binding_mismatch_detection",
+        status: "pass"
+      });
+    } catch (error) {
+      results.push({
+        id: "run_harness_slot_binding_mismatch_detection",
         status: "fail",
         error: error instanceof Error ? error.message : String(error)
       });

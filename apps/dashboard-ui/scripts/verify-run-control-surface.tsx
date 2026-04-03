@@ -72,6 +72,24 @@ async function main(): Promise<void> {
       runDetail.run.harness_profile.slots.execution.binding,
       "codex_cli_execution_worker"
     );
+    assert.equal(runDetail.harness_slots.execution.binding, "codex_cli_execution_worker");
+    assert.equal(runDetail.harness_slots.execution.expected_binding, "codex_cli_execution_worker");
+    assert.equal(runDetail.harness_slots.execution.binding_status, "aligned");
+    assert.equal(runDetail.harness_slots.execution.permission_boundary, "workspace_write");
+    assert.deepEqual(runDetail.harness_slots.execution.output_artifacts, [
+      "result.json",
+      "worker-declared artifacts under artifacts/"
+    ]);
+    assert.equal(runDetail.harness_slots.execution.failure_semantics, "fail_closed");
+    assert.equal(
+      runDetail.harness_slots.execution.default_verifier_kit,
+      fixture.expected_verifier_kit
+    );
+    assert.equal(runDetail.harness_slots.preflight_review.permission_boundary, "read_only");
+    assert.deepEqual(runDetail.harness_slots.preflight_review.output_artifacts, [
+      "artifacts/preflight-evaluation.json"
+    ]);
+    assert.equal(runDetail.harness_slots.preflight_review.failure_semantics, "fail_closed");
     assert.equal(runDetail.policy_runtime?.stage, fixture.expected_policy_stage);
     assert.equal(
       runDetail.policy_runtime?.approval_status,
@@ -151,6 +169,15 @@ async function main(): Promise<void> {
       selectedRun?.policy_runtime?.approval_status,
       fixture.expected_policy_approval_status
     );
+    assert.equal(
+      selectedRun?.harness_slots.execution.default_verifier_kit,
+      fixture.expected_verifier_kit
+    );
+    assert.equal(selectedRun?.harness_slots.execution.binding_status, "aligned");
+    assert.equal(
+      selectedRun?.harness_slots.final_synthesis.permission_boundary,
+      "control_plane_only"
+    );
 
     const selectedRunAttemptDetail =
       runDetail.attempt_details.find(
@@ -214,11 +241,16 @@ async function main(): Promise<void> {
     assert.match(policyMarkup, /Policy Lane/);
     assert.match(policyMarkup, /批准 Execution/);
     assert.match(policyMarkup, /打回重规划/);
-    assert.match(policyMarkup, /Harness 槽位/);
+    assert.match(policyMarkup, /Harness Profile/);
+    assert.match(policyMarkup, /Registry Contract/);
     assert.match(policyMarkup, /codex_cli_execution_worker/);
+    assert.match(policyMarkup, /binding status: aligned/);
+    assert.match(policyMarkup, /permission boundary: workspace_write/);
+    assert.match(policyMarkup, /failure semantics: fail_closed/);
+    assert.match(policyMarkup, /Output Artifacts/);
     assert.match(
       policyMarkup,
-      new RegExp(escapeRegExp(`默认 verifier kit ${fixture.expected_verifier_kit}`))
+      new RegExp(escapeRegExp(`default verifier kit: ${fixture.expected_verifier_kit}`))
     );
 
     const verificationMarkup = renderToStaticMarkup(

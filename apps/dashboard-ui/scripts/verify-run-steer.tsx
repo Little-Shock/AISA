@@ -86,6 +86,79 @@ const fixtureRunDetail: RunDetail = {
     summary: null
   },
   run_health: null,
+  harness_slots: {
+    research_or_planning: {
+      slot: "research_or_planning",
+      title: "Research Or Planning",
+      binding: "codex_cli_research_worker",
+      expected_binding: "codex_cli_research_worker",
+      binding_status: "aligned",
+      binding_matches_registry: true,
+      source: "run.harness_profile.slots.research_or_planning.binding",
+      detail: "Read-only research and planning.",
+      input_contract: ["run summary"],
+      permission_boundary: "read_only",
+      output_artifacts: ["result.json"],
+      failure_semantics: "fail_open"
+    },
+    execution: {
+      slot: "execution",
+      title: "Execution",
+      binding: "codex_cli_execution_worker",
+      expected_binding: "codex_cli_execution_worker",
+      binding_status: "aligned",
+      binding_matches_registry: true,
+      source: "run.harness_profile.slots.execution.binding",
+      detail: "Workspace-writing execution.",
+      input_contract: ["attempt_contract.json"],
+      permission_boundary: "workspace_write",
+      output_artifacts: ["result.json"],
+      failure_semantics: "fail_closed",
+      default_verifier_kit: "repo"
+    },
+    preflight_review: {
+      slot: "preflight_review",
+      title: "Preflight Review",
+      binding: "attempt_dispatch_preflight",
+      expected_binding: "attempt_dispatch_preflight",
+      binding_status: "aligned",
+      binding_matches_registry: true,
+      source: "run.harness_profile.slots.preflight_review.binding",
+      detail: "Pre-dispatch gate.",
+      input_contract: ["attempt_contract.json"],
+      permission_boundary: "read_only",
+      output_artifacts: ["artifacts/preflight-evaluation.json"],
+      failure_semantics: "fail_closed"
+    },
+    postflight_review: {
+      slot: "postflight_review",
+      title: "Postflight Review",
+      binding: "attempt_adversarial_verification",
+      expected_binding: "attempt_adversarial_verification",
+      binding_status: "aligned",
+      binding_matches_registry: true,
+      source: "run.harness_profile.slots.postflight_review.binding",
+      detail: "Adversarial verification gate.",
+      input_contract: ["artifacts/runtime-verification.json"],
+      permission_boundary: "read_only",
+      output_artifacts: ["artifacts/adversarial-verification.json"],
+      failure_semantics: "fail_closed"
+    },
+    final_synthesis: {
+      slot: "final_synthesis",
+      title: "Final Synthesis",
+      binding: "attempt_evaluation_synthesizer",
+      expected_binding: "attempt_evaluation_synthesizer",
+      binding_status: "aligned",
+      binding_matches_registry: true,
+      source: "run.harness_profile.slots.final_synthesis.binding",
+      detail: "Final evaluation and handoff shaping.",
+      input_contract: ["review packet"],
+      permission_boundary: "control_plane_only",
+      output_artifacts: ["evaluation.json"],
+      failure_semantics: "fail_closed"
+    }
+  },
   attempts: [
     {
       id: "att_fixture",
