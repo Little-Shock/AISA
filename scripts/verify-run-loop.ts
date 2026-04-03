@@ -4848,7 +4848,9 @@ function assertCase(scenario: ScenarioCase, observation: ScenarioObservation): v
     );
     assert.equal(
       reviewPacket.handoff_bundle_failure_code,
-      reviewPacket.runtime_verification_failure_code,
+      reviewPacket.adversarial_verification_failure_code ??
+        reviewPacket.runtime_verification_failure_code ??
+        reviewPacket.preflight_evaluation_failure_code,
       `${scenario.id}: handoff bundle failure code should mirror review packet for ${reviewPacket.attempt_id}`
     );
     assert.equal(
@@ -5248,6 +5250,11 @@ function assertCase(scenario: ScenarioCase, observation: ScenarioObservation): v
       executionPacket.attempt_contract_verification_commands,
       ["pnpm typecheck", "pnpm verify:runtime"],
       `${scenario.id}: execution contract should preserve the explicit pnpm replay commands`
+    );
+    assert.equal(
+      executionPacket.handoff_bundle_failure_code,
+      "blocked_pnpm_verification_plan",
+      `${scenario.id}: handoff bundle should surface the unified preflight failure code`
     );
   }
 

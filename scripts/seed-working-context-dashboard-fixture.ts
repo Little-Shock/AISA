@@ -38,6 +38,7 @@ export type SeedWorkingContextDashboardFixtureResult = {
   expected_working_context_reason: "context_stale";
   expected_automation_mode: "manual_only";
   expected_failure_class: "preflight_blocked";
+  expected_failure_code: "blocked_pnpm_verification_plan";
   expected_failure_policy_mode: "fail_closed";
   expected_run_brief_headline: string;
   expected_run_brief_summary: string;
@@ -297,6 +298,7 @@ export async function seedWorkingContextDashboardFixture(input: {
     expected_working_context_reason: "context_stale",
     expected_automation_mode: "manual_only",
     expected_failure_class: "preflight_blocked",
+    expected_failure_code: "blocked_pnpm_verification_plan",
     expected_failure_policy_mode: "fail_closed",
     expected_run_brief_headline: automationReason,
     expected_run_brief_summary: initialCurrent.summary,

@@ -1211,6 +1211,8 @@ async function verifyNoGitChangesBlocksAutoResume(): Promise<void> {
     preexisting_git_status: [],
     new_git_status: [],
     changed_files: [],
+    failure_class: "runtime_verification_failed",
+    failure_policy_mode: "fail_closed",
     failure_code: "no_git_changes",
     failure_reason: failureReason,
     command_results: [],
@@ -1506,6 +1508,11 @@ async function verifyPreflightBlockedExecutionBlocksAutoResume(): Promise<void> 
     handoffBundle?.failure_signal?.failure_code,
     "blocked_pnpm_verification_plan",
     "handoff bundle should preserve the preflight failure code"
+  );
+  assert.equal(
+    handoffBundle?.failure_code,
+    "blocked_pnpm_verification_plan",
+    "handoff bundle should expose the unified top-level preflight failure code"
   );
   assert.equal(
     handoffBundle?.source_refs.preflight_evaluation,
@@ -2996,6 +3003,11 @@ async function verifyFailedAdversarialVerificationBlocksAutoResume(): Promise<vo
     handoffBundle?.adversarial_failure_code,
     "verdict_fail",
     "handoff bundle should carry the adversarial failure code"
+  );
+  assert.equal(
+    handoffBundle?.failure_code,
+    "verdict_fail",
+    "handoff bundle should expose the unified top-level adversarial failure code"
   );
   assert.equal(
     handoffBundle?.failure_class,

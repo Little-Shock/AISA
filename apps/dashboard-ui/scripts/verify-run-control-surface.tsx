@@ -106,6 +106,7 @@ async function main(): Promise<void> {
       fixture.expected_policy_approval_status
     );
     assert.equal(runDetail.failure_signal?.failure_class, fixture.expected_failure_class);
+    assert.equal(runDetail.failure_signal?.failure_code, fixture.expected_failure_code);
     assert.equal(
       runDetail.failure_signal?.policy_mode,
       fixture.expected_failure_policy_mode
@@ -139,11 +140,19 @@ async function main(): Promise<void> {
       runDetail.latest_handoff_bundle?.failure_class,
       fixture.expected_failure_class
     );
+    assert.equal(
+      runDetail.latest_handoff_bundle?.failure_code,
+      fixture.expected_failure_code
+    );
     assert.equal(runDetail.run_brief?.headline, fixture.expected_run_brief_headline);
     assert.equal(runDetail.run_brief?.summary, fixture.expected_run_brief_summary);
     assert.equal(
       runDetail.run_brief?.failure_signal?.failure_class,
       fixture.expected_failure_class
+    );
+    assert.equal(
+      runDetail.run_brief?.failure_signal?.failure_code,
+      fixture.expected_failure_code
     );
     assert.equal(runDetail.maintenance_plane?.blocked_diagnosis.status, "attention");
     assert.ok(
@@ -158,6 +167,7 @@ async function main(): Promise<void> {
     );
     assert.equal(selectedRun?.task_focus, fixture.expected_task_focus);
     assert.equal(selectedRun?.failure_signal?.failure_class, fixture.expected_failure_class);
+    assert.equal(selectedRun?.failure_signal?.failure_code, fixture.expected_failure_code);
     assert.equal(
       selectedRun?.latest_runtime_verification?.status,
       fixture.expected_latest_runtime_status

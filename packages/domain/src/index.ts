@@ -1116,7 +1116,7 @@ export const AttemptHandoffBundleSchema = z.object({
   failure_signal: RunFailureSignalSchema.nullable().default(null),
   failure_class: RunFailureClassSchema.nullable().default(null),
   failure_policy_mode: RunFailurePolicyModeSchema.nullable().default(null),
-  failure_code: RuntimeVerificationFailureCodeSchema.nullable().default(null),
+  failure_code: z.string().min(1).nullable().default(null),
   adversarial_failure_code:
     AttemptAdversarialVerificationFailureCodeSchema.nullable().default(null),
   recommended_next_action: z.string().min(1).nullable().default(null),
@@ -1823,7 +1823,7 @@ export function createAttemptHandoffBundle(input: {
     failure_signal: failureSignal ?? null,
     failure_class: failureSignal?.failure_class ?? null,
     failure_policy_mode: failureSignal?.policy_mode ?? null,
-    failure_code: input.runtime_verification?.failure_code ?? null,
+    failure_code: failureSignal?.failure_code ?? null,
     adversarial_failure_code: input.adversarial_verification?.failure_code ?? null,
     recommended_next_action:
       input.current_decision_snapshot?.recommended_next_action ?? null,

@@ -579,13 +579,36 @@ async function main(): Promise<void> {
     run_id: run.id,
     attempt_type: "execution",
     worker: "fake-codex",
-    objective: "Surface blocker failure context for the run detail API.",
-    success_criteria: ["Return the structured blocker reason."],
+    objective: "Surface preflight-blocked failure context for the run detail API.",
+    success_criteria: ["Return the structured preflight blocker reason."],
     workspace_root: projectRoot
   });
+  const blockerAttemptContract = createAttemptContract({
+    attempt_id: blockerCreatedAttempt.id,
+    run_id: run.id,
+    attempt_type: "execution",
+    objective: blockerCreatedAttempt.objective,
+    success_criteria: blockerCreatedAttempt.success_criteria,
+    required_evidence: [
+      "git-visible workspace changes",
+      "replayable verification output"
+    ],
+    adversarial_verification_required: true,
+    verification_plan: {
+      commands: [
+        {
+          purpose: "typecheck the workspace after the change",
+          command: "pnpm typecheck"
+        },
+        {
+          purpose: "replay the runtime regression suite after the change",
+          command: "pnpm verify:runtime"
+        }
+      ]
+    }
+  });
   const blockerAttempt = updateAttempt(blockerCreatedAttempt, {
-    status: "stopped",
-    started_at: new Date().toISOString(),
+    status: "failed",
     ended_at: new Date().toISOString()
   });
   const blockerCreatedEntry = createRunJournalEntry({
@@ -597,34 +620,49 @@ async function main(): Promise<void> {
       objective: blockerAttempt.objective
     }
   });
-  const blockerStartedEntry = createRunJournalEntry({
+  const blockerPreflightFailureReason =
+    "Execution attempt is blocked before dispatch because attempt_contract.json asks runtime to replay pnpm typecheck, pnpm verify:runtime, but the workspace has no local node_modules.";
+  const blockerPreflight = createAttemptPreflightEvaluation({
     run_id: run.id,
     attempt_id: blockerAttempt.id,
-    type: "attempt.started",
+    attempt_type: "execution",
+    status: "failed",
+    failure_code: "blocked_pnpm_verification_plan",
+    failure_reason: blockerPreflightFailureReason
+  });
+  const blockerPreflightEntry = createRunJournalEntry({
+    run_id: run.id,
+    attempt_id: blockerAttempt.id,
+    type: "attempt.preflight.failed",
     payload: {
-      attempt_type: blockerAttempt.attempt_type
+      status: "failed",
+      failure_code: blockerPreflight.failure_code,
+      failure_reason: blockerPreflightFailureReason,
+      artifact_path: "artifacts/preflight-evaluation.json"
     }
   });
-  const blockerRecoveryEntry = createRunJournalEntry({
+  const blockerFailedEntry = createRunJournalEntry({
     run_id: run.id,
     attempt_id: blockerAttempt.id,
-    type: "attempt.recovery_required",
+    type: "attempt.failed",
     payload: {
-      message: "Blocked on missing human steer after a recovery-required execution."
+      message: blockerPreflightFailureReason
     }
   });
   const blockerFailureContext = {
-    message: String(blockerRecoveryEntry.payload.message),
-    journal_event_id: blockerRecoveryEntry.id,
-    journal_event_ts: blockerRecoveryEntry.ts
+    message: blockerPreflightFailureReason,
+    journal_event_id: blockerPreflightEntry.id,
+    journal_event_ts: blockerPreflightEntry.ts
   };
 
   await saveAttempt(workspacePaths, blockerAttempt);
+  await saveAttemptContract(workspacePaths, blockerAttemptContract);
+  await saveAttemptPreflightEvaluation(workspacePaths, blockerPreflight);
   await saveAttemptReviewPacket(workspacePaths, {
     run_id: run.id,
     attempt_id: blockerAttempt.id,
     attempt: blockerAttempt,
-    attempt_contract: null,
+    attempt_contract: blockerAttemptContract,
     current_decision_snapshot: null,
     context: null,
     journal: [],
@@ -636,6 +674,36 @@ async function main(): Promise<void> {
     artifact_manifest: [],
     generated_at: new Date().toISOString()
   });
+  await saveAttemptHandoffBundle(
+    workspacePaths,
+    createAttemptHandoffBundle({
+      attempt: blockerAttempt,
+      approved_attempt_contract: blockerAttemptContract,
+      preflight_evaluation: blockerPreflight,
+      current_decision_snapshot: createCurrentDecision({
+        run_id: run.id,
+        run_status: "waiting_steer",
+        latest_attempt_id: blockerAttempt.id,
+        best_attempt_id: attempt.id,
+        recommended_next_action: "wait_for_human",
+        recommended_attempt_type: "execution",
+        summary: blockerPreflightFailureReason,
+        blocking_reason: blockerPreflightFailureReason,
+        waiting_for_human: true
+      }),
+      failure_context: blockerFailureContext,
+      source_refs: {
+        run_contract: `runs/${run.id}/contract.json`,
+        attempt_meta: `runs/${run.id}/attempts/${blockerAttempt.id}/meta.json`,
+        attempt_contract: `runs/${run.id}/attempts/${blockerAttempt.id}/attempt_contract.json`,
+        preflight_evaluation: `runs/${run.id}/attempts/${blockerAttempt.id}/artifacts/preflight-evaluation.json`,
+        current_decision: `runs/${run.id}/current.json`,
+        review_packet: `runs/${run.id}/attempts/${blockerAttempt.id}/review_packet.json`,
+        runtime_verification: null,
+        adversarial_verification: null
+      }
+    })
+  );
   await saveCurrentDecision(
     workspacePaths,
     createCurrentDecision({
@@ -650,7 +718,7 @@ async function main(): Promise<void> {
       waiting_for_human: true
     })
   );
-  for (const entry of [blockerCreatedEntry, blockerStartedEntry, blockerRecoveryEntry]) {
+  for (const entry of [blockerCreatedEntry, blockerPreflightEntry, blockerFailedEntry]) {
     await appendRunJournal(workspacePaths, entry);
   }
   await refreshRunOperatorSurface(workspacePaths, run.id);
@@ -1101,6 +1169,7 @@ async function main(): Promise<void> {
       policy_runtime_ref: string | null;
       failure_signal: {
         failure_class: string;
+        failure_code: string | null;
         policy_mode: string;
         summary: string;
       } | null;
@@ -1148,6 +1217,8 @@ async function main(): Promise<void> {
       latest_handoff_bundle: {
         attempt_id: string;
         summary: string | null;
+        failure_class: string | null;
+        failure_code: string | null;
         adversarial_failure_code: string | null;
         adversarial_verification: {
           status: string;
@@ -1166,6 +1237,7 @@ async function main(): Promise<void> {
         primary_focus: string | null;
         failure_signal: {
           failure_class: string;
+          failure_code: string | null;
           policy_mode: string;
           summary: string;
         } | null;
@@ -1314,6 +1386,7 @@ async function main(): Promise<void> {
         summary: string;
         failure_signal: {
           failure_class: string;
+          failure_code: string | null;
           policy_mode: string;
           summary: string;
         } | null;
@@ -1423,7 +1496,7 @@ async function main(): Promise<void> {
     assert.equal(blockerDetail?.heartbeat, null);
     assert.deepEqual(
       blockerDetail?.journal.map((entry) => entry.type),
-      ["attempt.created", "attempt.started", "attempt.recovery_required"]
+      ["attempt.created", "attempt.preflight.failed", "attempt.failed"]
     );
     assert.equal(payload.run_health.status, "waiting_steer");
     assert.equal(payload.run.harness_profile.execution.effort, "high");
@@ -1494,23 +1567,21 @@ async function main(): Promise<void> {
     assert.equal(payload.policy_runtime?.proposed_attempt_type, "execution");
     assert.equal(payload.policy_runtime?.proposed_objective, attempt.objective);
     assert.ok(payload.policy_runtime_ref?.endsWith("policy-runtime.json"));
-    assert.equal(payload.failure_signal, null);
-    assert.equal(payload.latest_preflight_evaluation?.attempt_id, attempt.id);
-    assert.equal(payload.latest_preflight_evaluation?.status, "passed");
-    assert.equal(payload.latest_preflight_evaluation?.failure_class, null);
-    assert.equal(payload.latest_preflight_evaluation?.contract?.verifier_kit, "api");
+    assert.equal(payload.failure_signal?.failure_class, "preflight_blocked");
     assert.equal(
-      payload.latest_preflight_evaluation?.toolchain_assessment?.verifier_kit,
-      "api"
+      payload.failure_signal?.failure_code,
+      "blocked_pnpm_verification_plan"
+    );
+    assert.equal(payload.latest_preflight_evaluation?.attempt_id, blockerAttempt.id);
+    assert.equal(payload.latest_preflight_evaluation?.status, "failed");
+    assert.equal(payload.latest_preflight_evaluation?.failure_class, "preflight_blocked");
+    assert.equal(
+      payload.latest_preflight_evaluation?.failure_code,
+      "blocked_pnpm_verification_plan"
     );
     assert.equal(
-      payload.latest_preflight_evaluation?.toolchain_assessment?.command_policy,
-      "contract_locked_commands"
-    );
-    assert.ok(
-      payload.latest_preflight_evaluation?.checks.some(
-        (check) => check.code === "verifier_kit_policy_loaded" && check.status === "passed"
-      )
+      payload.latest_preflight_evaluation?.failure_reason,
+      blockerFailureContext.message
     );
     assert.ok(
       payload.latest_preflight_evaluation_ref?.endsWith("artifacts/preflight-evaluation.json")
@@ -1539,6 +1610,11 @@ async function main(): Promise<void> {
       )
     );
     assert.equal(payload.latest_handoff_bundle?.attempt_id, blockerAttempt.id);
+    assert.equal(payload.latest_handoff_bundle?.failure_class, "preflight_blocked");
+    assert.equal(
+      payload.latest_handoff_bundle?.failure_code,
+      "blocked_pnpm_verification_plan"
+    );
     assert.equal(payload.latest_handoff_bundle?.adversarial_verification, null);
     assert.equal(payload.latest_handoff_bundle?.adversarial_failure_code, null);
     assert.equal(
@@ -1548,12 +1624,20 @@ async function main(): Promise<void> {
     assert.ok(
       payload.latest_handoff_bundle_ref?.endsWith("artifacts/handoff_bundle.json")
     );
-    assert.equal(payload.latest_handoff_bundle?.source_refs.preflight_evaluation, null);
+    assert.ok(
+      payload.latest_handoff_bundle?.source_refs.preflight_evaluation?.endsWith(
+        "artifacts/preflight-evaluation.json"
+      )
+    );
     assert.equal(payload.latest_handoff_bundle?.source_refs.adversarial_verification, null);
     assert.equal(payload.run_brief?.latest_attempt_id, blockerAttempt.id);
     assert.equal(payload.run_brief?.headline, blockerFailureContext.message);
     assert.equal(payload.run_brief?.primary_focus, blockerAttempt.objective);
-    assert.equal(payload.run_brief?.failure_signal, null);
+    assert.equal(payload.run_brief?.failure_signal?.failure_class, "preflight_blocked");
+    assert.equal(
+      payload.run_brief?.failure_signal?.failure_code,
+      "blocked_pnpm_verification_plan"
+    );
     assert.ok(payload.run_brief_ref?.endsWith("run-brief.json"));
     assert.ok(payload.maintenance_plane_ref?.endsWith("artifacts/maintenance-plane.json"));
     assert.equal(payload.maintenance_plane?.blocked_diagnosis.status, "attention");
@@ -1589,7 +1673,10 @@ async function main(): Promise<void> {
     assert.equal(payload.working_context?.source_attempt_id, blockerAttempt.id);
     assert.equal(payload.working_context?.current_focus, blockerAttempt.objective);
     assert.equal(payload.working_context?.current_blocker?.summary, blockerFailureContext.message);
-    assert.equal(payload.working_context?.plan_ref, `runs/${run.id}/contract.json`);
+    assert.equal(
+      payload.working_context?.plan_ref,
+      `runs/${run.id}/attempts/${blockerAttempt.id}/attempt_contract.json`
+    );
     assert.ok(payload.working_context_ref?.endsWith("working-context.json"));
     assert.ok(
       payload.working_context?.recent_evidence_refs.some(
@@ -1797,19 +1884,18 @@ async function main(): Promise<void> {
     assert.ok(runSummary?.policy_runtime_ref?.endsWith("policy-runtime.json"));
     assert.equal(runSummary?.run_health.status, "waiting_steer");
     assert.equal(runSummary?.working_context_degraded.is_degraded, false);
-    assert.equal(runSummary?.failure_signal, null);
-    assert.ok(runSummary?.working_context_ref?.endsWith("working-context.json"));
-    assert.equal(runSummary?.latest_preflight_evaluation?.attempt_id, attempt.id);
-    assert.equal(runSummary?.latest_preflight_evaluation?.status, "passed");
-    assert.equal(runSummary?.latest_preflight_evaluation?.failure_class, null);
-    assert.equal(runSummary?.latest_preflight_evaluation?.contract?.verifier_kit, "api");
+    assert.equal(runSummary?.failure_signal?.failure_class, "preflight_blocked");
     assert.equal(
-      runSummary?.latest_preflight_evaluation?.toolchain_assessment?.verifier_kit,
-      "api"
+      runSummary?.failure_signal?.failure_code,
+      "blocked_pnpm_verification_plan"
     );
+    assert.ok(runSummary?.working_context_ref?.endsWith("working-context.json"));
+    assert.equal(runSummary?.latest_preflight_evaluation?.attempt_id, blockerAttempt.id);
+    assert.equal(runSummary?.latest_preflight_evaluation?.status, "failed");
+    assert.equal(runSummary?.latest_preflight_evaluation?.failure_class, "preflight_blocked");
     assert.equal(
-      runSummary?.latest_preflight_evaluation?.toolchain_assessment?.command_policy,
-      "contract_locked_commands"
+      runSummary?.latest_preflight_evaluation?.failure_code,
+      "blocked_pnpm_verification_plan"
     );
     assert.ok(
       runSummary?.latest_preflight_evaluation_ref?.endsWith("artifacts/preflight-evaluation.json")
@@ -1838,6 +1924,11 @@ async function main(): Promise<void> {
       )
     );
     assert.equal(runSummary?.latest_handoff_bundle?.attempt_id, blockerAttempt.id);
+    assert.equal(runSummary?.latest_handoff_bundle?.failure_class, "preflight_blocked");
+    assert.equal(
+      runSummary?.latest_handoff_bundle?.failure_code,
+      "blocked_pnpm_verification_plan"
+    );
     assert.equal(
       runSummary?.latest_handoff_bundle?.summary,
       blockerFailureContext.message
@@ -1845,14 +1936,22 @@ async function main(): Promise<void> {
     assert.ok(
       runSummary?.latest_handoff_bundle_ref?.endsWith("artifacts/handoff_bundle.json")
     );
-    assert.equal(runSummary?.latest_handoff_bundle?.source_refs.preflight_evaluation, null);
+    assert.ok(
+      runSummary?.latest_handoff_bundle?.source_refs.preflight_evaluation?.endsWith(
+        "artifacts/preflight-evaluation.json"
+      )
+    );
     assert.equal(runSummary?.latest_handoff_bundle?.source_refs.adversarial_verification, null);
     assert.equal(runSummary?.latest_handoff_bundle?.adversarial_verification, null);
     assert.equal(runSummary?.run_brief?.latest_attempt_id, blockerAttempt.id);
     assert.equal(runSummary?.run_brief?.headline, blockerFailureContext.message);
     assert.equal(runSummary?.run_brief?.summary, blockerFailureContext.message);
     assert.equal(runSummary?.run_brief?.primary_focus, blockerAttempt.objective);
-    assert.equal(runSummary?.run_brief?.failure_signal, null);
+    assert.equal(runSummary?.run_brief?.failure_signal?.failure_class, "preflight_blocked");
+    assert.equal(
+      runSummary?.run_brief?.failure_signal?.failure_code,
+      "blocked_pnpm_verification_plan"
+    );
     assert.ok(runSummary?.run_brief_ref?.endsWith("run-brief.json"));
     assert.ok(runSummary?.maintenance_plane_ref?.endsWith("artifacts/maintenance-plane.json"));
     assert.equal(runSummary?.maintenance_plane?.blocked_diagnosis.status, "attention");
