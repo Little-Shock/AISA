@@ -83,6 +83,7 @@ import {
   getAttemptEvaluation,
   getAttemptLogExcerpt,
   getAttemptEvaluationSynthesisRecord,
+  getAttemptEvaluatorCalibrationSample,
   getAttemptReviewInputPacket,
   getAttemptReviewPacket,
   getAttemptResult,
@@ -119,6 +120,7 @@ import {
   saveAttemptAdversarialVerification,
   saveAttemptEvaluation,
   saveAttemptEvaluationSynthesisRecord,
+  saveAttemptEvaluatorCalibrationSample,
   saveAttemptPreflightEvaluation,
   saveAttemptHeartbeat,
   saveAttemptHandoffBundle,
@@ -171,6 +173,7 @@ import {
   maybePromoteVerifiedCheckpoint,
   type RuntimePromotionOutcome
 } from "./runtime-promotion.js";
+import { buildAttemptEvaluatorCalibrationSample } from "./evaluator-calibration.js";
 import {
   assertAttemptWorkspaceWithinRunScope,
   createDefaultRunWorkspaceScopePolicy,
@@ -3151,6 +3154,13 @@ export class Orchestrator {
 
     await saveAttemptReviewPacket(this.workspacePaths, reviewPacket);
     await saveAttemptHandoffBundle(this.workspacePaths, handoffBundle);
+    await this.persistAttemptEvaluatorCalibrationSample({
+      runId: input.runId,
+      attempt: input.attempt,
+      preflightEvaluation,
+      reviewPacket,
+      handoffBundle
+    });
     await upsertOpenRunMailboxEntry({
       paths: this.workspacePaths,
       runId: input.runId,
@@ -3848,7 +3858,38 @@ export class Orchestrator {
       evaluation,
       result,
       runtimeVerification
-    });
+      });
+  }
+
+  private async persistAttemptEvaluatorCalibrationSample(input: {
+    runId: string;
+    attempt: Attempt;
+    preflightEvaluation: Awaited<ReturnType<typeof getAttemptPreflightEvaluation>> | null;
+    reviewPacket: AttemptReviewPacket;
+    handoffBundle: AttemptHandoffBundle;
+  }): Promise<void> {
+    await saveAttemptEvaluatorCalibrationSample(
+      this.workspacePaths,
+      buildAttemptEvaluatorCalibrationSample({
+        attempt: input.attempt,
+        preflightEvaluation: input.preflightEvaluation,
+        preflightEvaluationRef: input.preflightEvaluation
+          ? this.buildAttemptPreflightEvaluationRef(input.runId, input.attempt.id)
+          : null,
+        reviewPacket: input.reviewPacket,
+        reviewPacketRef: this.buildAttemptReviewPacketRef(input.runId, input.attempt.id),
+        runtimeVerification: input.reviewPacket.runtime_verification,
+        runtimeVerificationRef: input.reviewPacket.runtime_verification
+          ? this.buildAttemptRuntimeVerificationRef(input.runId, input.attempt.id)
+          : null,
+        adversarialVerification: input.reviewPacket.adversarial_verification,
+        adversarialVerificationRef: input.reviewPacket.adversarial_verification
+          ? this.buildAttemptAdversarialVerificationRef(input.runId, input.attempt.id)
+          : null,
+        handoffBundle: input.handoffBundle,
+        handoffBundleRef: this.buildAttemptHandoffBundleRef(input.runId, input.attempt.id)
+      })
+    );
   }
 
   private applyGovernanceToCurrentDecision(
@@ -3990,58 +4031,81 @@ export class Orchestrator {
         continue;
       }
 
-      const [reviewPacket, handoffBundle] = await Promise.all([
+      const [reviewPacket, handoffBundle, evaluatorCalibrationSample] = await Promise.all([
         getAttemptReviewPacket(this.workspacePaths, runId, attempt.id),
-        getAttemptHandoffBundle(this.workspacePaths, runId, attempt.id)
+        getAttemptHandoffBundle(this.workspacePaths, runId, attempt.id),
+        getAttemptEvaluatorCalibrationSample(this.workspacePaths, runId, attempt.id)
       ]);
       if (!reviewPacket) {
         await this.persistAttemptReviewPacket(runId, attempt.id, current);
         continue;
       }
 
-      if (handoffBundle) {
+      let nextHandoffBundle = handoffBundle;
+      let preflightEvaluation: Awaited<ReturnType<typeof getAttemptPreflightEvaluation>> | null =
+        null;
+
+      if (!nextHandoffBundle) {
+        const attemptContract = await getAttemptContract(
+          this.workspacePaths,
+          runId,
+          attempt.id
+        );
+        preflightEvaluation = await getAttemptPreflightEvaluation(
+          this.workspacePaths,
+          runId,
+          attempt.id
+        );
+        nextHandoffBundle = this.buildAttemptHandoffBundle({
+          runId,
+          attempt,
+          attemptContract,
+          preflightEvaluation,
+          currentSnapshot: reviewPacket.current_decision_snapshot,
+          failureContext: reviewPacket.failure_context,
+          runtimeVerification: reviewPacket.runtime_verification,
+          adversarialVerification: reviewPacket.adversarial_verification,
+          reviewPacketRef: this.buildAttemptReviewPacketRef(runId, attempt.id)
+        });
+        await saveAttemptHandoffBundle(this.workspacePaths, nextHandoffBundle);
+        await upsertOpenRunMailboxEntry({
+          paths: this.workspacePaths,
+          runId,
+          threadId: buildRunMailboxThreadId({
+            kind: "handoff",
+            value: attempt.id
+          }),
+          messageType: "handoff_ready",
+          fromSlot: "final_synthesis",
+          toSlotOrActor: "operator",
+          requiredAction:
+            nextHandoffBundle.recommended_next_action ?? "review_handoff",
+          summary:
+            nextHandoffBundle.summary ??
+            `Attempt ${attempt.id} produced a settled handoff bundle.`,
+          sourceRef: this.buildAttemptHandoffBundleRef(runId, attempt.id),
+          sourceAttemptId: attempt.id
+        });
+      }
+
+      if (evaluatorCalibrationSample) {
         continue;
       }
 
-      const attemptContract = await getAttemptContract(
-        this.workspacePaths,
-        runId,
-        attempt.id
-      );
-      const preflightEvaluation = await getAttemptPreflightEvaluation(
-        this.workspacePaths,
-        runId,
-        attempt.id
-      );
-      const nextHandoffBundle = this.buildAttemptHandoffBundle({
+      if (!preflightEvaluation) {
+        preflightEvaluation = await getAttemptPreflightEvaluation(
+          this.workspacePaths,
+          runId,
+          attempt.id
+        );
+      }
+
+      await this.persistAttemptEvaluatorCalibrationSample({
         runId,
         attempt,
-        attemptContract,
         preflightEvaluation,
-        currentSnapshot: reviewPacket.current_decision_snapshot,
-        failureContext: reviewPacket.failure_context,
-        runtimeVerification: reviewPacket.runtime_verification,
-        adversarialVerification: reviewPacket.adversarial_verification,
-        reviewPacketRef: this.buildAttemptReviewPacketRef(runId, attempt.id)
-      });
-      await saveAttemptHandoffBundle(this.workspacePaths, nextHandoffBundle);
-      await upsertOpenRunMailboxEntry({
-        paths: this.workspacePaths,
-        runId,
-        threadId: buildRunMailboxThreadId({
-          kind: "handoff",
-          value: attempt.id
-        }),
-        messageType: "handoff_ready",
-        fromSlot: "final_synthesis",
-        toSlotOrActor: "operator",
-        requiredAction:
-          nextHandoffBundle.recommended_next_action ?? "review_handoff",
-        summary:
-          nextHandoffBundle.summary ??
-          `Attempt ${attempt.id} produced a settled handoff bundle.`,
-        sourceRef: this.buildAttemptHandoffBundleRef(runId, attempt.id),
-        sourceAttemptId: attempt.id
+        reviewPacket,
+        handoffBundle: nextHandoffBundle
       });
     }
   }
@@ -4117,6 +4181,13 @@ export class Orchestrator {
 
     await saveAttemptReviewPacket(this.workspacePaths, reviewPacket);
     await saveAttemptHandoffBundle(this.workspacePaths, handoffBundle);
+    await this.persistAttemptEvaluatorCalibrationSample({
+      runId,
+      attempt,
+      preflightEvaluation,
+      reviewPacket,
+      handoffBundle
+    });
   }
 
   private buildReviewPacketFailureContext(input: {

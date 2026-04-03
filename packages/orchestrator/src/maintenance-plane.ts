@@ -5,6 +5,7 @@ import {
   createRunMaintenancePlane,
   type Attempt,
   type AttemptAdversarialVerification,
+  type AttemptEvaluatorCalibrationSample,
   type AttemptReviewPacket,
   type AttemptRuntimeVerification,
   type CurrentDecision,
@@ -21,6 +22,7 @@ import {
 import {
   appendRunJournal,
   getAttemptAdversarialVerification,
+  getAttemptEvaluatorCalibrationSample,
   getAttemptHeartbeat,
   getAttemptPreflightEvaluation,
   getAttemptReviewPacket,
@@ -79,6 +81,7 @@ type LatestEvidenceArtifacts = {
   latestReviewPacket: AttemptReviewPacket | null;
   latestRuntimeVerification: AttemptRuntimeVerification | null;
   latestAdversarialVerification: AttemptAdversarialVerification | null;
+  latestEvaluatorCalibrationSample: AttemptEvaluatorCalibrationSample | null;
 };
 
 function buildRelativeRef(paths: WorkspacePaths, absolutePath: string): string {
@@ -141,6 +144,7 @@ function buildAttemptRef(
     | "reviewPacketFile"
     | "runtimeVerificationFile"
     | "adversarialVerificationFile"
+    | "evaluatorCalibrationSampleFile"
 ): string {
   return buildRelativeRef(paths, resolveAttemptPaths(paths, runId, attemptId)[key]);
 }
@@ -169,7 +173,8 @@ async function resolveLatestEvidenceArtifacts(input: {
       latestHandoff: null,
       latestReviewPacket: null,
       latestRuntimeVerification: null,
-      latestAdversarialVerification: null
+      latestAdversarialVerification: null,
+      latestEvaluatorCalibrationSample: null
     };
   }
 
@@ -187,13 +192,15 @@ async function resolveLatestEvidenceArtifacts(input: {
       latestHandoff,
       latestReviewPacket,
       latestRuntimeVerification,
-      latestAdversarialVerification
+      latestAdversarialVerification,
+      latestEvaluatorCalibrationSample
     ] = await Promise.all([
       getAttemptPreflightEvaluation(input.paths, input.runId, candidate.id),
       getAttemptHandoffBundle(input.paths, input.runId, candidate.id),
       getAttemptReviewPacket(input.paths, input.runId, candidate.id),
       getAttemptRuntimeVerification(input.paths, input.runId, candidate.id),
-      getAttemptAdversarialVerification(input.paths, input.runId, candidate.id)
+      getAttemptAdversarialVerification(input.paths, input.runId, candidate.id),
+      getAttemptEvaluatorCalibrationSample(input.paths, input.runId, candidate.id)
     ]);
 
     if (
@@ -201,7 +208,8 @@ async function resolveLatestEvidenceArtifacts(input: {
       latestHandoff ||
       latestReviewPacket ||
       latestRuntimeVerification ||
-      latestAdversarialVerification
+      latestAdversarialVerification ||
+      latestEvaluatorCalibrationSample
     ) {
       return {
         evidenceAttempt: candidate,
@@ -209,7 +217,8 @@ async function resolveLatestEvidenceArtifacts(input: {
         latestHandoff,
         latestReviewPacket,
         latestRuntimeVerification,
-        latestAdversarialVerification
+        latestAdversarialVerification,
+        latestEvaluatorCalibrationSample
       };
     }
   }
@@ -220,7 +229,8 @@ async function resolveLatestEvidenceArtifacts(input: {
     latestHandoff: null,
     latestReviewPacket: null,
     latestRuntimeVerification: null,
-    latestAdversarialVerification: null
+    latestAdversarialVerification: null,
+    latestEvaluatorCalibrationSample: null
   };
 }
 
@@ -447,6 +457,39 @@ function buildVerifierOutput(input: {
   };
 }
 
+function buildEvaluatorCalibrationOutput(input: {
+  sample: AttemptEvaluatorCalibrationSample | null;
+  sampleRef: string | null;
+}): RunMaintenanceOutput {
+  if (!input.sample) {
+    return {
+      key: "evaluator_calibration",
+      label: "校准样本",
+      plane: "maintenance",
+      status: "not_available",
+      ref: null,
+      summary: "最新 settled attempt 尚未产出 evaluator calibration sample。"
+    };
+  }
+
+  const firstDerivedMode = input.sample.derived_failure_modes[0] ?? null;
+  return {
+    key: "evaluator_calibration",
+    label: "校准样本",
+    plane: "maintenance",
+    status:
+      input.sample.derived_failure_modes.length > 0 ||
+      input.sample.failure_code !== null
+        ? "attention"
+        : "ready",
+    ref: input.sampleRef,
+    summary:
+      firstDerivedMode?.summary ??
+      input.sample.summary ??
+      "latest evaluator calibration sample"
+  };
+}
+
 function buildBlockedDiagnosis(input: {
   runId: string;
   paths: WorkspacePaths;
@@ -632,6 +675,26 @@ function buildSignalSources(input: {
         input.latestEvidence.latestHandoff.failure_code
     });
   }
+  if (
+    input.latestEvidence.latestEvaluatorCalibrationSample &&
+    input.latestEvidence.evidenceAttempt
+  ) {
+    sources.push({
+      key: "evaluator_calibration",
+      label: "校准样本",
+      plane: "maintenance",
+      ref: buildAttemptRef(
+        input.paths,
+        input.runId,
+        input.latestEvidence.evidenceAttempt.id,
+        "evaluatorCalibrationSampleFile"
+      ),
+      summary:
+        input.latestEvidence.latestEvaluatorCalibrationSample.derived_failure_modes[0]
+          ?.summary ??
+        input.latestEvidence.latestEvaluatorCalibrationSample.summary
+    });
+  }
   sources.push({
     key: "working_context",
     label: "运行现场",
@@ -770,6 +833,10 @@ export async function buildRunMaintenancePlane(
     evidenceAttempt && latestEvidence.latestAdversarialVerification
       ? buildAttemptRef(paths, runId, evidenceAttempt.id, "adversarialVerificationFile")
       : null;
+  const evaluatorCalibrationSampleRef =
+    evidenceAttempt && latestEvidence.latestEvaluatorCalibrationSample
+      ? buildAttemptRef(paths, runId, evidenceAttempt.id, "evaluatorCalibrationSampleFile")
+      : null;
   const runSurfaceFailureSignal = deriveRunSurfaceFailureSignal({
     latestAttempt,
     current,
@@ -808,6 +875,10 @@ export async function buildRunMaintenancePlane(
     adversarialVerification: latestEvidence.latestAdversarialVerification,
     adversarialVerificationRef
   });
+  const evaluatorCalibrationOutput = buildEvaluatorCalibrationOutput({
+    sample: latestEvidence.latestEvaluatorCalibrationSample,
+    sampleRef: evaluatorCalibrationSampleRef
+  });
   const blockedDiagnosis = buildBlockedDiagnosis({
     runId,
     paths,
@@ -836,7 +907,8 @@ export async function buildRunMaintenancePlane(
       buildRunHealthOutput(runHealth),
       historyContractDriftOutput,
       reviewPacketOutput,
-      verifierOutput
+      verifierOutput,
+      evaluatorCalibrationOutput
     ],
     signal_sources: buildSignalSources({
       paths,

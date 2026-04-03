@@ -347,6 +347,15 @@ async function assertMaintenancePlaneReplay(): Promise<void> {
   );
 }
 
+async function assertEvaluatorCalibrationReplay(): Promise<void> {
+  const result = await runTsxScript("scripts/verify-evaluator-calibration.ts");
+  assert.equal(
+    result.exitCode,
+    0,
+    formatScriptFailure("scripts/verify-evaluator-calibration.ts", result)
+  );
+}
+
 async function assertDashboardControlSurfaceReplay(): Promise<void> {
   const result = await runCommand("pnpm", ["verify:dashboard-control-surface"]);
   assert.equal(
@@ -550,6 +559,7 @@ async function runSelfBootstrapHealthSnapshotReplay(): Promise<{
   historyContractDrift: HistoryContractDriftReport;
 }> {
   await assertRunLoopReplay("happy_path");
+  await assertEvaluatorCalibrationReplay();
   await assertControlApiSupervisorReplay();
   await assertWorkingContextReplay();
   await assertMaintenancePlaneReplay();
@@ -599,6 +609,9 @@ async function main(): Promise<void> {
             "runtime focused replay passed for self_bootstrap_health_snapshot scope. recursive self-bootstrap entrypoints stayed excluded.",
           scope: requestedScope,
           skipped_suites: ["runtime_lanes", "run_detail_api", "self_bootstrap"],
+          evaluator_calibration: {
+            status: "passed"
+          },
           worker_adapter: {
             status: scopedReport.workerAdapter.status,
             research_shell_reentry:
@@ -645,6 +658,7 @@ async function main(): Promise<void> {
   }
 
   await assertRunLoopReplay();
+  await assertEvaluatorCalibrationReplay();
   await assertControlApiSupervisorReplay();
   await assertRuntimeLaneReplay();
   await assertRunDetailApiReplay();
@@ -674,6 +688,9 @@ async function main(): Promise<void> {
           ? "runtime 回放通过，主链、maintenance plane、working context、dashboard control surface 都通过，嵌套 self-bootstrap 回放已按防递归保护跳过，历史 contract 漂移修复与体检都通过了。"
           : "runtime 回放通过，主链、maintenance plane、working context、dashboard control surface、self-bootstrap 和历史 contract 漂移修复都通过了。",
         run_loop: {
+          status: "passed"
+        },
+        evaluator_calibration: {
           status: "passed"
         },
         control_api_supervisor: {

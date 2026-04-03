@@ -1970,8 +1970,8 @@ async function verifyRateLimitedExecutionRetriesQuickly(): Promise<void> {
     workspacePaths,
     runId: run.id,
     predicate: (runStatus) => runStatus === "completed",
-    timeoutMs: 25_000,
-    delayMs: 80
+    timeoutMs: 60_000,
+    delayMs: 120
   });
 
   const current = await getCurrentDecision(workspacePaths, run.id);

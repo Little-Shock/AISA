@@ -12,6 +12,7 @@ import type {
   Attempt,
   AttemptAdversarialVerification,
   AttemptContract,
+  AttemptEvaluatorCalibrationSample,
   AttemptHeartbeat,
   AttemptEvaluationSynthesisRecord,
   AttemptHandoffBundle,
@@ -50,6 +51,7 @@ import {
   AttemptSchema,
   AttemptAdversarialVerificationSchema,
   AttemptContractSchema,
+  AttemptEvaluatorCalibrationSampleSchema,
   AttemptHeartbeatSchema,
   AttemptEvaluationSynthesisRecordSchema,
   AttemptHandoffBundleSchema,
@@ -146,6 +148,7 @@ export interface AttemptPaths {
   reviewInputPacketFile: string;
   reviewPacketFile: string;
   handoffBundleFile: string;
+  evaluatorCalibrationSampleFile: string;
   reviewOpinionsDir: string;
   preflightEvaluationFile: string;
   runtimeVerificationFile: string;
@@ -219,6 +222,11 @@ export function resolveAttemptPaths(
     reviewInputPacketFile: join(attemptDir, "review_input_packet.json"),
     reviewPacketFile: join(attemptDir, "review_packet.json"),
     handoffBundleFile: join(attemptDir, "artifacts", "handoff_bundle.json"),
+    evaluatorCalibrationSampleFile: join(
+      attemptDir,
+      "artifacts",
+      "evaluator-calibration-sample.json"
+    ),
     reviewOpinionsDir: join(attemptDir, "review_opinions"),
     preflightEvaluationFile: join(attemptDir, "artifacts", "preflight-evaluation.json"),
     runtimeVerificationFile: join(attemptDir, "artifacts", "runtime-verification.json"),
@@ -955,6 +963,18 @@ export async function saveAttemptHandoffBundle(
   await writeJsonFile(attemptPaths.handoffBundleFile, handoffBundle);
 }
 
+export async function saveAttemptEvaluatorCalibrationSample(
+  paths: WorkspacePaths,
+  sample: AttemptEvaluatorCalibrationSample
+): Promise<void> {
+  const attemptPaths = await ensureAttemptDirectories(
+    paths,
+    sample.run_id,
+    sample.attempt_id
+  );
+  await writeJsonFile(attemptPaths.evaluatorCalibrationSampleFile, sample);
+}
+
 export async function saveAttemptReviewOpinion(
   paths: WorkspacePaths,
   opinion: AttemptReviewerOpinion
@@ -1073,6 +1093,21 @@ export async function getAttemptHandoffBundle(
       resolveAttemptPaths(paths, runId, attemptId).handoffBundleFile
     );
     return AttemptHandoffBundleSchema.parse(handoffBundle);
+  } catch {
+    return null;
+  }
+}
+
+export async function getAttemptEvaluatorCalibrationSample(
+  paths: WorkspacePaths,
+  runId: string,
+  attemptId: string
+): Promise<AttemptEvaluatorCalibrationSample | null> {
+  try {
+    const sample = await readJsonFile<AttemptEvaluatorCalibrationSample>(
+      resolveAttemptPaths(paths, runId, attemptId).evaluatorCalibrationSampleFile
+    );
+    return AttemptEvaluatorCalibrationSampleSchema.parse(sample);
   } catch {
     return null;
   }

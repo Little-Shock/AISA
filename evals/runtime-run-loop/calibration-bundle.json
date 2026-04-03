@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "bundle_id": "runtime-run-loop-calibration@v1",
+  "bundle_ref": "evals/runtime-run-loop/calibration-bundle.json",
+  "reviewer_prompt": {
+    "version": "runtime-run-loop-reviewer@v1",
+    "path": "evals/runtime-run-loop/reviewer-prompt-v1.md"
+  },
+  "verifier_prompt": {
+    "version": "runtime-run-loop-verifier@v1",
+    "path": "evals/runtime-run-loop/verifier-prompt-v1.md"
+  },
+  "dataset": {
+    "version": "runtime-run-loop-online-samples@v1",
+    "online_manifest_path": "evals/runtime-run-loop/datasets/calibration/online-samples/manifest.json",
+    "fixed_regression_paths": [
+      "evals/runtime-run-loop/datasets/calibration/fixed/false-positive-clean-happy-path.json",
+      "evals/runtime-run-loop/datasets/calibration/fixed/false-negative-adversarial-verdict-fail.json"
+    ]
+  },
+  "updated_at": "2026-04-04T00:00:00.000Z"
+}

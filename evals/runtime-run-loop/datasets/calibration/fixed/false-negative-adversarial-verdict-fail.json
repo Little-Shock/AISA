@@ -1,0 +1,58 @@
+{
+  "version": 1,
+  "case_id": "fixed-false-negative-adversarial-verdict-fail",
+  "label": "false_negative",
+  "summary": "Adversarial verification returned verdict_fail and the evaluator must not miss it.",
+  "sample": {
+    "version": 1,
+    "sample_id": "cal_fixed_false_negative_adversarial_verdict_fail",
+    "run_id": "run_fixed_false_negative_adversarial_verdict_fail",
+    "attempt_id": "att_fixed_false_negative_adversarial_verdict_fail",
+    "attempt_type": "execution",
+    "attempt_status": "completed",
+    "verifier_kit": "repo",
+    "failure_class": "adversarial_verification_failed",
+    "failure_policy_mode": "fail_closed",
+    "failure_code": "verdict_fail",
+    "adversarial_failure_code": "verdict_fail",
+    "recommended_next_action": "wait_for_human",
+    "summary": "Adversarial verification returned a failing verdict.",
+    "derived_failure_modes": [
+      {
+        "id": "adversarial.verdict_fail",
+        "source_kind": "adversarial_verification",
+        "source_ref": "runs/run_fixed_false_negative_adversarial_verdict_fail/attempts/att_fixed_false_negative_adversarial_verdict_fail/artifacts/adversarial-verification.json",
+        "observed_failure_code": "verdict_fail",
+        "summary": "Adversarial verification returned a failing verdict."
+      },
+      {
+        "id": "handoff.verdict_fail",
+        "source_kind": "handoff_bundle",
+        "source_ref": "runs/run_fixed_false_negative_adversarial_verdict_fail/attempts/att_fixed_false_negative_adversarial_verdict_fail/artifacts/handoff_bundle.json",
+        "observed_failure_code": "verdict_fail",
+        "summary": "Adversarial verification returned a failing verdict."
+      }
+    ],
+    "source_refs": {
+      "preflight_evaluation": null,
+      "review_packet": "runs/run_fixed_false_negative_adversarial_verdict_fail/attempts/att_fixed_false_negative_adversarial_verdict_fail/review_packet.json",
+      "runtime_verification": null,
+      "adversarial_verification": "runs/run_fixed_false_negative_adversarial_verdict_fail/attempts/att_fixed_false_negative_adversarial_verdict_fail/artifacts/adversarial-verification.json",
+      "handoff_bundle": "runs/run_fixed_false_negative_adversarial_verdict_fail/attempts/att_fixed_false_negative_adversarial_verdict_fail/artifacts/handoff_bundle.json"
+    },
+    "calibration_bundle": {
+      "bundle_ref": "evals/runtime-run-loop/calibration-bundle.json",
+      "reviewer_prompt_version": "runtime-run-loop-reviewer@v1",
+      "verifier_prompt_version": "runtime-run-loop-verifier@v1",
+      "dataset_version": "runtime-run-loop-online-samples@v1"
+    },
+    "created_at": "2026-04-04T00:00:00.000Z"
+  },
+  "expected_failure_mode_ids": [
+    "adversarial.verdict_fail",
+    "handoff.verdict_fail"
+  ],
+  "notes": [
+    "Guard against missing explicit failing adversarial verdicts."
+  ]
+}

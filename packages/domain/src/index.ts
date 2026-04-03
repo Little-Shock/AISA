@@ -1267,6 +1267,91 @@ export const AttemptHandoffBundleSchema = z.object({
   generated_at: z.string().datetime()
 });
 
+export const AttemptEvaluatorCalibrationSourceKindSchema = z.enum([
+  "preflight_evaluation",
+  "review_packet",
+  "runtime_verification",
+  "adversarial_verification",
+  "handoff_bundle"
+]);
+
+export const AttemptEvaluatorCalibrationBundleSchema = z.object({
+  bundle_ref: z.string().min(1),
+  reviewer_prompt_version: z.string().min(1),
+  verifier_prompt_version: z.string().min(1),
+  dataset_version: z.string().min(1)
+});
+
+export const AttemptEvaluatorCalibrationSourceRefsSchema = z.object({
+  preflight_evaluation: z.string().min(1).nullable().default(null),
+  review_packet: z.string().min(1).nullable().default(null),
+  runtime_verification: z.string().min(1).nullable().default(null),
+  adversarial_verification: z.string().min(1).nullable().default(null),
+  handoff_bundle: z.string().min(1).nullable().default(null)
+});
+
+export const AttemptEvaluatorCalibrationFailureModeSchema = z.object({
+  id: z.string().min(1),
+  source_kind: AttemptEvaluatorCalibrationSourceKindSchema,
+  source_ref: z.string().min(1).nullable().default(null),
+  observed_failure_code: z.string().min(1).nullable().default(null),
+  summary: z.string().min(1)
+});
+
+export const AttemptEvaluatorCalibrationSampleSchema = z.object({
+  version: z.literal(1),
+  sample_id: z.string().min(1),
+  run_id: z.string(),
+  attempt_id: z.string(),
+  attempt_type: AttemptTypeSchema,
+  attempt_status: AttemptStatusSchema,
+  verifier_kit: ExecutionVerifierKitSchema.nullable().default(null),
+  failure_class: RunFailureClassSchema.nullable().default(null),
+  failure_policy_mode: RunFailurePolicyModeSchema.nullable().default(null),
+  failure_code: z.string().min(1).nullable().default(null),
+  adversarial_failure_code:
+    AttemptAdversarialVerificationFailureCodeSchema.nullable().default(null),
+  recommended_next_action: z.string().min(1).nullable().default(null),
+  summary: z.string().min(1),
+  derived_failure_modes: z.array(AttemptEvaluatorCalibrationFailureModeSchema).default([]),
+  source_refs: AttemptEvaluatorCalibrationSourceRefsSchema,
+  calibration_bundle: AttemptEvaluatorCalibrationBundleSchema,
+  created_at: z.string().datetime()
+});
+
+export const EvaluatorCalibrationCaseLabelSchema = z.enum([
+  "online_failure",
+  "false_positive",
+  "false_negative"
+]);
+
+export const EvaluatorCalibrationCaseSchema = z.object({
+  version: z.literal(1),
+  case_id: z.string().min(1),
+  label: EvaluatorCalibrationCaseLabelSchema,
+  summary: z.string().min(1),
+  sample: AttemptEvaluatorCalibrationSampleSchema,
+  expected_failure_mode_ids: z.array(z.string().min(1)).default([]),
+  notes: z.array(z.string().min(1)).default([])
+});
+
+export const EvaluatorCalibrationManifestEntrySchema = z.object({
+  case_id: z.string().min(1),
+  sample_id: z.string().min(1),
+  label: EvaluatorCalibrationCaseLabelSchema,
+  path: z.string().min(1),
+  run_id: z.string(),
+  attempt_id: z.string(),
+  exported_at: z.string().datetime()
+});
+
+export const EvaluatorCalibrationManifestSchema = z.object({
+  version: z.literal(1),
+  bundle_ref: z.string().min(1),
+  entries: z.array(EvaluatorCalibrationManifestEntrySchema).default([]),
+  updated_at: z.string().datetime()
+});
+
 export const AttemptEvaluationSynthesisRecordSchema = z.object({
   run_id: z.string(),
   attempt_id: z.string(),
@@ -1499,6 +1584,31 @@ export type AttemptHandoffBundleSourceRefs = z.infer<
   typeof AttemptHandoffBundleSourceRefsSchema
 >;
 export type AttemptHandoffBundle = z.infer<typeof AttemptHandoffBundleSchema>;
+export type AttemptEvaluatorCalibrationSourceKind = z.infer<
+  typeof AttemptEvaluatorCalibrationSourceKindSchema
+>;
+export type AttemptEvaluatorCalibrationBundle = z.infer<
+  typeof AttemptEvaluatorCalibrationBundleSchema
+>;
+export type AttemptEvaluatorCalibrationSourceRefs = z.infer<
+  typeof AttemptEvaluatorCalibrationSourceRefsSchema
+>;
+export type AttemptEvaluatorCalibrationFailureMode = z.infer<
+  typeof AttemptEvaluatorCalibrationFailureModeSchema
+>;
+export type AttemptEvaluatorCalibrationSample = z.infer<
+  typeof AttemptEvaluatorCalibrationSampleSchema
+>;
+export type EvaluatorCalibrationCaseLabel = z.infer<
+  typeof EvaluatorCalibrationCaseLabelSchema
+>;
+export type EvaluatorCalibrationCase = z.infer<typeof EvaluatorCalibrationCaseSchema>;
+export type EvaluatorCalibrationManifestEntry = z.infer<
+  typeof EvaluatorCalibrationManifestEntrySchema
+>;
+export type EvaluatorCalibrationManifest = z.infer<
+  typeof EvaluatorCalibrationManifestSchema
+>;
 export type AttemptEvaluationSynthesisRecord = z.infer<
   typeof AttemptEvaluationSynthesisRecordSchema
 >;
@@ -2066,6 +2176,75 @@ export function createAttemptHandoffBundle(input: {
       null,
     source_refs: input.source_refs,
     generated_at: new Date().toISOString()
+  });
+}
+
+export function createAttemptEvaluatorCalibrationSample(input: {
+  sample_id: string;
+  run_id: string;
+  attempt_id: string;
+  attempt_type: AttemptType;
+  attempt_status: AttemptStatus;
+  verifier_kit?: ExecutionVerifierKit | null;
+  failure_class?: RunFailureClass | null;
+  failure_policy_mode?: RunFailurePolicyMode | null;
+  failure_code?: string | null;
+  adversarial_failure_code?: AttemptAdversarialVerificationFailureCode | null;
+  recommended_next_action?: string | null;
+  summary: string;
+  derived_failure_modes?: AttemptEvaluatorCalibrationFailureMode[];
+  source_refs?: Partial<AttemptEvaluatorCalibrationSourceRefs>;
+  calibration_bundle: AttemptEvaluatorCalibrationBundle;
+}): AttemptEvaluatorCalibrationSample {
+  return AttemptEvaluatorCalibrationSampleSchema.parse({
+    version: 1,
+    sample_id: input.sample_id,
+    run_id: input.run_id,
+    attempt_id: input.attempt_id,
+    attempt_type: input.attempt_type,
+    attempt_status: input.attempt_status,
+    verifier_kit: input.verifier_kit ?? null,
+    failure_class: input.failure_class ?? null,
+    failure_policy_mode: input.failure_policy_mode ?? null,
+    failure_code: input.failure_code ?? null,
+    adversarial_failure_code: input.adversarial_failure_code ?? null,
+    recommended_next_action: input.recommended_next_action ?? null,
+    summary: input.summary,
+    derived_failure_modes: input.derived_failure_modes ?? [],
+    source_refs: input.source_refs ?? {},
+    calibration_bundle: input.calibration_bundle,
+    created_at: new Date().toISOString()
+  });
+}
+
+export function createEvaluatorCalibrationCase(input: {
+  case_id: string;
+  label: EvaluatorCalibrationCaseLabel;
+  summary: string;
+  sample: AttemptEvaluatorCalibrationSample;
+  expected_failure_mode_ids?: string[];
+  notes?: string[];
+}): EvaluatorCalibrationCase {
+  return EvaluatorCalibrationCaseSchema.parse({
+    version: 1,
+    case_id: input.case_id,
+    label: input.label,
+    summary: input.summary,
+    sample: input.sample,
+    expected_failure_mode_ids: input.expected_failure_mode_ids ?? [],
+    notes: input.notes ?? []
+  });
+}
+
+export function createEvaluatorCalibrationManifest(input: {
+  bundle_ref: string;
+  entries?: EvaluatorCalibrationManifestEntry[];
+}): EvaluatorCalibrationManifest {
+  return EvaluatorCalibrationManifestSchema.parse({
+    version: 1,
+    bundle_ref: input.bundle_ref,
+    entries: input.entries ?? [],
+    updated_at: new Date().toISOString()
   });
 }
 
