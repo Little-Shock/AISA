@@ -1077,7 +1077,9 @@ async function main(): Promise<void> {
   assert.equal(run.title, "AISA 自举下一步规划");
   assert.match(run.description, /自举开发/);
   assert.equal(run.success_criteria[0], "确定下一项该做的具体后端或运行时任务。");
+  assert.equal(run.harness_profile.version, 2);
   assert.equal(run.harness_profile.execution.effort, "high");
+  assert.equal(run.harness_profile.execution.default_verifier_kit, "repo");
   assert.equal(run.harness_profile.reviewer.effort, "medium");
   assert.equal(run.harness_profile.synthesizer.effort, "medium");
   assert.equal(bootstrapOutput.current_status, "running");

@@ -134,7 +134,8 @@ async function main(): Promise<void> {
     workspace_root: projectRoot,
     harness_profile: {
       execution: {
-        effort: "high"
+        effort: "high",
+        default_verifier_kit: "api"
       },
       reviewer: {
         effort: "low"
@@ -681,6 +682,7 @@ async function main(): Promise<void> {
         harness_profile: {
           execution: {
             effort: string;
+            default_verifier_kit: string;
           };
           reviewer: {
             effort: string;
@@ -688,13 +690,19 @@ async function main(): Promise<void> {
           synthesizer: {
             effort: string;
           };
+          version: number;
         };
       };
       active_next_task: string;
       active_next_task_snapshot: string;
     };
     assert.equal(selfBootstrap.run.workspace_root, resolvedRootDir);
+    assert.equal(selfBootstrap.run.harness_profile.version, 2);
     assert.equal(selfBootstrap.run.harness_profile.execution.effort, "high");
+    assert.equal(
+      selfBootstrap.run.harness_profile.execution.default_verifier_kit,
+      "repo"
+    );
     assert.equal(selfBootstrap.run.harness_profile.reviewer.effort, "medium");
     assert.equal(selfBootstrap.run.harness_profile.synthesizer.effort, "medium");
     assert.equal(
@@ -1009,9 +1017,17 @@ async function main(): Promise<void> {
     const payload = response.json() as {
       run: {
         harness_profile: {
-          execution: { effort: string };
+          version: number;
+          execution: { effort: string; default_verifier_kit: string };
           reviewer: { effort: string };
           synthesizer: { effort: string };
+          slots: {
+            research_or_planning: { binding: string };
+            execution: { binding: string };
+            preflight_review: { binding: string };
+            postflight_review: { binding: string };
+            final_synthesis: { binding: string };
+          };
         };
       };
       worker_effort: {
@@ -1338,8 +1354,18 @@ async function main(): Promise<void> {
     );
     assert.equal(payload.run_health.status, "waiting_steer");
     assert.equal(payload.run.harness_profile.execution.effort, "high");
+    assert.equal(payload.run.harness_profile.version, 2);
+    assert.equal(payload.run.harness_profile.execution.default_verifier_kit, "api");
     assert.equal(payload.run.harness_profile.reviewer.effort, "low");
     assert.equal(payload.run.harness_profile.synthesizer.effort, "medium");
+    assert.equal(
+      payload.run.harness_profile.slots.execution.binding,
+      "codex_cli_execution_worker"
+    );
+    assert.equal(
+      payload.run.harness_profile.slots.postflight_review.binding,
+      "attempt_adversarial_verification"
+    );
     assert.equal(payload.worker_effort.execution.requested_effort, "high");
     assert.equal(payload.worker_effort.execution.status, "applied");
     assert.equal(payload.worker_effort.reviewer.requested_effort, "low");
@@ -1491,7 +1517,16 @@ async function main(): Promise<void> {
     assert.equal(runsResponse.statusCode, 200);
     const runsPayload = runsResponse.json() as {
       runs: Array<{
-        run: { id: string };
+        run: {
+          id: string;
+          harness_profile: {
+            version: number;
+            execution: { default_verifier_kit: string };
+            slots: {
+              execution: { binding: string };
+            };
+          };
+        };
         worker_effort: {
           execution: { requested_effort: string; status: string };
         };
@@ -1582,6 +1617,15 @@ async function main(): Promise<void> {
       }>;
     };
     const runSummary = runsPayload.runs.find((item) => item.run.id === run.id);
+    assert.equal(runSummary?.run.harness_profile.version, 2);
+    assert.equal(
+      runSummary?.run.harness_profile.execution.default_verifier_kit,
+      "api"
+    );
+    assert.equal(
+      runSummary?.run.harness_profile.slots.execution.binding,
+      "codex_cli_execution_worker"
+    );
     assert.equal(runSummary?.worker_effort.execution.requested_effort, "high");
     assert.equal(runSummary?.worker_effort.execution.status, "applied");
     assert.equal(runSummary?.latest_attempt_runtime_state, null);

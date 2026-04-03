@@ -530,7 +530,13 @@ async function main(hostJudgeConfig: HostJudgeConfigSnapshot): Promise<void> {
     success_criteria: ["Advance from research to execution-ready state."],
     constraints: [],
     owner_id: "test-owner",
-    workspace_root: rootDir
+    workspace_root: rootDir,
+    harness_profile: {
+      execution: {
+        effort: "medium",
+        default_verifier_kit: "web"
+      }
+    }
   });
   const current = createCurrentDecision({
     run_id: run.id,
@@ -646,6 +652,11 @@ async function main(hostJudgeConfig: HostJudgeConfigSnapshot): Promise<void> {
     "second research attempt should leave a replayable execution contract"
   );
   assert.equal(secondResearchResult?.next_attempt_contract?.attempt_type, "execution");
+  assert.equal(
+    secondResearchResult?.next_attempt_contract?.verifier_kit,
+    null,
+    "research contract should leave verifier kit unset so the run policy bundle supplies it"
+  );
   assert.ok(executionAttemptContract, "execution attempt should persist the promoted contract");
   assert.equal(
     executionAttempt.objective,
@@ -656,6 +667,11 @@ async function main(hostJudgeConfig: HostJudgeConfigSnapshot): Promise<void> {
     executionAttemptContract?.verification_plan,
     secondResearchResult?.next_attempt_contract?.verification_plan,
     "execution should keep the replayable verification plan from research"
+  );
+  assert.equal(
+    executionAttemptContract?.verifier_kit,
+    "web",
+    "execution contract should inherit the run-level default verifier kit when research leaves it unset"
   );
   const checkpointArtifact = String(checkpointEntry.payload.artifact_path);
   await waitForFile(checkpointArtifact);
@@ -703,6 +719,11 @@ async function main(hostJudgeConfig: HostJudgeConfigSnapshot): Promise<void> {
     "all recorded attempts should be completed by the settled stop"
   );
   assert.equal(runtimeVerification.status, "passed");
+  assert.equal(
+    runtimeVerification.verifier_kit,
+    "web",
+    "runtime verification should preserve the promoted run-level verifier kit"
+  );
   assert.equal(runtimeVerification.command_results.length, 2);
   assert.deepEqual(runtimeVerification.changed_files, ["execution-note.md"]);
   assert.equal(checkpointEntry.attempt_id, executionAttempt.id);

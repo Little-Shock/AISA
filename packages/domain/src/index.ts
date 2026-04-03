@@ -72,27 +72,86 @@ export const WorkerEffortLevelSchema = z.enum(WorkerEffortLevelValues);
 export const ExecutionVerifierKitValues = ["repo", "web", "api", "cli"] as const;
 export const ExecutionVerifierKitSchema = z.enum(ExecutionVerifierKitValues);
 export const DEFAULT_EXECUTION_VERIFIER_KIT = "repo" as const;
+export const RunHarnessSlotValues = [
+  "research_or_planning",
+  "execution",
+  "preflight_review",
+  "postflight_review",
+  "final_synthesis"
+] as const;
+export const RunHarnessSlotSchema = z.enum(RunHarnessSlotValues);
+export const RunHarnessSlotBindingValues = [
+  "codex_cli_research_worker",
+  "codex_cli_execution_worker",
+  "attempt_dispatch_preflight",
+  "attempt_adversarial_verification",
+  "attempt_evaluation_synthesizer"
+] as const;
+export const RunHarnessSlotBindingSchema = z.enum(RunHarnessSlotBindingValues);
 
 export const RunHarnessEffortPreferenceSchema = z.object({
   effort: WorkerEffortLevelSchema.default("medium")
 });
+export const RunHarnessExecutionPreferenceSchema = RunHarnessEffortPreferenceSchema.extend({
+  default_verifier_kit: ExecutionVerifierKitSchema.default(
+    DEFAULT_EXECUTION_VERIFIER_KIT
+  )
+});
+export const RunHarnessSlotConfigSchema = z.object({
+  binding: RunHarnessSlotBindingSchema
+});
+
+const DEFAULT_RUN_HARNESS_SLOTS = {
+  research_or_planning: {
+    binding: "codex_cli_research_worker" as const
+  },
+  execution: {
+    binding: "codex_cli_execution_worker" as const
+  },
+  preflight_review: {
+    binding: "attempt_dispatch_preflight" as const
+  },
+  postflight_review: {
+    binding: "attempt_adversarial_verification" as const
+  },
+  final_synthesis: {
+    binding: "attempt_evaluation_synthesizer" as const
+  }
+};
+export const RunHarnessSlotsSchema = z.object({
+  research_or_planning: RunHarnessSlotConfigSchema.default(
+    DEFAULT_RUN_HARNESS_SLOTS.research_or_planning
+  ),
+  execution: RunHarnessSlotConfigSchema.default(DEFAULT_RUN_HARNESS_SLOTS.execution),
+  preflight_review: RunHarnessSlotConfigSchema.default(
+    DEFAULT_RUN_HARNESS_SLOTS.preflight_review
+  ),
+  postflight_review: RunHarnessSlotConfigSchema.default(
+    DEFAULT_RUN_HARNESS_SLOTS.postflight_review
+  ),
+  final_synthesis: RunHarnessSlotConfigSchema.default(
+    DEFAULT_RUN_HARNESS_SLOTS.final_synthesis
+  )
+});
 
 const DEFAULT_RUN_HARNESS_PROFILE = {
-  version: 1 as const,
+  version: 2 as const,
   execution: {
-    effort: "medium" as const
+    effort: "medium" as const,
+    default_verifier_kit: DEFAULT_EXECUTION_VERIFIER_KIT
   },
   reviewer: {
     effort: "medium" as const
   },
   synthesizer: {
     effort: "medium" as const
-  }
+  },
+  slots: DEFAULT_RUN_HARNESS_SLOTS
 };
 
 export const RunHarnessProfileSchema = z.object({
-  version: z.number().int().min(1).max(1).default(1),
-  execution: RunHarnessEffortPreferenceSchema.default(
+  version: z.number().int().min(1).max(2).default(2),
+  execution: RunHarnessExecutionPreferenceSchema.default(
     DEFAULT_RUN_HARNESS_PROFILE.execution
   ),
   reviewer: RunHarnessEffortPreferenceSchema.default(
@@ -100,7 +159,8 @@ export const RunHarnessProfileSchema = z.object({
   ),
   synthesizer: RunHarnessEffortPreferenceSchema.default(
     DEFAULT_RUN_HARNESS_PROFILE.synthesizer
-  )
+  ),
+  slots: RunHarnessSlotsSchema.default(DEFAULT_RUN_HARNESS_PROFILE.slots)
 });
 
 export const GoalSchema = z.object({
@@ -1190,9 +1250,16 @@ export type VerificationCommand = z.infer<typeof VerificationCommandSchema>;
 export type ExecutionVerificationPlan = z.infer<typeof ExecutionVerificationPlanSchema>;
 export type WorkerEffortLevel = z.infer<typeof WorkerEffortLevelSchema>;
 export type ExecutionVerifierKit = z.infer<typeof ExecutionVerifierKitSchema>;
+export type RunHarnessSlot = z.infer<typeof RunHarnessSlotSchema>;
+export type RunHarnessSlotBinding = z.infer<typeof RunHarnessSlotBindingSchema>;
 export type RunHarnessEffortPreference = z.infer<
   typeof RunHarnessEffortPreferenceSchema
 >;
+export type RunHarnessExecutionPreference = z.infer<
+  typeof RunHarnessExecutionPreferenceSchema
+>;
+export type RunHarnessSlotConfig = z.infer<typeof RunHarnessSlotConfigSchema>;
+export type RunHarnessSlots = z.infer<typeof RunHarnessSlotsSchema>;
 export type RunHarnessProfile = z.infer<typeof RunHarnessProfileSchema>;
 export type AttemptDoneRubricItem = z.infer<typeof AttemptDoneRubricItemSchema>;
 export type AttemptFailureMode = z.infer<typeof AttemptFailureModeSchema>;

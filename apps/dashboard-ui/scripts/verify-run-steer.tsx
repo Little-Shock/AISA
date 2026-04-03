@@ -19,6 +19,36 @@ const fixtureRunDetail: RunDetail = {
     description: "Ensure next pickup steer stays selectable without crashing the UI.",
     workspace_root: "/tmp/aisa-fixture",
     owner_id: "fixture-owner",
+    harness_profile: {
+      version: 2,
+      execution: {
+        effort: "medium",
+        default_verifier_kit: "repo"
+      },
+      reviewer: {
+        effort: "medium"
+      },
+      synthesizer: {
+        effort: "medium"
+      },
+      slots: {
+        research_or_planning: {
+          binding: "codex_cli_research_worker"
+        },
+        execution: {
+          binding: "codex_cli_execution_worker"
+        },
+        preflight_review: {
+          binding: "attempt_dispatch_preflight"
+        },
+        postflight_review: {
+          binding: "attempt_adversarial_verification"
+        },
+        final_synthesis: {
+          binding: "attempt_evaluation_synthesizer"
+        }
+      }
+    },
     success_criteria: ["Render the steer panel."],
     constraints: [],
     created_at: fixtureNow,

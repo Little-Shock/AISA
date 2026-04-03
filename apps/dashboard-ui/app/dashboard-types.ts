@@ -165,6 +165,37 @@ export type RunPolicyRuntime = {
   updated_at: string;
 } | null;
 
+export type RunHarnessProfileView = {
+  version: number;
+  execution: {
+    effort: string;
+    default_verifier_kit: string;
+  };
+  reviewer: {
+    effort: string;
+  };
+  synthesizer: {
+    effort: string;
+  };
+  slots: {
+    research_or_planning: {
+      binding: string;
+    };
+    execution: {
+      binding: string;
+    };
+    preflight_review: {
+      binding: string;
+    };
+    postflight_review: {
+      binding: string;
+    };
+    final_synthesis: {
+      binding: string;
+    };
+  };
+};
+
 export type RunWorkingContextTaskRef = {
   task_id: string;
   title: string;
@@ -356,6 +387,7 @@ export type RunSummaryItem = {
     title: string;
     description: string;
     workspace_root: string;
+    harness_profile: RunHarnessProfileView;
     created_at: string;
   };
   current: {
@@ -413,6 +445,7 @@ export type RunDetail = {
     description: string;
     workspace_root: string;
     owner_id: string;
+    harness_profile: RunHarnessProfileView;
     success_criteria: string[];
     constraints: string[];
     created_at: string;

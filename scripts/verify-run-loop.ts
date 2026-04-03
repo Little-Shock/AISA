@@ -6,6 +6,7 @@ import { join, resolve } from "node:path";
 import {
   createAttemptContract,
   createAttempt,
+  createDefaultRunHarnessProfile,
   createRunSteer,
   createCurrentDecision,
   createRun,
@@ -1880,6 +1881,54 @@ async function assertExplicitPnpmVerificationPlanNeedsLocalNodeModules(): Promis
     ["pnpm typecheck", "pnpm verify:runtime"],
     "explicit_pnpm_verification_plan_needs_local_node_modules: explicit pnpm replay commands should be flagged"
   );
+}
+
+async function assertRunHarnessPolicyBundleDefaults(): Promise<void> {
+  const defaultProfile = createDefaultRunHarnessProfile();
+  assert.equal(defaultProfile.version, 2);
+  assert.equal(defaultProfile.execution.default_verifier_kit, "repo");
+  assert.equal(
+    defaultProfile.slots.research_or_planning.binding,
+    "codex_cli_research_worker"
+  );
+  assert.equal(
+    defaultProfile.slots.execution.binding,
+    "codex_cli_execution_worker"
+  );
+  assert.equal(
+    defaultProfile.slots.preflight_review.binding,
+    "attempt_dispatch_preflight"
+  );
+  assert.equal(
+    defaultProfile.slots.postflight_review.binding,
+    "attempt_adversarial_verification"
+  );
+  assert.equal(
+    defaultProfile.slots.final_synthesis.binding,
+    "attempt_evaluation_synthesizer"
+  );
+
+  const rootDir = await createVerifyTempDir("aisa-harness-policy-bundle-");
+  const { run } = await bootstrapRun(rootDir, "harness-policy-bundle");
+  const configuredRun = updateRun(run, {
+    harness_profile: {
+      execution: {
+        effort: "high",
+        default_verifier_kit: "web"
+      }
+    }
+  });
+  const orchestrator = new Orchestrator(
+    resolveWorkspacePaths(rootDir),
+    new ContextCaptureAdapter() as never,
+    undefined,
+    60_000
+  );
+  const slots = orchestrator.describeRunHarnessSlots(configuredRun);
+
+  assert.equal(slots.execution.default_verifier_kit, "web");
+  assert.equal(slots.execution.binding, "codex_cli_execution_worker");
+  assert.equal(slots.postflight_review.binding, "attempt_adversarial_verification");
 }
 
 async function assertVerifierKitScopesDefaultInference(): Promise<void> {
@@ -5381,6 +5430,20 @@ async function main(): Promise<void> {
     } catch (error) {
       results.push({
         id: "explicit_pnpm_verification_plan_needs_local_node_modules",
+        status: "fail",
+        error: error instanceof Error ? error.message : String(error)
+      });
+    }
+
+    try {
+      await assertRunHarnessPolicyBundleDefaults();
+      results.push({
+        id: "run_harness_policy_bundle_defaults",
+        status: "pass"
+      });
+    } catch (error) {
+      results.push({
+        id: "run_harness_policy_bundle_defaults",
         status: "fail",
         error: error instanceof Error ? error.message : String(error)
       });

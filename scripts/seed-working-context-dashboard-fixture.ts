@@ -67,7 +67,13 @@ export async function seedWorkingContextDashboardFixture(input: {
     success_criteria: ["Show degraded working context and handoff-first control surface in run detail."],
     constraints: [],
     owner_id: "fixture-owner",
-    workspace_root: workspaceRoot
+    workspace_root: workspaceRoot,
+    harness_profile: {
+      execution: {
+        effort: "medium",
+        default_verifier_kit: "web"
+      }
+    }
   });
   const createdAttempt = createAttempt({
     run_id: run.id,

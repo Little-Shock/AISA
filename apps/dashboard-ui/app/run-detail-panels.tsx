@@ -704,6 +704,7 @@ export function RunPolicyPanel({
   rejectBusy: boolean;
 }) {
   const policyRuntime = runDetail.policy_runtime;
+  const harnessProfile = runDetail.run.harness_profile;
   const canApprove = policyRuntime?.approval_status === "pending";
   const canReject = policyRuntime?.approval_status === "pending";
 
@@ -736,6 +737,18 @@ export function RunPolicyPanel({
           `阻塞原因：${localizeUiText(policyRuntime?.blocking_reason ?? "暂无")}`,
           `最后决议：${localizeUiText(policyRuntime?.last_decision ?? "暂无")}`,
           `更新时间：${formatDateTime(policyRuntime?.updated_at)}`
+        ]}
+      />
+
+      <SectionList
+        title="Harness 槽位"
+        items={[
+          `profile 版本：${String(harnessProfile.version)}`,
+          `research_or_planning：${harnessProfile.slots.research_or_planning.binding}`,
+          `execution：${harnessProfile.slots.execution.binding} · 默认 verifier kit ${harnessProfile.execution.default_verifier_kit}`,
+          `preflight_review：${harnessProfile.slots.preflight_review.binding}`,
+          `postflight_review：${harnessProfile.slots.postflight_review.binding}`,
+          `final_synthesis：${harnessProfile.slots.final_synthesis.binding}`
         ]}
       />
 

@@ -243,6 +243,22 @@ export type RunWorkerEffortView = {
   synthesizer: RunWorkerEffortSlotView;
 };
 
+export type RunHarnessSlotBindingView = {
+  binding: string;
+  source: string;
+  detail: string;
+};
+
+export type RunHarnessSlotsView = {
+  research_or_planning: RunHarnessSlotBindingView;
+  execution: RunHarnessSlotBindingView & {
+    default_verifier_kit: ExecutionVerifierKit;
+  };
+  preflight_review: RunHarnessSlotBindingView;
+  postflight_review: RunHarnessSlotBindingView;
+  final_synthesis: RunHarnessSlotBindingView;
+};
+
 const ADVERSARIAL_VERIFICATION_ARTIFACT_RELATIVE_PATH =
   "artifacts/adversarial-verification.json";
 
@@ -716,6 +732,39 @@ export class Orchestrator {
         usesCliTransport: this.synthesizer.kind === "cli",
         slot: "synthesizer"
       })
+    };
+  }
+
+  describeRunHarnessSlots(run: Run): RunHarnessSlotsView {
+    const harnessProfile = resolveRunHarnessProfile(run);
+
+    return {
+      research_or_planning: {
+        binding: harnessProfile.slots.research_or_planning.binding,
+        source: "run.harness_profile.slots.research_or_planning.binding",
+        detail: "研究与规划尝试当前交给 Codex CLI worker，并保持只读研究边界。"
+      },
+      execution: {
+        binding: harnessProfile.slots.execution.binding,
+        source: "run.harness_profile.slots.execution.binding",
+        detail: "执行尝试当前交给 Codex CLI worker，并在 contract 里冻结 replay 与 verifier kit。",
+        default_verifier_kit: harnessProfile.execution.default_verifier_kit
+      },
+      preflight_review: {
+        binding: harnessProfile.slots.preflight_review.binding,
+        source: "run.harness_profile.slots.preflight_review.binding",
+        detail: "发车前统一经过 dispatch preflight，先拦合同、工具链和现场问题。"
+      },
+      postflight_review: {
+        binding: harnessProfile.slots.postflight_review.binding,
+        source: "run.harness_profile.slots.postflight_review.binding",
+        detail: "执行完成后统一经过 adversarial verification，维持第二道硬门。"
+      },
+      final_synthesis: {
+        binding: harnessProfile.slots.final_synthesis.binding,
+        source: "run.harness_profile.slots.final_synthesis.binding",
+        detail: "最终判断仍由 attempt evaluation synthesizer 汇总成 operator 可读结果。"
+      }
     };
   }
 
@@ -4299,14 +4348,17 @@ export class Orchestrator {
     nextExecutionDraft: AttemptContractDraft | null,
     reusableExecutionContract: AttemptContract | null
   ): Promise<AttemptContract> {
+    const harnessProfile = resolveRunHarnessProfile(run);
     if (attempt.attempt_type === "execution") {
       const draft = isExecutionContractDraft(nextExecutionDraft)
         ? nextExecutionDraft
         : null;
+      const draftVerifierKit =
+        draft?.attempt_type === "execution" ? draft.verifier_kit : null;
       const verifierKit =
-        resolveExecutionVerifierKit(draft) ??
+        draftVerifierKit ??
         resolveExecutionVerifierKit(reusableExecutionContract) ??
-        DEFAULT_EXECUTION_VERIFIER_KIT;
+        harnessProfile.execution.default_verifier_kit;
       const inferredVerificationPlan =
         draft?.verification_plan ??
         reusableExecutionContract?.verification_plan ??

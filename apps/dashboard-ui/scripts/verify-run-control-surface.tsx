@@ -64,6 +64,14 @@ async function main(): Promise<void> {
       fixture.expected_working_context_reason
     );
     assert.equal(runDetail.automation?.mode, fixture.expected_automation_mode);
+    assert.equal(
+      runDetail.run.harness_profile.execution.default_verifier_kit,
+      fixture.expected_verifier_kit
+    );
+    assert.equal(
+      runDetail.run.harness_profile.slots.execution.binding,
+      "codex_cli_execution_worker"
+    );
     assert.equal(runDetail.policy_runtime?.stage, fixture.expected_policy_stage);
     assert.equal(
       runDetail.policy_runtime?.approval_status,
@@ -206,6 +214,12 @@ async function main(): Promise<void> {
     assert.match(policyMarkup, /Policy Lane/);
     assert.match(policyMarkup, /批准 Execution/);
     assert.match(policyMarkup, /打回重规划/);
+    assert.match(policyMarkup, /Harness 槽位/);
+    assert.match(policyMarkup, /codex_cli_execution_worker/);
+    assert.match(
+      policyMarkup,
+      new RegExp(escapeRegExp(`默认 verifier kit ${fixture.expected_verifier_kit}`))
+    );
 
     const verificationMarkup = renderToStaticMarkup(
       <RunVerificationPanel selectedRunAttemptDetail={selectedRunAttemptDetail} />
