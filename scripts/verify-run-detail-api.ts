@@ -1708,6 +1708,7 @@ async function main(): Promise<void> {
         blocked_diagnosis: {
           status: string;
           summary: string | null;
+          source_ref: string | null;
         };
         outputs: Array<{
           key: string;
@@ -2191,7 +2192,12 @@ async function main(): Promise<void> {
     );
     assert.equal(
       missingRunBriefPayload.maintenance_plane?.blocked_diagnosis.summary,
-      missingRunBriefCurrent.blocking_reason
+      missingRunBriefFailureReason
+    );
+    assert.ok(
+      missingRunBriefPayload.maintenance_plane?.blocked_diagnosis.source_ref?.endsWith(
+        "artifacts/preflight-evaluation.json"
+      )
     );
     assert.ok(
       missingRunBriefPayload.maintenance_plane?.outputs.some(
@@ -2310,6 +2316,8 @@ async function main(): Promise<void> {
         maintenance_plane: {
           blocked_diagnosis: {
             status: string;
+            summary: string | null;
+            source_ref: string | null;
           };
           outputs: Array<{
             key: string;
@@ -2501,6 +2509,15 @@ async function main(): Promise<void> {
     assert.ok(
       missingRunBriefSummary?.maintenance_plane?.outputs.some(
         (item) => item.key === "run_brief" && item.plane === "maintenance"
+      )
+    );
+    assert.equal(
+      missingRunBriefSummary?.maintenance_plane?.blocked_diagnosis.summary,
+      missingRunBriefFailureReason
+    );
+    assert.ok(
+      missingRunBriefSummary?.maintenance_plane?.blocked_diagnosis.source_ref?.endsWith(
+        "artifacts/preflight-evaluation.json"
       )
     );
 

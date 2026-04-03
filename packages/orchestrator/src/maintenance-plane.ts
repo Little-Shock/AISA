@@ -9,6 +9,7 @@ import {
   type AttemptRuntimeVerification,
   type CurrentDecision,
   type RunBrief,
+  type RunFailureSignal,
   type RunGovernanceState,
   type RunHealthAssessment,
   type RunMaintenanceOutput,
@@ -43,6 +44,7 @@ import {
   readRunBriefView,
   type RunBriefView
 } from "./run-brief.js";
+import { deriveRunSurfaceFailureSignal } from "./failure-policy.js";
 import {
   readRunWorkingContextView,
   refreshRunWorkingContext,
@@ -429,6 +431,7 @@ function buildBlockedDiagnosis(input: {
   governance: RunGovernanceState | null;
   runBrief: RunBrief | null;
   runBriefRef: string | null;
+  failureSignal: RunFailureSignal | null;
   runHealth: RunHealthAssessment;
   workingContext: RunWorkingContext | null;
   latestHandoffRef: string | null;
@@ -465,7 +468,7 @@ function buildBlockedDiagnosis(input: {
     });
   }
 
-  const failureSignal = input.runBrief?.failure_signal ?? null;
+  const failureSignal = input.failureSignal;
   if (failureSignal) {
     return createRunBlockedDiagnosis({
       status: "attention",
@@ -726,6 +729,38 @@ export async function buildRunMaintenancePlane(
     staleAfterMs: options.staleAfterMs
   });
   const evidenceAttempt = latestEvidence.evidenceAttempt;
+  const preflightRef =
+    evidenceAttempt && latestEvidence.latestPreflight
+      ? buildAttemptRef(paths, runId, evidenceAttempt.id, "preflightEvaluationFile")
+      : null;
+  const handoffRef =
+    evidenceAttempt && latestEvidence.latestHandoff
+      ? buildAttemptRef(paths, runId, evidenceAttempt.id, "handoffBundleFile")
+      : null;
+  const runtimeVerificationRef =
+    evidenceAttempt && latestEvidence.latestRuntimeVerification
+      ? buildAttemptRef(paths, runId, evidenceAttempt.id, "runtimeVerificationFile")
+      : null;
+  const adversarialVerificationRef =
+    evidenceAttempt && latestEvidence.latestAdversarialVerification
+      ? buildAttemptRef(paths, runId, evidenceAttempt.id, "adversarialVerificationFile")
+      : null;
+  const runSurfaceFailureSignal = deriveRunSurfaceFailureSignal({
+    latestAttempt,
+    current,
+    runBrief: runBriefView.run_brief,
+    runBriefRef: runBriefView.run_brief_ref,
+    preflight: latestEvidence.latestPreflight,
+    preflightRef,
+    runtimeVerification: latestEvidence.latestRuntimeVerification,
+    runtimeVerificationRef,
+    adversarialVerification: latestEvidence.latestAdversarialVerification,
+    adversarialVerificationRef,
+    handoff: latestEvidence.latestHandoff,
+    handoffRef,
+    workingContextDegraded: workingContextView.working_context_degraded,
+    workingContextRef: workingContextView.working_context_ref
+  });
   const historyContractDriftOutput = buildHistoryContractDriftOutput({
     runtimeHealthSnapshot,
     snapshotRef: runtimeHealthSnapshot
@@ -741,15 +776,9 @@ export async function buildRunMaintenancePlane(
   });
   const verifierOutput = buildVerifierOutput({
     runtimeVerification: latestEvidence.latestRuntimeVerification,
-    runtimeVerificationRef:
-      evidenceAttempt && latestEvidence.latestRuntimeVerification
-        ? buildAttemptRef(paths, runId, evidenceAttempt.id, "runtimeVerificationFile")
-        : null,
+    runtimeVerificationRef,
     adversarialVerification: latestEvidence.latestAdversarialVerification,
-    adversarialVerificationRef:
-      evidenceAttempt && latestEvidence.latestAdversarialVerification
-        ? buildAttemptRef(paths, runId, evidenceAttempt.id, "adversarialVerificationFile")
-        : null
+    adversarialVerificationRef
   });
   const blockedDiagnosis = buildBlockedDiagnosis({
     runId,
@@ -758,12 +787,10 @@ export async function buildRunMaintenancePlane(
     governance,
     runBrief: runBriefView.run_brief,
     runBriefRef: runBriefView.run_brief_ref,
+    failureSignal: runSurfaceFailureSignal,
     runHealth,
     workingContext: workingContextView.working_context,
-    latestHandoffRef:
-      evidenceAttempt && latestEvidence.latestHandoff
-        ? buildAttemptRef(paths, runId, evidenceAttempt.id, "handoffBundleFile")
-        : null
+    latestHandoffRef: handoffRef
   });
 
   return createRunMaintenancePlane({

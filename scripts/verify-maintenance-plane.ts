@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { rm } from "node:fs/promises";
 import { join } from "node:path";
 import {
   createAttempt,
@@ -16,6 +17,7 @@ import {
   ensureWorkspace,
   getCurrentDecision,
   getRunMaintenancePlane,
+  resolveRunPaths,
   resolveWorkspacePaths,
   saveAttempt,
   saveAttemptContract,
@@ -143,6 +145,24 @@ async function main(): Promise<void> {
       (item) => item.key === "run_brief" && item.plane === "maintenance"
     )
   );
+
+  await rm(resolveRunPaths(workspacePaths, run.id).runBriefFile, { force: true });
+  const missingRunBriefView = await readRunMaintenancePlaneView(workspacePaths, run.id, {
+    staleAfterMs: 60_000
+  });
+  const missingRunBriefOutput =
+    missingRunBriefView.maintenance_plane?.outputs.find((item) => item.key === "run_brief") ??
+    null;
+  assert.equal(
+    missingRunBriefView.maintenance_plane?.blocked_diagnosis.summary,
+    preflight.failure_reason
+  );
+  assert.ok(
+    missingRunBriefView.maintenance_plane?.blocked_diagnosis.source_ref?.endsWith(
+      "artifacts/preflight-evaluation.json"
+    )
+  );
+  assert.equal(missingRunBriefOutput?.status, "not_available");
 
   await saveCurrentDecision(
     workspacePaths,
@@ -276,6 +296,8 @@ async function main(): Promise<void> {
           attempt_id: attempt.id,
           blocked_diagnosis: maintenancePlane.blocked_diagnosis.status,
           blocked_diagnosis_source_ref: maintenancePlane.blocked_diagnosis.source_ref,
+          missing_run_brief_blocked_summary:
+            missingRunBriefView.maintenance_plane?.blocked_diagnosis.summary ?? null,
           maintenance_plane_ref: `runs/${run.id}/artifacts/maintenance-plane.json`,
           working_context_after_current_move: workingContextOutput?.status ?? null,
           saved_snapshot_strategy: savedSnapshotPolicyOutput?.summary ?? null
