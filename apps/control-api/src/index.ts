@@ -28,6 +28,7 @@ import {
   assessRunHealth,
   buildRuntimeWorkspaceScopeRoots,
   createRunWorkspaceScopePolicy,
+  deriveRunSurfaceFailureSignal,
   lockRunWorkspaceRoot,
   loadSelfBootstrapNextTaskActiveEntry,
   Orchestrator,
@@ -766,6 +767,23 @@ export async function buildServer(
     const harnessSlots = orchestrator.describeRunHarnessSlots(run);
     const defaultVerifierKitProfile = orchestrator.describeRunDefaultVerifierKit(run);
     const effectivePolicyBundle = orchestrator.describeRunEffectivePolicyBundle(run);
+    const failureSignal = deriveRunSurfaceFailureSignal({
+      latestAttempt,
+      current,
+      runBrief: runBriefView.run_brief,
+      runBriefRef: runBriefView.run_brief_ref,
+      preflight: latestAttemptSurface.latest_preflight_evaluation,
+      preflightRef: latestAttemptSurface.latest_preflight_evaluation_ref,
+      runtimeVerification: latestAttemptSurface.latest_runtime_verification,
+      runtimeVerificationRef: latestAttemptSurface.latest_runtime_verification_ref,
+      adversarialVerification: latestAttemptSurface.latest_adversarial_verification,
+      adversarialVerificationRef:
+        latestAttemptSurface.latest_adversarial_verification_ref,
+      handoff: latestAttemptSurface.latest_handoff_bundle,
+      handoffRef: latestAttemptSurface.latest_handoff_bundle_ref,
+      workingContextDegraded: workingContextView.working_context_degraded,
+      workingContextRef: workingContextView.working_context_ref
+    });
 
     return {
       run,
@@ -777,10 +795,7 @@ export async function buildServer(
       policy_runtime_invalid_reason: policyRuntimeSurface.policyRuntimeInvalidReason,
       policy_activity: policyActivity,
       policy_activity_ref: policyActivityRef,
-      failure_signal:
-        runBriefView.run_brief?.failure_signal ??
-        latestAttemptSurface.latest_handoff_bundle?.failure_signal ??
-        null,
+      failure_signal: failureSignal,
       latest_preflight_evaluation: latestAttemptSurface.latest_preflight_evaluation,
       latest_preflight_evaluation_ref: latestAttemptSurface.latest_preflight_evaluation_ref,
       latest_runtime_verification: latestAttemptSurface.latest_runtime_verification,
@@ -860,6 +875,23 @@ export async function buildServer(
     const harnessSlots = orchestrator.describeRunHarnessSlots(run);
     const defaultVerifierKitProfile = orchestrator.describeRunDefaultVerifierKit(run);
     const effectivePolicyBundle = orchestrator.describeRunEffectivePolicyBundle(run);
+    const failureSignal = deriveRunSurfaceFailureSignal({
+      latestAttempt,
+      current,
+      runBrief: runBriefView.run_brief,
+      runBriefRef: runBriefView.run_brief_ref,
+      preflight: latestAttemptSurface.latest_preflight_evaluation,
+      preflightRef: latestAttemptSurface.latest_preflight_evaluation_ref,
+      runtimeVerification: latestAttemptSurface.latest_runtime_verification,
+      runtimeVerificationRef: latestAttemptSurface.latest_runtime_verification_ref,
+      adversarialVerification: latestAttemptSurface.latest_adversarial_verification,
+      adversarialVerificationRef:
+        latestAttemptSurface.latest_adversarial_verification_ref,
+      handoff: latestAttemptSurface.latest_handoff_bundle,
+      handoffRef: latestAttemptSurface.latest_handoff_bundle_ref,
+      workingContextDegraded: workingContextView.working_context_degraded,
+      workingContextRef: workingContextView.working_context_ref
+    });
 
     return {
       run,
@@ -869,10 +901,7 @@ export async function buildServer(
       policy_runtime: policyRuntimeSurface.policyRuntime,
       policy_runtime_ref: policyRuntimeSurface.policyRuntimeRef,
       policy_runtime_invalid_reason: policyRuntimeSurface.policyRuntimeInvalidReason,
-      failure_signal:
-        runBriefView.run_brief?.failure_signal ??
-        latestAttemptSurface.latest_handoff_bundle?.failure_signal ??
-        null,
+      failure_signal: failureSignal,
       latest_preflight_evaluation: latestAttemptSurface.latest_preflight_evaluation,
       latest_preflight_evaluation_ref: latestAttemptSurface.latest_preflight_evaluation_ref,
       latest_runtime_verification: latestAttemptSurface.latest_runtime_verification,

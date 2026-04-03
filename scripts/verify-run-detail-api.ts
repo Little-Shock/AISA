@@ -1303,6 +1303,79 @@ async function main(): Promise<void> {
     );
     await refreshRunOperatorSurface(workspacePaths, writeFailedWorkingContextRun.id);
 
+    const missingRunBriefRun = createRun({
+      title: "Missing run brief fallback verification",
+      description: "Failure signal should survive even when run-brief.json disappears.",
+      success_criteria: ["Surface the blocker without depending on run-brief.json."],
+      constraints: [],
+      owner_id: "test-owner",
+      workspace_root: rootDir
+    });
+    const missingRunBriefAttempt = createAttempt({
+      run_id: missingRunBriefRun.id,
+      attempt_type: "execution",
+      worker: "codex",
+      objective: "Prove the API still surfaces preflight blockers without a saved run brief.",
+      success_criteria: ["Keep the top-level failure signal readable."],
+      workspace_root: rootDir
+    });
+    const missingRunBriefContract = createAttemptContract({
+      attempt_id: missingRunBriefAttempt.id,
+      run_id: missingRunBriefRun.id,
+      attempt_type: "execution",
+      objective: missingRunBriefAttempt.objective,
+      success_criteria: missingRunBriefAttempt.success_criteria,
+      required_evidence: ["Surface a unified failure signal from persisted attempt evidence."]
+    });
+    const missingRunBriefFailureReason =
+      "Preflight blocker should stay visible after run-brief.json is removed.";
+    const missingRunBriefCurrent = createCurrentDecision({
+      run_id: missingRunBriefRun.id,
+      run_status: "waiting_steer",
+      latest_attempt_id: missingRunBriefAttempt.id,
+      recommended_next_action: "wait_for_human",
+      recommended_attempt_type: "execution",
+      summary: "Top-level failure signal should not depend on a saved run brief.",
+      blocking_reason: "run brief file is missing, but the blocker still exists.",
+      waiting_for_human: true
+    });
+    const missingRunBriefPreflight = createAttemptPreflightEvaluation({
+      run_id: missingRunBriefRun.id,
+      attempt_id: missingRunBriefAttempt.id,
+      attempt_type: "execution",
+      status: "failed",
+      failure_code: "blocked_pnpm_verification_plan",
+      failure_reason: missingRunBriefFailureReason
+    });
+    await saveRun(workspacePaths, missingRunBriefRun);
+    await saveAttempt(workspacePaths, missingRunBriefAttempt);
+    await saveAttemptContract(workspacePaths, missingRunBriefContract);
+    await saveCurrentDecision(workspacePaths, missingRunBriefCurrent);
+    await saveAttemptPreflightEvaluation(workspacePaths, missingRunBriefPreflight);
+    await saveAttemptHandoffBundle(
+      workspacePaths,
+      createAttemptHandoffBundle({
+        attempt: missingRunBriefAttempt,
+        approved_attempt_contract: missingRunBriefContract,
+        preflight_evaluation: missingRunBriefPreflight,
+        current_decision_snapshot: missingRunBriefCurrent,
+        source_refs: {
+          run_contract: `runs/${missingRunBriefRun.id}/contract.json`,
+          attempt_meta: `runs/${missingRunBriefRun.id}/attempts/${missingRunBriefAttempt.id}/meta.json`,
+          attempt_contract: `runs/${missingRunBriefRun.id}/attempts/${missingRunBriefAttempt.id}/attempt_contract.json`,
+          preflight_evaluation: `runs/${missingRunBriefRun.id}/attempts/${missingRunBriefAttempt.id}/artifacts/preflight-evaluation.json`,
+          current_decision: `runs/${missingRunBriefRun.id}/current.json`,
+          review_packet: null,
+          runtime_verification: null,
+          adversarial_verification: null
+        }
+      })
+    );
+    await refreshRunOperatorSurface(workspacePaths, missingRunBriefRun.id);
+    await rm(resolveRunPaths(workspacePaths, missingRunBriefRun.id).runBriefFile, {
+      force: true
+    });
+
     const response = await app.inject({
       method: "GET",
       url: `/runs/${run.id}`
@@ -1319,11 +1392,16 @@ async function main(): Promise<void> {
       method: "GET",
       url: `/runs/${writeFailedWorkingContextRun.id}`
     });
+    const missingRunBriefResponse = await app.inject({
+      method: "GET",
+      url: `/runs/${missingRunBriefRun.id}`
+    });
 
     assert.equal(response.statusCode, 200);
     assert.equal(staleResponse.statusCode, 200);
     assert.equal(staleWorkingContextResponse.statusCode, 200);
     assert.equal(writeFailedWorkingContextResponse.statusCode, 200);
+    assert.equal(missingRunBriefResponse.statusCode, 200);
     const payload = response.json() as {
       run: {
         harness_profile: {
@@ -1605,6 +1683,37 @@ async function main(): Promise<void> {
         } | null;
       } | null;
       run_brief_ref: string | null;
+    };
+    const missingRunBriefPayload = missingRunBriefResponse.json() as {
+      failure_signal: {
+        failure_class: string;
+        failure_code: string | null;
+        summary: string;
+        source_ref: string | null;
+      } | null;
+      latest_preflight_evaluation: {
+        attempt_id: string;
+        failure_code: string | null;
+        failure_reason: string | null;
+      } | null;
+      latest_preflight_evaluation_ref: string | null;
+      latest_handoff_bundle: {
+        attempt_id: string;
+        failure_code: string | null;
+      } | null;
+      latest_handoff_bundle_ref: string | null;
+      run_brief: null;
+      run_brief_ref: null;
+      maintenance_plane: {
+        blocked_diagnosis: {
+          status: string;
+          summary: string | null;
+        };
+        outputs: Array<{
+          key: string;
+          status: string;
+        }>;
+      } | null;
     };
 
     const completedDetail = payload.attempt_details.find(
@@ -2029,6 +2138,66 @@ async function main(): Promise<void> {
       writeFailedWorkingContextPayload.run_brief?.failure_signal?.failure_class,
       "working_context_degraded"
     );
+    assert.equal(missingRunBriefPayload.run_brief, null);
+    assert.equal(missingRunBriefPayload.run_brief_ref, null);
+    assert.equal(
+      missingRunBriefPayload.failure_signal?.failure_class,
+      "preflight_blocked"
+    );
+    assert.equal(
+      missingRunBriefPayload.failure_signal?.failure_code,
+      "blocked_pnpm_verification_plan"
+    );
+    assert.equal(
+      missingRunBriefPayload.failure_signal?.summary,
+      missingRunBriefFailureReason
+    );
+    assert.ok(
+      missingRunBriefPayload.failure_signal?.source_ref?.endsWith(
+        "artifacts/preflight-evaluation.json"
+      )
+    );
+    assert.equal(
+      missingRunBriefPayload.latest_preflight_evaluation?.attempt_id,
+      missingRunBriefAttempt.id
+    );
+    assert.equal(
+      missingRunBriefPayload.latest_preflight_evaluation?.failure_code,
+      "blocked_pnpm_verification_plan"
+    );
+    assert.equal(
+      missingRunBriefPayload.latest_preflight_evaluation?.failure_reason,
+      missingRunBriefFailureReason
+    );
+    assert.ok(
+      missingRunBriefPayload.latest_preflight_evaluation_ref?.endsWith(
+        "artifacts/preflight-evaluation.json"
+      )
+    );
+    assert.equal(
+      missingRunBriefPayload.latest_handoff_bundle?.attempt_id,
+      missingRunBriefAttempt.id
+    );
+    assert.equal(
+      missingRunBriefPayload.latest_handoff_bundle?.failure_code,
+      "blocked_pnpm_verification_plan"
+    );
+    assert.ok(
+      missingRunBriefPayload.latest_handoff_bundle_ref?.endsWith("artifacts/handoff_bundle.json")
+    );
+    assert.equal(
+      missingRunBriefPayload.maintenance_plane?.blocked_diagnosis.status,
+      "attention"
+    );
+    assert.equal(
+      missingRunBriefPayload.maintenance_plane?.blocked_diagnosis.summary,
+      missingRunBriefCurrent.blocking_reason
+    );
+    assert.ok(
+      missingRunBriefPayload.maintenance_plane?.outputs.some(
+        (item) => item.key === "run_brief" && item.status === "not_available"
+      )
+    );
 
     const runsResponse = await app.inject({
       method: "GET",
@@ -2153,6 +2322,9 @@ async function main(): Promise<void> {
       }>;
     };
     const runSummary = runsPayload.runs.find((item) => item.run.id === run.id);
+    const missingRunBriefSummary = runsPayload.runs.find(
+      (item) => item.run.id === missingRunBriefRun.id
+    );
     assert.equal(runSummary?.run.harness_profile.version, 3);
     assert.equal(
       runSummary?.run.harness_profile.execution.default_verifier_kit,
@@ -2304,6 +2476,33 @@ async function main(): Promise<void> {
       )
     );
     assert.equal(runSummary?.task_focus, blockerAttempt.objective);
+    assert.equal(missingRunBriefSummary?.run_brief, null);
+    assert.equal(missingRunBriefSummary?.run_brief_ref, null);
+    assert.equal(
+      missingRunBriefSummary?.failure_signal?.failure_class,
+      "preflight_blocked"
+    );
+    assert.equal(
+      missingRunBriefSummary?.failure_signal?.failure_code,
+      "blocked_pnpm_verification_plan"
+    );
+    assert.equal(
+      missingRunBriefSummary?.failure_signal?.summary,
+      missingRunBriefFailureReason
+    );
+    assert.equal(
+      missingRunBriefSummary?.latest_preflight_evaluation?.attempt_id,
+      missingRunBriefAttempt.id
+    );
+    assert.equal(
+      missingRunBriefSummary?.latest_handoff_bundle?.attempt_id,
+      missingRunBriefAttempt.id
+    );
+    assert.ok(
+      missingRunBriefSummary?.maintenance_plane?.outputs.some(
+        (item) => item.key === "run_brief" && item.plane === "maintenance"
+      )
+    );
 
     const healthResponse = await app.inject({
       method: "GET",

@@ -8,6 +8,7 @@ import {
   type AttemptPreflightEvaluation,
   type AttemptRuntimeVerification,
   type CurrentDecision,
+  type RunBrief,
   type RunFailureSignal,
   type RunWorkingContextDegradedState
 } from "@autoresearch/domain";
@@ -231,6 +232,72 @@ export function deriveFailureSignalFromWorkingContext(input: {
     summary:
       input.degraded.summary ?? "working context 已降级，当前现场不可信。"
   });
+}
+
+export function deriveFailureSignalFromRunBrief(input: {
+  runBrief: RunBrief | null;
+  sourceRef?: string | null;
+}): RunFailureSignal | null {
+  if (!input.runBrief?.failure_signal) {
+    return null;
+  }
+
+  return normalizeFailureSignal(
+    createRunFailureSignal({
+      ...input.runBrief.failure_signal,
+      source_ref: input.runBrief.failure_signal.source_ref ?? input.sourceRef ?? null
+    })
+  );
+}
+
+export function deriveRunSurfaceFailureSignal(input: {
+  latestAttempt: Attempt | null;
+  current: CurrentDecision | null;
+  runBrief?: RunBrief | null;
+  runBriefRef?: string | null;
+  preflight: AttemptPreflightEvaluation | null;
+  preflightRef?: string | null;
+  runtimeVerification: AttemptRuntimeVerification | null;
+  runtimeVerificationRef?: string | null;
+  adversarialVerification: AttemptAdversarialVerification | null;
+  adversarialVerificationRef?: string | null;
+  handoff: AttemptHandoffBundle | null;
+  handoffRef?: string | null;
+  workingContextDegraded: RunWorkingContextDegradedState;
+  workingContextRef?: string | null;
+}): RunFailureSignal | null {
+  return pickPrimaryFailureSignal(
+    deriveFailureSignalFromRunBrief({
+      runBrief: input.runBrief ?? null,
+      sourceRef: input.runBriefRef ?? null
+    }),
+    deriveFailureSignalFromHandoffBundle({
+      handoff: input.handoff,
+      sourceRef: input.handoffRef ?? null
+    }),
+    deriveFailureSignalFromAdversarialVerification({
+      verification: input.adversarialVerification,
+      sourceRef: input.adversarialVerificationRef ?? null
+    }),
+    deriveFailureSignalFromRuntimeVerification({
+      verification: input.runtimeVerification,
+      sourceRef: input.runtimeVerificationRef ?? null
+    }),
+    deriveFailureSignalFromPreflight({
+      preflight: input.preflight,
+      sourceRef: input.preflightRef ?? null
+    }),
+    deriveFailureSignalFromHandoffGap({
+      latestAttempt: input.latestAttempt,
+      current: input.current,
+      handoff: input.handoff,
+      sourceRef: input.latestAttempt ? input.handoffRef ?? null : null
+    }),
+    deriveFailureSignalFromWorkingContext({
+      degraded: input.workingContextDegraded,
+      sourceRef: input.workingContextRef ?? null
+    })
+  );
 }
 
 export function annotateRuntimeVerificationFailure(

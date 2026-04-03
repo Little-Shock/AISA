@@ -28,13 +28,7 @@ import {
 } from "@autoresearch/state-store";
 import { readRunWorkingContextView } from "./working-context.js";
 import {
-  deriveFailureSignalFromAdversarialVerification,
-  deriveFailureSignalFromHandoffBundle,
-  deriveFailureSignalFromHandoffGap,
-  deriveFailureSignalFromPreflight,
-  deriveFailureSignalFromRuntimeVerification,
-  deriveFailureSignalFromWorkingContext,
-  pickPrimaryFailureSignal
+  deriveRunSurfaceFailureSignal
 } from "./failure-policy.js";
 
 export type RunBriefView = {
@@ -363,46 +357,34 @@ export async function buildRunBrief(
     });
   }
 
-  const failureSignal = pickPrimaryFailureSignal(
-    deriveFailureSignalFromHandoffBundle({
-      handoff: latestHandoff,
-      sourceRef:
-        latestHandoff && evidenceAttempt
-          ? buildAttemptHandoffRef(paths, runId, evidenceAttempt.id)
-          : null
-    }),
-    deriveFailureSignalFromAdversarialVerification({
-      verification: latestAdversarialVerification,
-      sourceRef:
-        latestAdversarialVerification && evidenceAttempt
-          ? buildAttemptAdversarialVerificationRef(paths, runId, evidenceAttempt.id)
-          : null
-    }),
-    deriveFailureSignalFromRuntimeVerification({
-      verification: latestRuntimeVerification,
-      sourceRef:
-        latestRuntimeVerification && evidenceAttempt
-          ? buildAttemptRuntimeVerificationRef(paths, runId, evidenceAttempt.id)
-          : null
-    }),
-    deriveFailureSignalFromPreflight({
-      preflight: latestPreflight,
-      sourceRef:
-        latestPreflight && evidenceAttempt
-          ? buildAttemptPreflightRef(paths, runId, evidenceAttempt.id)
-          : null
-    }),
-    deriveFailureSignalFromHandoffGap({
-      latestAttempt,
-      current,
-      handoff: latestHandoff,
-      sourceRef: latestAttempt ? buildAttemptHandoffRef(paths, runId, latestAttempt.id) : null
-    }),
-    deriveFailureSignalFromWorkingContext({
-      degraded: workingContextView.working_context_degraded,
-      sourceRef: workingContextView.working_context_ref
-    })
-  );
+  const failureSignal = deriveRunSurfaceFailureSignal({
+    latestAttempt,
+    current,
+    preflight: latestPreflight,
+    preflightRef:
+      latestPreflight && evidenceAttempt
+        ? buildAttemptPreflightRef(paths, runId, evidenceAttempt.id)
+        : null,
+    runtimeVerification: latestRuntimeVerification,
+    runtimeVerificationRef:
+      latestRuntimeVerification && evidenceAttempt
+        ? buildAttemptRuntimeVerificationRef(paths, runId, evidenceAttempt.id)
+        : null,
+    adversarialVerification: latestAdversarialVerification,
+    adversarialVerificationRef:
+      latestAdversarialVerification && evidenceAttempt
+        ? buildAttemptAdversarialVerificationRef(paths, runId, evidenceAttempt.id)
+        : null,
+    handoff: latestHandoff,
+    handoffRef:
+      latestHandoff && evidenceAttempt
+        ? buildAttemptHandoffRef(paths, runId, evidenceAttempt.id)
+        : latestAttempt
+          ? buildAttemptHandoffRef(paths, runId, latestAttempt.id)
+          : null,
+    workingContextDegraded: workingContextView.working_context_degraded,
+    workingContextRef: workingContextView.working_context_ref
+  });
 
   const headline = buildHeadline({
     automation,

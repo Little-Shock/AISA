@@ -6947,6 +6947,12 @@ export {
 } from "./maintenance-plane.js";
 
 export {
+  deriveFailureSignalFromRunBrief,
+  deriveRunSurfaceFailureSignal,
+  pickPrimaryFailureSignal
+} from "./failure-policy.js";
+
+export {
   describeRunEffectivePolicyBundle,
   type RunEffectivePolicyBundleView
 } from "./effective-policy-bundle.js";

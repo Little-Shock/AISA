@@ -428,6 +428,7 @@ function buildBlockedDiagnosis(input: {
   current: CurrentDecision | null;
   governance: RunGovernanceState | null;
   runBrief: RunBrief | null;
+  runBriefRef: string | null;
   runHealth: RunHealthAssessment;
   workingContext: RunWorkingContext | null;
   latestHandoffRef: string | null;
@@ -460,6 +461,30 @@ function buildBlockedDiagnosis(input: {
         input.runBrief?.recommended_next_action ??
         input.current.recommended_next_action,
       source_ref: buildRunCurrentRef(input.paths, input.runId),
+      evidence_refs: evidenceRefs
+    });
+  }
+
+  const failureSignal = input.runBrief?.failure_signal ?? null;
+  if (failureSignal) {
+    return createRunBlockedDiagnosis({
+      status: "attention",
+      summary:
+        failureSignal.summary ??
+        input.current.blocking_reason ??
+        input.runBrief?.headline ??
+        input.current.summary,
+      recommended_next_action:
+        input.runBrief?.recommended_next_action ??
+        input.current.recommended_next_action,
+      source_ref:
+        failureSignal.source_ref ??
+        input.workingContext?.current_blocker?.ref ??
+        input.latestHandoffRef ??
+        input.runBriefRef ??
+        (input.governance?.status === "blocked"
+          ? buildRunGovernanceRef(input.paths, input.runId)
+          : buildRunCurrentRef(input.paths, input.runId)),
       evidence_refs: evidenceRefs
     });
   }
@@ -732,6 +757,7 @@ export async function buildRunMaintenancePlane(
     current,
     governance,
     runBrief: runBriefView.run_brief,
+    runBriefRef: runBriefView.run_brief_ref,
     runHealth,
     workingContext: workingContextView.working_context,
     latestHandoffRef:

@@ -116,7 +116,12 @@ async function main(): Promise<void> {
   assert.equal(maintenancePlane.blocked_diagnosis.status, "attention");
   assert.equal(
     maintenancePlane.blocked_diagnosis.summary,
-    current.blocking_reason
+    preflight.failure_reason
+  );
+  assert.ok(
+    maintenancePlane.blocked_diagnosis.source_ref?.endsWith(
+      "artifacts/preflight-evaluation.json"
+    )
   );
   assert.ok(
     maintenancePlane.outputs.some(
@@ -270,6 +275,7 @@ async function main(): Promise<void> {
           run_id: run.id,
           attempt_id: attempt.id,
           blocked_diagnosis: maintenancePlane.blocked_diagnosis.status,
+          blocked_diagnosis_source_ref: maintenancePlane.blocked_diagnosis.source_ref,
           maintenance_plane_ref: `runs/${run.id}/artifacts/maintenance-plane.json`,
           working_context_after_current_move: workingContextOutput?.status ?? null,
           saved_snapshot_strategy: savedSnapshotPolicyOutput?.summary ?? null
