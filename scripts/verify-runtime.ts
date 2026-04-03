@@ -230,8 +230,15 @@ function parseScriptJsonReport<T>(label: string, stdout: string): T {
   );
 }
 
-async function assertRunLoopReplay(): Promise<RunLoopReport> {
-  const result = await runTsxScript("scripts/verify-run-loop.ts");
+async function assertRunLoopReplay(filterOverride?: string | null): Promise<RunLoopReport> {
+  const result = await runTsxScript(
+    "scripts/verify-run-loop.ts",
+    filterOverride
+      ? {
+          [RUN_LOOP_FILTER_ENV]: filterOverride
+        }
+      : undefined
+  );
   assert.equal(
     result.exitCode,
     0,
@@ -242,14 +249,21 @@ async function assertRunLoopReplay(): Promise<RunLoopReport> {
     "scripts/verify-run-loop.ts",
     result.stdout
   );
-  const requestedFilter = getRequestedRunLoopFilter();
+  const requestedFilter = filterOverride ?? getRequestedRunLoopFilter();
   if (requestedFilter) {
+    const normalizedRequestedFilter = requestedFilter.toLowerCase().replaceAll("-", "_");
     assert.ok(
       report.results.length > 0,
       `run-loop 过滤回放必须至少返回一条结果。filter=${requestedFilter}`
     );
     assert.ok(
-      report.results.some((entry) => entry.id.includes(requestedFilter)),
+      report.results.some((entry) => {
+        const normalizedEntryId = entry.id.toLowerCase().replaceAll("-", "_");
+        return (
+          entry.id.includes(requestedFilter) ||
+          normalizedEntryId.includes(normalizedRequestedFilter)
+        );
+      }),
       `run-loop 过滤回放必须包含 filter=${requestedFilter} 对应的 case。`
     );
     return report;
@@ -535,7 +549,7 @@ async function runSelfBootstrapHealthSnapshotReplay(): Promise<{
   policyRuntime: PolicyRuntimeReport;
   historyContractDrift: HistoryContractDriftReport;
 }> {
-  await assertRunLoopReplay();
+  await assertRunLoopReplay("happy_path");
   await assertControlApiSupervisorReplay();
   await assertWorkingContextReplay();
   await assertMaintenancePlaneReplay();

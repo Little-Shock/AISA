@@ -256,7 +256,13 @@ class ProgressingAdapter {
       "artifacts",
       "self-bootstrap-sync-fixture"
     );
+    const verifierEvidenceDir = join(
+      input.attempt.workspace_root,
+      "artifacts",
+      "verifier-evidence"
+    );
     await mkdir(selfBootstrapFixtureDir, { recursive: true });
+    await mkdir(verifierEvidenceDir, { recursive: true });
 
     await writeFile(
       join(
@@ -327,6 +333,23 @@ class ProgressingAdapter {
       ].join("\n") + "\n",
       "utf8"
     );
+    await Promise.all([
+      writeFile(
+        join(verifierEvidenceDir, "execution-report.md"),
+        "# execution verification evidence\n\nweb verifier evidence fixture\n",
+        "utf8"
+      ),
+      writeFile(
+        join(verifierEvidenceDir, "runtime.log"),
+        "web verifier evidence fixture\n",
+        "utf8"
+      ),
+      writeFile(
+        join(verifierEvidenceDir, "execution-screenshot.png"),
+        "fixture screenshot placeholder\n",
+        "utf8"
+      )
+    ]);
 
     return {
       writeback: {
@@ -345,6 +368,18 @@ class ProgressingAdapter {
           {
             type: "patch",
             path: "artifacts/demo.patch"
+          },
+          {
+            type: "report",
+            path: "artifacts/verifier-evidence/execution-report.md"
+          },
+          {
+            type: "log",
+            path: "artifacts/verifier-evidence/runtime.log"
+          },
+          {
+            type: "screenshot",
+            path: "artifacts/verifier-evidence/execution-screenshot.png"
           }
         ]
       },

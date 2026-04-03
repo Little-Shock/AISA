@@ -6,6 +6,7 @@ import { isAbsolute, join, relative, resolve } from "node:path";
 import {
   isExecutionAttemptContractReady,
   type AttemptContract,
+  type AttemptPreflightCheck,
   AttemptRuntimeVerificationSchema,
   type Attempt,
   type AttemptRuntimeVerification,
@@ -15,6 +16,7 @@ import {
   type Run,
   type VerificationCommand,
   type VerificationCommandResult,
+  type WorkerArtifact,
   type WorkerWriteback
 } from "@autoresearch/domain";
 import type { AttemptPaths } from "@autoresearch/state-store";
@@ -25,6 +27,7 @@ import {
   SELF_BOOTSTRAP_NEXT_TASK_SOURCE_ASSET_SNAPSHOT_FILE_NAME
 } from "./self-bootstrap-next-task.js";
 import { annotateRuntimeVerificationFailure } from "./failure-policy.js";
+import { getExecutionVerifierKitRegistryEntry } from "./verifier-kit-registry.js";
 
 export interface AttemptRuntimeVerificationOutcome {
   verification: AttemptRuntimeVerification;
@@ -124,6 +127,88 @@ const SELF_BOOTSTRAP_RUNTIME_SYNC_TARGETS = [
 ] as const;
 
 type SelfBootstrapVerificationReport = Record<string, unknown>;
+
+function getVerifierKitRequiredArtifactTypes(
+  verifierKit: ExecutionVerifierKit
+): WorkerArtifact["type"][] {
+  switch (verifierKit) {
+    case "web":
+      return ["screenshot", "report", "log"];
+    case "api":
+      return ["command_result", "test_result", "report", "log"];
+    case "cli":
+      return ["command_result", "test_result", "log"];
+    case "repo":
+    default:
+      return [];
+  }
+}
+
+function buildVerifierKitRuntimeChecks(input: {
+  verifierKit: ExecutionVerifierKit;
+  result: WorkerWriteback;
+}): {
+  checks: AttemptPreflightCheck[];
+  failureCode: RuntimeVerificationFailureCode | null;
+  failureReason: string | null;
+} {
+  const registryEntry = getExecutionVerifierKitRegistryEntry(input.verifierKit);
+  const checks: AttemptPreflightCheck[] = [
+    {
+      code: "verifier_kit_runtime_expectations_loaded",
+      status: "passed",
+      message: registryEntry.runtime_expectations.join(" ")
+    }
+  ];
+  const requiredArtifactTypes = getVerifierKitRequiredArtifactTypes(input.verifierKit);
+  if (requiredArtifactTypes.length === 0) {
+    checks.push({
+      code: "verifier_kit_evidence_present",
+      status: "passed",
+      message:
+        "Repository task accepts git-visible changes plus deterministic replay as runtime evidence."
+    });
+    return {
+      checks,
+      failureCode: null,
+      failureReason: null
+    };
+  }
+
+  const matchedArtifacts = input.result.artifacts.filter((artifact: WorkerArtifact) =>
+    requiredArtifactTypes.includes(artifact.type)
+  );
+  if (matchedArtifacts.length > 0) {
+    checks.push({
+      code: "verifier_kit_evidence_present",
+      status: "passed",
+      message: `${registryEntry.title} left verifier-kit evidence via ${matchedArtifacts
+        .map((artifact: WorkerArtifact) => artifact.type)
+        .join(", ")} artifacts.`
+    });
+    return {
+      checks,
+      failureCode: null,
+      failureReason: null
+    };
+  }
+
+  const failureReason = [
+    `${registryEntry.title} requires worker-declared evidence artifacts after deterministic replay.`,
+    `Expected one of ${requiredArtifactTypes.join(", ")}.`,
+    `Observed ${input.result.artifacts.length > 0 ? input.result.artifacts.map((artifact: WorkerArtifact) => artifact.type).join(", ") : "no worker artifacts"}.`
+  ].join(" ");
+  checks.push({
+    code: "verifier_kit_evidence_present",
+    status: "failed",
+    message: failureReason
+  });
+  return {
+    checks,
+    failureCode: "missing_verifier_kit_evidence",
+    failureReason
+  };
+}
 
 export async function detectLiveRuntimeSourceDrift(input: {
   changedFiles: string[];
@@ -424,6 +509,32 @@ export async function runAttemptRuntimeVerification(input: {
     statusBefore: checkpointPreflight.status_before,
     statusAfter: finalGitStatus
   });
+  const runtimeKitAssessment = buildVerifierKitRuntimeChecks({
+    verifierKit,
+    result: input.result
+  });
+  if (runtimeKitAssessment.failureReason) {
+    return await writeVerificationArtifact(input.attemptPaths, {
+      attempt_id: input.attempt.id,
+      run_id: input.run.id,
+      attempt_type: input.attempt.attempt_type,
+      status: "failed",
+      verifier_kit: verifierKit,
+      repo_root: repoRoot,
+      git_head: gitHead,
+      git_status: finalGitStatus,
+      preexisting_git_status: finalGitStatusDelta.preexistingGitStatus,
+      new_git_status: finalGitStatusDelta.newGitStatus,
+      changed_files: finalGitStatusDelta.changedFiles,
+      failure_code: runtimeKitAssessment.failureCode,
+      failure_reason: runtimeKitAssessment.failureReason,
+      checks: runtimeKitAssessment.checks,
+      command_results: commandResults,
+      synced_self_bootstrap_artifacts: syncedSelfBootstrapArtifacts,
+      created_at: new Date().toISOString()
+    });
+  }
+
   return await writeVerificationArtifact(input.attemptPaths, {
     attempt_id: input.attempt.id,
     run_id: input.run.id,
@@ -438,6 +549,7 @@ export async function runAttemptRuntimeVerification(input: {
     changed_files: finalGitStatusDelta.changedFiles,
     failure_code: null,
     failure_reason: null,
+    checks: runtimeKitAssessment.checks,
     command_results: commandResults,
     synced_self_bootstrap_artifacts: syncedSelfBootstrapArtifacts,
     created_at: new Date().toISOString()

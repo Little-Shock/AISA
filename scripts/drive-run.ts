@@ -196,12 +196,18 @@ export async function driveRun(input: {
     await orchestrator.tick();
     await sleep(input.pollIntervalMs ?? 1500);
     latestSnapshotAfterDrain = await readRunSnapshot(workspacePaths, input.runId);
+    const hasActiveHeartbeats = await hasActiveAttemptHeartbeats(
+      workspacePaths,
+      input.runId,
+      latestSnapshotAfterDrain.attempts
+    );
 
     const completedAttemptCount = countCompletedAttempts(latestSnapshotAfterDrain.attempts);
     if (
       latestSnapshotAfterDrain.current &&
       (latestSnapshotAfterDrain.current.run_status !== "running" ||
-        latestSnapshotAfterDrain.current.waiting_for_human)
+        latestSnapshotAfterDrain.current.waiting_for_human) &&
+      !hasActiveHeartbeats
     ) {
       return {
         ...latestSnapshotAfterDrain,
@@ -213,7 +219,8 @@ export async function driveRun(input: {
 
     if (
       stopAfterCompletedAttempts !== null &&
-      completedAttemptCount >= stopAfterCompletedAttempts
+      completedAttemptCount >= stopAfterCompletedAttempts &&
+      !hasActiveHeartbeats
     ) {
       return {
         ...latestSnapshotAfterDrain,

@@ -7,6 +7,8 @@ import {
   createAttemptContract,
   createAttemptHandoffBundle,
   createAttemptPreflightEvaluation,
+  createRunMailbox,
+  createRunMailboxEntry,
   createRunAutomationControl,
   createCurrentDecision,
   createAttemptRuntimeEvent,
@@ -22,6 +24,7 @@ import {
   ensureWorkspace,
   getCurrentDecision,
   getRunAutomationControl,
+  getRunMailbox,
   getRunPolicyRuntime,
   listAttempts,
   resolveRunPaths,
@@ -41,6 +44,7 @@ import {
   saveAttemptRuntimeVerification,
   saveCurrentDecision,
   saveRun,
+  saveRunMailbox,
   saveRunAutomationControl,
   saveRunPolicyRuntime,
   getRunRuntimeHealthSnapshot
@@ -111,6 +115,29 @@ type VerifierKitProfilePayload = {
   runtime_expectations: string[];
   adversarial_focus: string[];
   source: string;
+};
+
+type RunMailboxEntryPayload = {
+  id: string;
+  run_id: string;
+  thread_id: string;
+  message_type: string;
+  from_slot: string | null;
+  to_slot_or_actor: string;
+  status: string;
+  required_action: string | null;
+  summary: string;
+  source_ref: string | null;
+  source_attempt_id: string | null;
+  created_at: string;
+  resolved_at: string | null;
+};
+
+type RunMailboxPayload = {
+  version: number;
+  run_id: string;
+  entries: RunMailboxEntryPayload[];
+  updated_at: string;
 };
 
 type WorkingContextSourceSnapshotEntryPayload = {
@@ -837,6 +864,50 @@ async function main(): Promise<void> {
     await appendRunJournal(workspacePaths, entry);
   }
   await refreshRunOperatorSurface(workspacePaths, run.id);
+  await saveRunMailbox(
+    workspacePaths,
+    createRunMailbox({
+      run_id: run.id,
+      entries: [
+        createRunMailboxEntry({
+          run_id: run.id,
+          thread_id: "approval:verify-run-detail-policy",
+          message_type: "approval_request",
+          from_slot: "research_or_planning",
+          to_slot_or_actor: "operator",
+          status: "resolved",
+          required_action: "approve_execution_plan",
+          summary: "Execution plan is waiting for approval.",
+          source_ref: `runs/${run.id}/policy-runtime.json`,
+          source_attempt_id: attempt.id,
+          resolved_at: new Date().toISOString()
+        }),
+        createRunMailboxEntry({
+          run_id: run.id,
+          thread_id: "approval:verify-run-detail-policy",
+          message_type: "approval_resolution",
+          to_slot_or_actor: "execution",
+          status: "resolved",
+          summary: "Execution plan approved.",
+          source_ref: `runs/${run.id}/policy-runtime.json`,
+          source_attempt_id: attempt.id,
+          resolved_at: new Date().toISOString()
+        }),
+        createRunMailboxEntry({
+          run_id: run.id,
+          thread_id: `handoff:${blockerAttempt.id}`,
+          message_type: "handoff_ready",
+          from_slot: "final_synthesis",
+          to_slot_or_actor: "operator",
+          status: "open",
+          required_action: "wait_for_human",
+          summary: blockerFailureContext.message,
+          source_ref: `runs/${run.id}/attempts/${blockerAttempt.id}/artifacts/handoff_bundle.json`,
+          source_attempt_id: blockerAttempt.id
+        })
+      ]
+    })
+  );
 
   const attemptPaths = resolveAttemptPaths(workspacePaths, run.id, attempt.id);
   await Promise.all([
@@ -1124,6 +1195,172 @@ async function main(): Promise<void> {
     assert.equal(resumedPolicy?.stage, "approval");
     assert.equal(resumedPolicy?.approval_status, "pending");
     assert.equal(resumedPolicy?.proposed_attempt_type, "execution");
+
+    const approvalRun = createRun({
+      title: "Mailbox approval verification",
+      description: "Ensure approve and reject update the structured mailbox.",
+      success_criteria: ["Resolve approval threads in mailbox."],
+      constraints: [],
+      owner_id: "test-owner",
+      workspace_root: projectRoot
+    });
+    await saveRun(workspacePaths, approvalRun);
+    await saveCurrentDecision(
+      workspacePaths,
+      createCurrentDecision({
+        run_id: approvalRun.id,
+        run_status: "waiting_steer",
+        recommended_next_action: "wait_for_human",
+        recommended_attempt_type: "execution",
+        summary: "Waiting for execution approval.",
+        waiting_for_human: true
+      })
+    );
+    await saveRunPolicyRuntime(
+      workspacePaths,
+      createRunPolicyRuntime({
+        run_id: approvalRun.id,
+        stage: "approval",
+        approval_status: "pending",
+        approval_required: true,
+        proposed_signature: "mailbox-approve-sig",
+        proposed_attempt_type: "execution",
+        proposed_objective: "Approve the pending execution plan.",
+        proposed_success_criteria: ["Execution plan gets approved."],
+        permission_profile: "workspace_write",
+        hook_policy: "enforce_runtime_contract"
+      })
+    );
+    await saveRunMailbox(
+      workspacePaths,
+      createRunMailbox({
+        run_id: approvalRun.id,
+        entries: [
+          createRunMailboxEntry({
+            run_id: approvalRun.id,
+            thread_id: "approval:mailbox-approve-sig",
+            message_type: "approval_request",
+            from_slot: "research_or_planning",
+            to_slot_or_actor: "operator",
+            status: "open",
+            required_action: "approve_execution_plan",
+            summary: "Execution plan is waiting for approval."
+          })
+        ]
+      })
+    );
+    const approvalResponse = await app.inject({
+      method: "POST",
+      url: `/runs/${approvalRun.id}/policy/approve`,
+      payload: {
+        actor: "verify-run-detail-api"
+      }
+    });
+    assert.equal(approvalResponse.statusCode, 200);
+    const approvedMailbox = await getRunMailbox(workspacePaths, approvalRun.id);
+    assert.ok(
+      approvedMailbox?.entries.some(
+        (entry) =>
+          entry.thread_id === "approval:mailbox-approve-sig" &&
+          entry.message_type === "approval_request" &&
+          entry.status === "resolved"
+      ),
+      "policy approve should resolve the open approval_request mailbox thread"
+    );
+    assert.ok(
+      approvedMailbox?.entries.some(
+        (entry) =>
+          entry.thread_id === "approval:mailbox-approve-sig" &&
+          entry.message_type === "approval_resolution" &&
+          entry.to_slot_or_actor === "execution" &&
+          entry.summary === "Execution plan approved."
+      ),
+      "policy approve should append a resolved approval_resolution mailbox entry for execution"
+    );
+
+    const rejectionRun = createRun({
+      title: "Mailbox rejection verification",
+      description: "Ensure reject updates the structured mailbox.",
+      success_criteria: ["Reject the pending execution plan."],
+      constraints: [],
+      owner_id: "test-owner",
+      workspace_root: projectRoot
+    });
+    await saveRun(workspacePaths, rejectionRun);
+    await saveCurrentDecision(
+      workspacePaths,
+      createCurrentDecision({
+        run_id: rejectionRun.id,
+        run_status: "waiting_steer",
+        recommended_next_action: "wait_for_human",
+        recommended_attempt_type: "execution",
+        summary: "Waiting for execution rejection.",
+        waiting_for_human: true
+      })
+    );
+    await saveRunPolicyRuntime(
+      workspacePaths,
+      createRunPolicyRuntime({
+        run_id: rejectionRun.id,
+        stage: "approval",
+        approval_status: "pending",
+        approval_required: true,
+        proposed_signature: "mailbox-reject-sig",
+        proposed_attempt_type: "execution",
+        proposed_objective: "Reject the pending execution plan.",
+        proposed_success_criteria: ["Execution plan gets rejected."],
+        permission_profile: "workspace_write",
+        hook_policy: "enforce_runtime_contract"
+      })
+    );
+    await saveRunMailbox(
+      workspacePaths,
+      createRunMailbox({
+        run_id: rejectionRun.id,
+        entries: [
+          createRunMailboxEntry({
+            run_id: rejectionRun.id,
+            thread_id: "approval:mailbox-reject-sig",
+            message_type: "approval_request",
+            from_slot: "research_or_planning",
+            to_slot_or_actor: "operator",
+            status: "open",
+            required_action: "approve_execution_plan",
+            summary: "Execution plan is waiting for approval."
+          })
+        ]
+      })
+    );
+    const rejectionResponse = await app.inject({
+      method: "POST",
+      url: `/runs/${rejectionRun.id}/policy/reject`,
+      payload: {
+        actor: "verify-run-detail-api",
+        note: "Need another research pass first."
+      }
+    });
+    assert.equal(rejectionResponse.statusCode, 200);
+    const rejectedMailbox = await getRunMailbox(workspacePaths, rejectionRun.id);
+    assert.ok(
+      rejectedMailbox?.entries.some(
+        (entry) =>
+          entry.thread_id === "approval:mailbox-reject-sig" &&
+          entry.message_type === "approval_request" &&
+          entry.status === "resolved"
+      ),
+      "policy reject should resolve the open approval_request mailbox thread"
+    );
+    assert.ok(
+      rejectedMailbox?.entries.some(
+        (entry) =>
+          entry.thread_id === "approval:mailbox-reject-sig" &&
+          entry.message_type === "approval_resolution" &&
+          entry.to_slot_or_actor === "research_or_planning" &&
+          entry.required_action === "replan_execution" &&
+          entry.summary === "Need another research pass first."
+      ),
+      "policy reject should append a resolved approval_resolution mailbox entry for replanning"
+    );
 
     const invalidPolicyRun = createRun({
       title: "Invalid policy surface verification",
@@ -1529,6 +1766,9 @@ async function main(): Promise<void> {
       } | null;
       policy_runtime_ref: string | null;
       policy_runtime_invalid_reason: string | null;
+      run_mailbox: RunMailboxPayload | null;
+      run_mailbox_ref: string | null;
+      run_mailbox_invalid_reason: string | null;
       policy_activity: Array<{
         kind: string;
         status: string;
@@ -2102,6 +2342,15 @@ async function main(): Promise<void> {
     assert.equal(payload.policy_runtime?.proposed_objective, attempt.objective);
     assert.ok(payload.policy_runtime_ref?.endsWith("policy-runtime.json"));
     assert.equal(payload.policy_runtime_invalid_reason, null);
+    assert.equal(payload.run_mailbox_ref, `runs/${run.id}/mailbox.json`);
+    assert.equal(payload.run_mailbox_invalid_reason, null);
+    assert.equal(payload.run_mailbox?.entries.length, 3);
+    assert.equal(payload.run_mailbox?.entries[0]?.message_type, "approval_request");
+    assert.equal(payload.run_mailbox?.entries[0]?.status, "resolved");
+    assert.equal(payload.run_mailbox?.entries[1]?.message_type, "approval_resolution");
+    assert.equal(payload.run_mailbox?.entries[2]?.message_type, "handoff_ready");
+    assert.equal(payload.run_mailbox?.entries[2]?.status, "open");
+    assert.equal(payload.run_mailbox?.entries[2]?.required_action, "wait_for_human");
     assert.equal(payload.policy_activity_ref, `runs/${run.id}/journal.ndjson`);
     assert.equal(payload.policy_activity[0]?.kind, "decision");
     assert.equal(payload.policy_activity[0]?.status, "approved");

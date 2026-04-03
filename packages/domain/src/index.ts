@@ -396,6 +396,38 @@ export const RunPolicyRuntimeSchema = z.object({
   updated_at: z.string().datetime()
 });
 
+export const RunMailboxMessageTypeSchema = z.enum([
+  "approval_request",
+  "approval_resolution",
+  "dispatch_blocked",
+  "handoff_ready"
+]);
+
+export const RunMailboxMessageStatusSchema = z.enum(["open", "resolved"]);
+
+export const RunMailboxEntrySchema = z.object({
+  id: z.string(),
+  run_id: z.string(),
+  thread_id: z.string().min(1),
+  message_type: RunMailboxMessageTypeSchema,
+  from_slot: RunHarnessSlotSchema.nullable().default(null),
+  to_slot_or_actor: z.string().min(1),
+  status: RunMailboxMessageStatusSchema,
+  required_action: z.string().min(1).nullable().default(null),
+  summary: z.string().min(1),
+  source_ref: z.string().min(1).nullable().default(null),
+  source_attempt_id: z.string().nullable().default(null),
+  created_at: z.string().datetime(),
+  resolved_at: z.string().datetime().nullable().default(null)
+});
+
+export const RunMailboxSchema = z.object({
+  version: z.literal(1),
+  run_id: z.string(),
+  entries: z.array(RunMailboxEntrySchema).default([]),
+  updated_at: z.string().datetime()
+});
+
 export const RunWorkingContextTaskRefSchema = z.object({
   task_id: z.string().min(1),
   title: z.string().min(1),
@@ -891,6 +923,7 @@ export const AttemptPreflightCheckSchema = z.object({
 
 export const AttemptPreflightFailureCodeSchema = z.enum([
   "missing_attempt_contract",
+  "slot_binding_mismatch",
   "missing_adversarial_verification_requirement",
   "adversarial_gate_profile_mismatch",
   "missing_done_rubric",
@@ -925,6 +958,7 @@ export const RuntimeVerificationFailureCodeSchema = z.enum([
   "workspace_not_git_repo",
   "missing_preflight_baseline",
   "no_git_changes",
+  "missing_verifier_kit_evidence",
   "verification_command_failed"
 ]);
 
@@ -961,6 +995,7 @@ export const AttemptRuntimeVerificationSchema = z.object({
   changed_files: z.array(z.string().min(1)).default([]),
   failure_code: RuntimeVerificationFailureCodeSchema.nullable(),
   failure_reason: z.string().nullable(),
+  checks: z.array(AttemptPreflightCheckSchema).default([]),
   command_results: z.array(VerificationCommandResultSchema).default([]),
   synced_self_bootstrap_artifacts:
     SyncedSelfBootstrapArtifactsSchema.nullable().default(null),
@@ -976,9 +1011,11 @@ export const AttemptAdversarialVerificationVerdictSchema = z.enum([
 export const AttemptAdversarialVerificationFailureCodeSchema = z.enum([
   "missing_requirement",
   "gate_profile_mismatch",
+  "slot_binding_mismatch",
   "missing_artifact",
   "invalid_artifact",
   "missing_checks",
+  "missing_kit_focus",
   "missing_commands",
   "missing_outputs",
   "verdict_fail",
@@ -1316,6 +1353,10 @@ export type RunPolicyPermissionProfile = z.infer<
 export type RunPolicyHookPolicy = z.infer<typeof RunPolicyHookPolicySchema>;
 export type RunPolicyDangerMode = z.infer<typeof RunPolicyDangerModeSchema>;
 export type RunPolicyRuntime = z.infer<typeof RunPolicyRuntimeSchema>;
+export type RunMailboxMessageType = z.infer<typeof RunMailboxMessageTypeSchema>;
+export type RunMailboxMessageStatus = z.infer<typeof RunMailboxMessageStatusSchema>;
+export type RunMailboxEntry = z.infer<typeof RunMailboxEntrySchema>;
+export type RunMailbox = z.infer<typeof RunMailboxSchema>;
 export type RunWorkingContextTaskRef = z.infer<typeof RunWorkingContextTaskRefSchema>;
 export type RunWorkingContextEvidenceRef = z.infer<
   typeof RunWorkingContextEvidenceRefSchema
@@ -1814,6 +1855,67 @@ export function createAttemptAdversarialVerification(input: {
     output_refs: input.output_refs ?? [],
     source_artifact_path: input.source_artifact_path ?? null,
     created_at: new Date().toISOString()
+  });
+}
+
+export function createRunMailbox(input: {
+  run_id: string;
+  entries?: RunMailboxEntry[];
+}): RunMailbox {
+  return RunMailboxSchema.parse({
+    version: 1,
+    run_id: input.run_id,
+    entries: input.entries ?? [],
+    updated_at: new Date().toISOString()
+  });
+}
+
+export function createRunMailboxEntry(input: {
+  run_id: string;
+  thread_id: string;
+  message_type: RunMailboxMessageType;
+  from_slot?: RunHarnessSlot | null;
+  to_slot_or_actor: string;
+  status: RunMailboxMessageStatus;
+  required_action?: string | null;
+  summary: string;
+  source_ref?: string | null;
+  source_attempt_id?: string | null;
+  created_at?: string;
+  resolved_at?: string | null;
+}): RunMailboxEntry {
+  return RunMailboxEntrySchema.parse({
+    id: createEntityId("mailbox"),
+    run_id: input.run_id,
+    thread_id: input.thread_id,
+    message_type: input.message_type,
+    from_slot: input.from_slot ?? null,
+    to_slot_or_actor: input.to_slot_or_actor,
+    status: input.status,
+    required_action: input.required_action ?? null,
+    summary: input.summary,
+    source_ref: input.source_ref ?? null,
+    source_attempt_id: input.source_attempt_id ?? null,
+    created_at: input.created_at ?? new Date().toISOString(),
+    resolved_at: input.resolved_at ?? null
+  });
+}
+
+export function updateRunMailbox(mailbox: RunMailbox, patch: Partial<RunMailbox>): RunMailbox {
+  return RunMailboxSchema.parse({
+    ...mailbox,
+    ...patch,
+    updated_at: new Date().toISOString()
+  });
+}
+
+export function updateRunMailboxEntry(
+  entry: RunMailboxEntry,
+  patch: Partial<RunMailboxEntry>
+): RunMailboxEntry {
+  return RunMailboxEntrySchema.parse({
+    ...entry,
+    ...patch
   });
 }
 

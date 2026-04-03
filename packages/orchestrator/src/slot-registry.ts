@@ -49,6 +49,34 @@ export type RunHarnessSlotsView = {
   final_synthesis: RunHarnessSlotBindingView;
 };
 
+export type RunHarnessSlotBindingResolution =
+  | {
+      ok: true;
+      slot: RunHarnessSlot;
+      binding: RunHarnessSlotBinding;
+      expected_binding: RunHarnessSlotBinding;
+      source: string;
+      detail: string;
+      failure_semantics: RunHarnessSlotFailureSemantics;
+    }
+  | {
+      ok: false;
+      slot: RunHarnessSlot;
+      binding: RunHarnessSlotBinding;
+      expected_binding: RunHarnessSlotBinding;
+      source: string;
+      detail: string;
+      failure_semantics: RunHarnessSlotFailureSemantics;
+      failure_reason: string;
+    };
+
+const RUN_HARNESS_SLOT_WORKER_ADAPTER_TYPES: Partial<
+  Record<RunHarnessSlot, readonly string[]>
+> = {
+  research_or_planning: ["codex", "fake-codex"],
+  execution: ["codex", "fake-codex"]
+} as const;
+
 const RUN_HARNESS_SLOT_REGISTRY: Record<RunHarnessSlot, RunHarnessSlotRegistryEntry> = {
   research_or_planning: {
     slot: "research_or_planning",
@@ -172,3 +200,57 @@ export function getRunHarnessSlotRegistryEntry(
   return RUN_HARNESS_SLOT_REGISTRY[slot];
 }
 
+export function resolveRunHarnessSlotBinding(input: {
+  run: Run;
+  slot: RunHarnessSlot;
+  workerAdapterType?: string | null;
+}): RunHarnessSlotBindingResolution {
+  const view = buildSlotView(input.run, input.slot);
+  if (!view.binding_matches_registry) {
+    return {
+      ok: false,
+      slot: view.slot,
+      binding: view.binding,
+      expected_binding: view.expected_binding,
+      source: view.source,
+      detail: view.detail,
+      failure_semantics: view.failure_semantics,
+      failure_reason: [
+        `Run harness slot ${view.slot} is bound to ${view.binding},`,
+        `but this stage requires ${view.expected_binding}.`,
+        "Dispatch failed closed before the slot could run."
+      ].join(" ")
+    };
+  }
+
+  const supportedAdapterTypes = RUN_HARNESS_SLOT_WORKER_ADAPTER_TYPES[input.slot] ?? null;
+  if (
+    supportedAdapterTypes &&
+    (!input.workerAdapterType || !supportedAdapterTypes.includes(input.workerAdapterType))
+  ) {
+    return {
+      ok: false,
+      slot: view.slot,
+      binding: view.binding,
+      expected_binding: view.expected_binding,
+      source: view.source,
+      detail: view.detail,
+      failure_semantics: view.failure_semantics,
+      failure_reason: [
+        `Run harness slot ${view.slot} is configured for ${view.binding},`,
+        `but the active worker adapter is ${input.workerAdapterType ?? "missing"}.`,
+        "Dispatch failed closed before the slot could run."
+      ].join(" ")
+    };
+  }
+
+  return {
+    ok: true,
+    slot: view.slot,
+    binding: view.binding,
+    expected_binding: view.expected_binding,
+    source: view.source,
+    detail: view.detail,
+    failure_semantics: view.failure_semantics
+  };
+}

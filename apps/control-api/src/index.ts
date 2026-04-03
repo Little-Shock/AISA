@@ -33,8 +33,11 @@ import {
   lockRunWorkspaceRoot,
   loadSelfBootstrapNextTaskActiveEntry,
   Orchestrator,
+  appendResolvedRunMailboxEntry,
+  buildRunMailboxThreadId,
   readRunBriefView,
   readRunMaintenancePlaneView,
+  resolveRunMailboxThread,
   readRunWorkingContextView,
   repairRunManagedWorkspace,
   ensureRunManagedWorkspace,
@@ -68,9 +71,10 @@ import {
   getReport,
   getRun,
     getRunGovernanceState,
-    getRunAutomationControl,
-    getRunPolicyRuntime,
-    getRunReport,
+  getRunAutomationControl,
+  getRunMailbox,
+  getRunPolicyRuntime,
+  getRunReport,
   getWriteback,
   listAttemptRuntimeEvents,
   listAttempts,
@@ -85,15 +89,16 @@ import {
   resolveRunPaths,
   resolveWorkspacePaths,
   readRunPolicyRuntimeStrict,
+  readRunMailboxStrict,
   saveCurrentDecision,
   saveBranch,
   saveGoal,
   savePlanArtifacts,
-    saveRunPolicyRuntime,
-    saveRun,
-    saveRunAutomationControl,
-    saveRunRuntimeHealthSnapshot,
-    saveRunSteer,
+  saveRunPolicyRuntime,
+  saveRun,
+  saveRunAutomationControl,
+  saveRunRuntimeHealthSnapshot,
+  saveRunSteer,
   saveSteer
 } from "@autoresearch/state-store";
 import { CodexCliWorkerAdapter, loadCodexCliConfig } from "@autoresearch/worker-adapters";
@@ -169,6 +174,12 @@ type RunPolicyRuntimeSurface = {
   policyRuntimeInvalidReason: string | null;
 };
 
+type RunMailboxSurface = {
+  runMailbox: Awaited<ReturnType<typeof getRunMailbox>> | null;
+  runMailboxRef: string | null;
+  runMailboxInvalidReason: string | null;
+};
+
 type RunPolicyActivityItem = {
   id: string;
   ts: string;
@@ -230,6 +241,40 @@ async function readRunPolicyRuntimeSurface(
       policyRuntimeRef,
       policyRuntimeInvalidReason:
         error instanceof Error ? error.message : "Policy runtime is unreadable."
+    };
+  }
+}
+
+async function readRunMailboxSurface(
+  workspacePaths: ReturnType<typeof resolveWorkspacePaths>,
+  runId: string
+): Promise<RunMailboxSurface> {
+  const runMailboxRef = relative(
+    workspacePaths.rootDir,
+    resolveRunPaths(workspacePaths, runId).mailboxFile
+  );
+
+  try {
+    return {
+      runMailbox: await readRunMailboxStrict(workspacePaths, runId),
+      runMailboxRef,
+      runMailboxInvalidReason: null
+    };
+  } catch (error) {
+    const err = error as NodeJS.ErrnoException;
+    if (err?.code === "ENOENT") {
+      return {
+        runMailbox: null,
+        runMailboxRef: null,
+        runMailboxInvalidReason: null
+      };
+    }
+
+    return {
+      runMailbox: null,
+      runMailboxRef,
+      runMailboxInvalidReason:
+        error instanceof Error ? error.message : "Run mailbox is unreadable."
     };
   }
 }
@@ -711,12 +756,13 @@ export async function buildServer(
   };
 
   const buildRunDetailPayload = async (runId: string) => {
-    const [run, current, automation, governance, policyRuntimeSurface, attempts, steers, journal, report, workingContextView, runBriefView, maintenancePlaneView] = await Promise.all([
+    const [run, current, automation, governance, policyRuntimeSurface, runMailboxSurface, attempts, steers, journal, report, workingContextView, runBriefView, maintenancePlaneView] = await Promise.all([
       getRun(workspacePaths, runId),
       getCurrentDecision(workspacePaths, runId),
       getRunAutomationControl(workspacePaths, runId),
       getRunGovernanceState(workspacePaths, runId),
       readRunPolicyRuntimeSurface(workspacePaths, runId),
+      readRunMailboxSurface(workspacePaths, runId),
       listAttempts(workspacePaths, runId),
       listRunSteers(workspacePaths, runId),
       listRunJournal(workspacePaths, runId),
@@ -796,6 +842,9 @@ export async function buildServer(
       policy_runtime: policyRuntimeSurface.policyRuntime,
       policy_runtime_ref: policyRuntimeSurface.policyRuntimeRef,
       policy_runtime_invalid_reason: policyRuntimeSurface.policyRuntimeInvalidReason,
+      run_mailbox: runMailboxSurface.runMailbox,
+      run_mailbox_ref: runMailboxSurface.runMailboxRef,
+      run_mailbox_invalid_reason: runMailboxSurface.runMailboxInvalidReason,
       policy_activity: policyActivity,
       policy_activity_ref: policyActivityRef,
       failure_signal: failureSignal,
@@ -832,11 +881,12 @@ export async function buildServer(
   };
 
   const buildRunSummaryItem = async (run: Awaited<ReturnType<typeof listRuns>>[number]) => {
-    const [current, automation, governance, policyRuntimeSurface, attempts, workingContextView, runBriefView, maintenancePlaneView] = await Promise.all([
+    const [current, automation, governance, policyRuntimeSurface, runMailboxSurface, attempts, workingContextView, runBriefView, maintenancePlaneView] = await Promise.all([
       getCurrentDecision(workspacePaths, run.id),
       getRunAutomationControl(workspacePaths, run.id),
       getRunGovernanceState(workspacePaths, run.id),
       readRunPolicyRuntimeSurface(workspacePaths, run.id),
+      readRunMailboxSurface(workspacePaths, run.id),
       listAttempts(workspacePaths, run.id),
       readRunWorkingContextView(workspacePaths, run.id),
       readRunBriefView(workspacePaths, run.id),
@@ -907,6 +957,9 @@ export async function buildServer(
       policy_runtime: policyRuntimeSurface.policyRuntime,
       policy_runtime_ref: policyRuntimeSurface.policyRuntimeRef,
       policy_runtime_invalid_reason: policyRuntimeSurface.policyRuntimeInvalidReason,
+      run_mailbox: runMailboxSurface.runMailbox,
+      run_mailbox_ref: runMailboxSurface.runMailboxRef,
+      run_mailbox_invalid_reason: runMailboxSurface.runMailboxInvalidReason,
       failure_signal: failureSignal,
       latest_preflight_evaluation: latestAttemptSurface.latest_preflight_evaluation,
       latest_preflight_evaluation_ref: latestAttemptSurface.latest_preflight_evaluation_ref,
@@ -1488,6 +1541,30 @@ export async function buildServer(
 
       await saveRunPolicyRuntime(workspacePaths, nextPolicy);
       await saveCurrentDecision(workspacePaths, nextCurrent);
+      const approvalThreadId = buildRunMailboxThreadId({
+        kind: "approval",
+        value: nextPolicy.proposed_signature ?? "pending"
+      });
+      await resolveRunMailboxThread({
+        paths: workspacePaths,
+        runId,
+        threadId: approvalThreadId,
+        resolutionSummary: "Execution plan approved.",
+        resolvedAt: nextPolicy.approval_decided_at ?? undefined,
+        sourceRef: nextPolicy.source_ref
+      });
+      await appendResolvedRunMailboxEntry({
+        paths: workspacePaths,
+        runId,
+        threadId: approvalThreadId,
+        messageType: "approval_resolution",
+        toSlotOrActor: "execution",
+        summary: "Execution plan approved.",
+        sourceRef: nextPolicy.source_ref,
+        sourceAttemptId: nextPolicy.source_attempt_id,
+        createdAt: nextPolicy.approval_decided_at ?? undefined,
+        resolvedAt: nextPolicy.approval_decided_at ?? undefined
+      });
       await activateRunAutomation(runId, "control-api");
       await appendRunJournal(
         workspacePaths,
@@ -1570,6 +1647,31 @@ export async function buildServer(
 
       await saveRunPolicyRuntime(workspacePaths, nextPolicy);
       await saveCurrentDecision(workspacePaths, nextCurrent);
+      const approvalThreadId = buildRunMailboxThreadId({
+        kind: "approval",
+        value: nextPolicy.proposed_signature ?? "pending"
+      });
+      await resolveRunMailboxThread({
+        paths: workspacePaths,
+        runId,
+        threadId: approvalThreadId,
+        resolutionSummary: rejectionMessage,
+        resolvedAt: nextPolicy.approval_decided_at ?? undefined,
+        sourceRef: nextPolicy.source_ref
+      });
+      await appendResolvedRunMailboxEntry({
+        paths: workspacePaths,
+        runId,
+        threadId: approvalThreadId,
+        messageType: "approval_resolution",
+        toSlotOrActor: "research_or_planning",
+        summary: rejectionMessage,
+        requiredAction: "replan_execution",
+        sourceRef: nextPolicy.source_ref,
+        sourceAttemptId: nextPolicy.source_attempt_id,
+        createdAt: nextPolicy.approval_decided_at ?? undefined,
+        resolvedAt: nextPolicy.approval_decided_at ?? undefined
+      });
       await appendRunJournal(
         workspacePaths,
         createRunJournalEntry({

@@ -203,6 +203,7 @@ import {
 } from "./gate-registry.js";
 import {
   describeRunHarnessSlots as buildRunHarnessSlotsView,
+  resolveRunHarnessSlotBinding,
   type RunHarnessSlotsView
 } from "./slot-registry.js";
 import {
@@ -210,12 +211,20 @@ import {
   describeExecutionVerifierKit as buildExecutionVerifierKitView,
   describeRunDefaultVerifierKit as buildRunDefaultVerifierKitView,
   executionVerifierKitAllowsWorkspaceScriptInference,
+  getExecutionVerifierKitRegistryEntry,
   type ExecutionVerifierKitView
 } from "./verifier-kit-registry.js";
 import {
   describeRunEffectivePolicyBundle as buildRunEffectivePolicyBundleView,
   type RunEffectivePolicyBundleView
 } from "./effective-policy-bundle.js";
+import {
+  appendResolvedRunMailboxEntry,
+  buildRunMailboxThreadId,
+  resolveOpenRunMailboxMessagesByType,
+  resolveRunMailboxThread,
+  upsertOpenRunMailboxEntry
+} from "./run-mailbox.js";
 
 export interface OrchestratorOptions {
   attemptHeartbeatIntervalMs?: number;
@@ -264,6 +273,66 @@ export type RunWorkerEffortView = {
 
 const ADVERSARIAL_VERIFICATION_ARTIFACT_RELATIVE_PATH =
   "artifacts/adversarial-verification.json";
+
+function buildVerifierKitFocusKeywords(verifierKit: ExecutionVerifierKit): string[] {
+  switch (verifierKit) {
+    case "web":
+      return ["ui", "render", "browser", "playwright", "click", "screen", "interaction"];
+    case "api":
+      return ["api", "http", "endpoint", "response", "status", "request", "error"];
+    case "cli":
+      return ["cli", "flag", "stdout", "stderr", "argument", "exit", "command"];
+    case "repo":
+    default:
+      return ["repo", "git", "workspace", "replay", "change"];
+  }
+}
+
+function assessVerifierKitAdversarialFocus(input: {
+  verifierKit: ExecutionVerifierKit;
+  summary: string | null;
+  checks: AttemptAdversarialVerification["checks"];
+  commands: AttemptAdversarialVerification["commands"];
+}): {
+  ok: boolean;
+  check: AttemptAdversarialVerification["checks"][number];
+} {
+  const registryEntry = getExecutionVerifierKitRegistryEntry(input.verifierKit);
+  const keywords = buildVerifierKitFocusKeywords(input.verifierKit);
+  const haystacks = [
+    input.summary ?? "",
+    ...input.checks.map(
+      (check: AttemptAdversarialVerification["checks"][number]) =>
+        `${check.code} ${check.message}`
+    ),
+    ...input.commands.map(
+      (command: AttemptAdversarialVerification["commands"][number]) =>
+        `${command.purpose} ${command.command}`
+    )
+  ]
+    .join("\n")
+    .toLowerCase();
+  const matchedKeyword = keywords.find((keyword) => haystacks.includes(keyword));
+  if (matchedKeyword) {
+    return {
+      ok: true,
+      check: {
+        code: "verifier_kit_focus_present",
+        status: "passed",
+        message: `${registryEntry.title} adversarial focus is grounded by keyword ${matchedKeyword}.`
+      }
+    };
+  }
+
+  return {
+    ok: false,
+    check: {
+      code: "verifier_kit_focus_present",
+      status: "failed",
+      message: `${registryEntry.title} adversarial focus must mention one of: ${keywords.join(", ")}.`
+    }
+  };
+}
 
 type RunDispatchLeaseRecord = {
   version: 1;
@@ -1005,6 +1074,20 @@ export class Orchestrator {
       adversarialVerification: input.adversarialVerification,
       fallbackKit: resolveRunHarnessProfile(input.run).execution.default_verifier_kit
     });
+  }
+
+  private assertRunHarnessSlotBinding(input: {
+    run: Run;
+    slot: "research_or_planning" | "execution";
+  }): void {
+    const resolution = resolveRunHarnessSlotBinding({
+      run: input.run,
+      slot: input.slot,
+      workerAdapterType: this.adapter.type
+    });
+    if (!resolution.ok) {
+      throw new Error(resolution.failure_reason);
+    }
   }
 
   async tick(): Promise<void> {
@@ -1791,6 +1874,21 @@ export class Orchestrator {
         });
 
     await saveRunPolicyRuntime(this.workspacePaths, nextPolicy);
+    await upsertOpenRunMailboxEntry({
+      paths: this.workspacePaths,
+      runId: input.runId,
+      threadId: buildRunMailboxThreadId({
+        kind: "approval",
+        value: input.proposal.signature
+      }),
+      messageType: "approval_request",
+      fromSlot: "research_or_planning",
+      toSlotOrActor: "operator",
+      requiredAction: "approve_execution_plan",
+      summary: message,
+      sourceRef,
+      sourceAttemptId: input.proposal.sourceAttemptId
+    });
     await this.appendRunPolicyHookEvaluation({
       runId: input.runId,
       proposal: input.proposal,
@@ -1906,6 +2004,28 @@ export class Orchestrator {
           source_ref: sourceRef
         });
     await saveRunPolicyRuntime(this.workspacePaths, nextPolicy);
+    const approvalThreadId = buildRunMailboxThreadId({
+      kind: "approval",
+      value: input.proposal.signature
+    });
+    await resolveRunMailboxThread({
+      paths: this.workspacePaths,
+      runId: input.runId,
+      threadId: approvalThreadId,
+      resolutionSummary: input.message,
+      sourceRef
+    });
+    await appendResolvedRunMailboxEntry({
+      paths: this.workspacePaths,
+      runId: input.runId,
+      threadId: approvalThreadId,
+      messageType: "approval_resolution",
+      toSlotOrActor: "research_or_planning",
+      summary: input.message,
+      requiredAction: "replan_execution",
+      sourceRef,
+      sourceAttemptId: input.proposal.sourceAttemptId
+    });
     await this.appendRunPolicyHookEvaluation({
       runId: input.runId,
       proposal: input.proposal,
@@ -1953,6 +2073,10 @@ export class Orchestrator {
     message: string;
     reason: string;
   }): Promise<void> {
+    const sourceRef = this.buildRunPolicySourceRef(
+      input.runId,
+      input.proposal.sourceAttemptId
+    );
     if (input.policy) {
       await saveRunPolicyRuntime(
         this.workspacePaths,
@@ -1962,6 +2086,20 @@ export class Orchestrator {
         })
       );
     }
+    await upsertOpenRunMailboxEntry({
+      paths: this.workspacePaths,
+      runId: input.runId,
+      threadId: buildRunMailboxThreadId({
+        kind: "dispatch_blocked",
+        value: `${input.proposal.signature}:${input.reason}`
+      }),
+      messageType: "dispatch_blocked",
+      toSlotOrActor: "operator",
+      requiredAction: "review_dispatch_blocker",
+      summary: input.message,
+      sourceRef,
+      sourceAttemptId: input.proposal.sourceAttemptId
+    });
 
     const nextCurrent = updateCurrentDecision(input.current, {
       run_status: "waiting_steer",
@@ -2006,10 +2144,7 @@ export class Orchestrator {
             permission_profile: input.proposal.permissionProfile,
             hook_policy: input.proposal.hookPolicy,
             danger_mode: input.proposal.dangerMode,
-            source_ref: this.buildRunPolicySourceRef(
-              input.runId,
-              input.proposal.sourceAttemptId
-            )
+            source_ref: sourceRef
           }
         })
       );
@@ -2606,9 +2741,22 @@ export class Orchestrator {
           }
         })
       );
+      await resolveOpenRunMailboxMessagesByType({
+        paths: this.workspacePaths,
+        runId,
+        messageType: "handoff_ready",
+        resolutionSummary: "A new attempt picked up the run, so the previous handoff mailbox thread is closed."
+      });
       await refreshRunOperatorSurface(this.workspacePaths, runId);
       await startLease.release();
       startLeaseReleased = true;
+
+      if (attempt.attempt_type === "execution") {
+        this.assertRunHarnessSlotBinding({
+          run,
+          slot: "execution"
+        });
+      }
 
       const execution = await this.adapter.runAttemptTask({
         run,
@@ -3003,6 +3151,24 @@ export class Orchestrator {
 
     await saveAttemptReviewPacket(this.workspacePaths, reviewPacket);
     await saveAttemptHandoffBundle(this.workspacePaths, handoffBundle);
+    await upsertOpenRunMailboxEntry({
+      paths: this.workspacePaths,
+      runId: input.runId,
+      threadId: buildRunMailboxThreadId({
+        kind: "handoff",
+        value: input.attempt.id
+      }),
+      messageType: "handoff_ready",
+      fromSlot: "final_synthesis",
+      toSlotOrActor: "operator",
+      requiredAction:
+        handoffBundle.recommended_next_action ?? "review_handoff",
+      summary:
+        handoffBundle.summary ??
+        `Attempt ${input.attempt.id} produced a settled handoff bundle.`,
+      sourceRef: this.buildAttemptHandoffBundleRef(input.runId, input.attempt.id),
+      sourceAttemptId: input.attempt.id
+    });
     await saveAttempt(this.workspacePaths, input.attempt);
     if (input.currentSnapshot) {
       await saveCurrentDecision(this.workspacePaths, input.currentSnapshot);
@@ -3152,6 +3318,10 @@ export class Orchestrator {
       return verification;
     };
     const verifierKit = resolveExecutionVerifierKit(input.attemptContract);
+    const postflightSlotResolution = resolveRunHarnessSlotBinding({
+      run: input.run,
+      slot: "postflight_review"
+    });
     const postflightAdversarialGateMode =
       resolveRunHarnessProfile(input.run).gates.postflight_adversarial.mode;
 
@@ -3243,6 +3413,22 @@ export class Orchestrator {
           verifier_kit: verifierKit,
           summary:
             "Adversarial verification was skipped because the run harness profile disabled the postflight adversarial gate."
+        })
+      );
+    }
+
+    if (!postflightSlotResolution.ok) {
+      return await persist(
+        createAttemptAdversarialVerification({
+          run_id: input.run.id,
+          attempt_id: input.attempt.id,
+          attempt_type: input.attempt.attempt_type,
+          status: "failed",
+          verifier_kit: verifierKit,
+          verdict: "fail",
+          summary: "Postflight adversarial review slot is misconfigured.",
+          failure_code: "slot_binding_mismatch",
+          failure_reason: postflightSlotResolution.failure_reason
         })
       );
     }
@@ -3368,6 +3554,13 @@ export class Orchestrator {
           .filter((value: string | null): value is string => Boolean(value))
       ];
       const uniqueOutputRefs = [...new Set(effectiveOutputRefs)];
+      const kitFocusAssessment = assessVerifierKitAdversarialFocus({
+        verifierKit,
+        summary: normalized.summary,
+        checks: normalized.checks,
+        commands: normalized.commands
+      });
+      const checksWithHarnessFocus = [...normalized.checks, kitFocusAssessment.check];
       const base = {
         run_id: normalized.run_id,
         attempt_id: normalized.attempt_id,
@@ -3375,7 +3568,7 @@ export class Orchestrator {
         verifier_kit: normalized.verifier_kit,
         verdict: normalized.verdict,
         summary: normalized.summary,
-        checks: normalized.checks,
+        checks: checksWithHarnessFocus,
         commands: normalized.commands,
         output_refs: uniqueOutputRefs,
         source_artifact_path: normalized.source_artifact_path
@@ -3414,6 +3607,17 @@ export class Orchestrator {
             failure_code: "missing_commands",
             failure_reason:
               "Adversarial verification artifact must include at least one executed command."
+          })
+        );
+      }
+
+      if (!kitFocusAssessment.ok) {
+        return await persist(
+          createAttemptAdversarialVerification({
+            ...base,
+            status: "failed",
+            failure_code: "missing_kit_focus",
+            failure_reason: kitFocusAssessment.check.message
           })
         );
       }
@@ -3755,6 +3959,14 @@ export class Orchestrator {
     opinions: AttemptReviewerOpinion[];
     opinionRefs: string[];
   }): Promise<Awaited<ReturnType<typeof synthesizeAttemptEvaluation>>> {
+    const synthesisSlotResolution = resolveRunHarnessSlotBinding({
+      run: await getRun(this.workspacePaths, input.reviewInputPacket.run_id),
+      slot: "final_synthesis"
+    });
+    if (!synthesisSlotResolution.ok) {
+      throw new Error(synthesisSlotResolution.failure_reason);
+    }
+
     try {
       return await synthesizeAttemptEvaluation({
         ...input,
@@ -3813,6 +4025,24 @@ export class Orchestrator {
         reviewPacketRef: this.buildAttemptReviewPacketRef(runId, attempt.id)
       });
       await saveAttemptHandoffBundle(this.workspacePaths, nextHandoffBundle);
+      await upsertOpenRunMailboxEntry({
+        paths: this.workspacePaths,
+        runId,
+        threadId: buildRunMailboxThreadId({
+          kind: "handoff",
+          value: attempt.id
+        }),
+        messageType: "handoff_ready",
+        fromSlot: "final_synthesis",
+        toSlotOrActor: "operator",
+        requiredAction:
+          nextHandoffBundle.recommended_next_action ?? "review_handoff",
+        summary:
+          nextHandoffBundle.summary ??
+          `Attempt ${attempt.id} produced a settled handoff bundle.`,
+        sourceRef: this.buildAttemptHandoffBundleRef(runId, attempt.id),
+        sourceAttemptId: attempt.id
+      });
     }
   }
 
@@ -5137,6 +5367,45 @@ export class Orchestrator {
 
     let failureCode: AttemptPreflightFailureCode | null = null;
     let failureReason: string | null = null;
+
+    const preflightSlotResolution = resolveRunHarnessSlotBinding({
+      run: input.run,
+      slot: "preflight_review"
+    });
+    if (preflightSlotResolution.ok) {
+      addCheck(
+        "slot_preflight_review_binding",
+        "passed",
+        `Preflight is running through ${preflightSlotResolution.binding}.`
+      );
+    } else {
+      failureCode = "slot_binding_mismatch";
+      failureReason = preflightSlotResolution.failure_reason;
+      addCheck("slot_preflight_review_binding", "failed", failureReason);
+    }
+
+    const executionSlotResolution = resolveRunHarnessSlotBinding({
+      run: input.run,
+      slot: "execution",
+      workerAdapterType: this.adapter.type
+    });
+    if (executionSlotResolution.ok) {
+      addCheck(
+        "slot_execution_binding",
+        "passed",
+        `Execution will dispatch through ${executionSlotResolution.binding}.`
+      );
+    } else if (!failureReason) {
+      failureCode = "slot_binding_mismatch";
+      failureReason = executionSlotResolution.failure_reason;
+      addCheck("slot_execution_binding", "failed", failureReason);
+    } else {
+      addCheck(
+        "slot_execution_binding",
+        "not_applicable",
+        "execution slot binding check was skipped after an earlier preflight failure."
+      );
+    }
 
     if (input.attemptContract) {
       addCheck("attempt_contract_present", "passed", "attempt_contract.json is present.");
@@ -6958,3 +7227,11 @@ export {
   describeRunEffectivePolicyBundle,
   type RunEffectivePolicyBundleView
 } from "./effective-policy-bundle.js";
+
+export {
+  appendResolvedRunMailboxEntry,
+  buildRunMailboxThreadId,
+  resolveOpenRunMailboxMessagesByType,
+  resolveRunMailboxThread,
+  upsertOpenRunMailboxEntry
+} from "./run-mailbox.js";

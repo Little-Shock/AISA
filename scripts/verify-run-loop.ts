@@ -41,12 +41,15 @@ import {
   getAttemptContext,
   getAttemptEvaluation,
   getAttemptHandoffBundle,
+  getAttemptAdversarialVerification,
   getAttemptEvaluationSynthesisRecord,
   getAttemptPreflightEvaluation,
   getAttemptReviewInputPacket,
   getAttemptReviewPacket,
+  getAttemptRuntimeVerification,
   getCurrentDecision,
   getRun,
+  getRunMailbox,
   getRunPolicyRuntime,
   listAttempts,
   listAttemptReviewOpinions,
@@ -340,7 +343,14 @@ const REVIEW_PACKET_TOP_LEVEL_REQUIRED = [
 
 async function writeAdversarialVerificationFixture(
   workspaceRoot: string,
-  attemptId: string
+  attemptId: string,
+  input: {
+    summary?: string;
+    checkCode?: string;
+    checkMessage?: string;
+    commandPurpose?: string;
+    command?: string;
+  } = {}
 ): Promise<void> {
   const adversarialDir = join(workspaceRoot, "artifacts", "adversarial");
   await mkdir(adversarialDir, { recursive: true });
@@ -350,19 +360,24 @@ async function writeAdversarialVerificationFixture(
     join(workspaceRoot, "artifacts", "adversarial-verification.json"),
     JSON.stringify(
       {
-        summary: "Adversarial verification passed after deterministic replay.",
+        summary:
+          input.summary ??
+          "Adversarial verification passed after deterministic replay.",
         verdict: "pass",
         checks: [
           {
-            code: "non_happy_path",
+            code: input.checkCode ?? "non_happy_path",
             status: "passed",
-            message: "A non-happy-path probe stayed green."
+            message:
+              input.checkMessage ?? "A non-happy-path probe stayed green."
           }
         ],
         commands: [
           {
-            purpose: "probe repeated execution output",
-            command: `test -f execution-change.md && rg -n "^execution change from ${attemptId}$" execution-change.md`,
+            purpose: input.commandPurpose ?? "probe repeated execution output",
+            command:
+              input.command ??
+              `test -f execution-change.md && rg -n "^execution change from ${attemptId}$" execution-change.md`,
             exit_code: 0,
             status: "passed",
             output_ref: "artifacts/adversarial/" + `${attemptId}.txt`
@@ -996,6 +1011,62 @@ class BlockingAdapter {
   }
 }
 
+class VerifierKitFixtureAdapter {
+  readonly type = "fake-codex";
+
+  constructor(
+    private readonly input: {
+      changedFileName: string;
+      workerArtifacts: WorkerWriteback["artifacts"];
+      adversarial: {
+        summary: string;
+        checkCode: string;
+        checkMessage: string;
+        commandPurpose: string;
+      };
+    }
+  ) {}
+
+  async runAttemptTask(input: {
+    attempt: Attempt;
+  }): Promise<{
+    writeback: WorkerWriteback;
+    reportMarkdown: string;
+    exitCode: number;
+  }> {
+    await writeFile(
+      join(input.attempt.workspace_root, this.input.changedFileName),
+      `execution change from ${input.attempt.id}\n`,
+      "utf8"
+    );
+    await writeAdversarialVerificationFixture(input.attempt.workspace_root, input.attempt.id, {
+      summary: this.input.adversarial.summary,
+      checkCode: this.input.adversarial.checkCode,
+      checkMessage: this.input.adversarial.checkMessage,
+      commandPurpose: this.input.adversarial.commandPurpose
+    });
+
+    return {
+      writeback: {
+        summary: "Executed the verifier-kit fixture.",
+        findings: [
+          {
+            type: "fact",
+            content: "Left a deterministic execution change.",
+            evidence: [this.input.changedFileName]
+          }
+        ],
+        questions: [],
+        recommended_next_steps: [],
+        confidence: 0.91,
+        artifacts: this.input.workerArtifacts
+      },
+      reportMarkdown: "# verifier kit fixture",
+      exitCode: 0
+    };
+  }
+}
+
 async function createCodexArgCaptureScript(input: {
   rootDir: string;
   fileName: string;
@@ -1336,6 +1407,144 @@ async function bootstrapRun(rootDir: string, title: string): Promise<{
   return {
     run,
     workspacePaths
+  };
+}
+
+async function seedCreatedExecutionAttempt(input: {
+  run: Run;
+  workspacePaths: ReturnType<typeof resolveWorkspacePaths>;
+  verifierKit: "repo" | "web" | "api" | "cli";
+}): Promise<Attempt> {
+  const attempt = createAttempt({
+    run_id: input.run.id,
+    attempt_type: "execution",
+    worker: "fake-codex",
+    objective: `Exercise ${input.verifierKit} verifier-kit execution behavior.`,
+    success_criteria: ["Leave a verified execution step in the workspace."],
+    workspace_root: input.run.workspace_root
+  });
+  const changedFileName =
+    input.verifierKit === "web"
+      ? "web-change.md"
+      : input.verifierKit === "api"
+        ? "api-change.md"
+        : input.verifierKit === "cli"
+          ? "cli-change.md"
+          : "repo-change.md";
+  await saveAttempt(input.workspacePaths, attempt);
+  await saveAttemptContract(
+    input.workspacePaths,
+    createAttemptContract({
+      attempt_id: attempt.id,
+      run_id: input.run.id,
+      attempt_type: "execution",
+      objective: attempt.objective,
+      success_criteria: attempt.success_criteria,
+      required_evidence: ["Leave replayable execution evidence."],
+      verifier_kit: input.verifierKit,
+      verification_plan: {
+        commands: [
+          {
+            purpose: "confirm the verifier-kit change was written",
+            command: `test -f ${changedFileName} && rg -n "^execution change from ${attempt.id}$" ${changedFileName}`
+          }
+        ]
+      }
+    })
+  );
+  await saveCurrentDecision(
+    input.workspacePaths,
+    updateCurrentDecision(
+      (await getCurrentDecision(input.workspacePaths, input.run.id)) ??
+        createCurrentDecision({
+          run_id: input.run.id,
+          run_status: "running"
+        }),
+      {
+        run_status: "running",
+        latest_attempt_id: attempt.id,
+        recommended_next_action: "continue_execution",
+        recommended_attempt_type: "execution",
+        summary: `Prepared ${input.verifierKit} verifier-kit execution attempt.`,
+        waiting_for_human: false,
+        blocking_reason: null
+      }
+    )
+  );
+  await appendRunJournal(
+    input.workspacePaths,
+    createRunJournalEntry({
+      run_id: input.run.id,
+      attempt_id: attempt.id,
+      type: "attempt.created",
+      payload: {
+        attempt_type: attempt.attempt_type,
+        objective: attempt.objective
+      }
+    })
+  );
+
+  return attempt;
+}
+
+async function runVerifierKitFixtureCase(input: {
+  verifierKit: "repo" | "web" | "api" | "cli";
+  workerArtifacts: WorkerWriteback["artifacts"];
+  adversarial: {
+    summary: string;
+    checkCode: string;
+    checkMessage: string;
+    commandPurpose: string;
+  };
+}): Promise<{
+  run: Run;
+  attempt: Attempt;
+  workspacePaths: ReturnType<typeof resolveWorkspacePaths>;
+}> {
+  const rootDir = await createVerifyTempDir(`aisa-verifier-kit-${input.verifierKit}-`);
+  const bootstrapped = await bootstrapRun(rootDir, `verifier-kit-${input.verifierKit}`);
+  const run = updateRun(bootstrapped.run, {
+    harness_profile: {
+      execution: {
+        default_verifier_kit: input.verifierKit
+      }
+    }
+  });
+  await saveRun(bootstrapped.workspacePaths, run);
+  await initializeGitRepo(rootDir, false);
+  const attempt = await seedCreatedExecutionAttempt({
+    run,
+    workspacePaths: bootstrapped.workspacePaths,
+    verifierKit: input.verifierKit
+  });
+  const orchestrator = new Orchestrator(
+    bootstrapped.workspacePaths,
+    new VerifierKitFixtureAdapter({
+      changedFileName:
+        input.verifierKit === "web"
+          ? "web-change.md"
+          : input.verifierKit === "api"
+            ? "api-change.md"
+            : input.verifierKit === "cli"
+              ? "cli-change.md"
+              : "repo-change.md",
+      workerArtifacts: input.workerArtifacts,
+      adversarial: input.adversarial
+    }) as never,
+    undefined,
+    60_000
+  );
+  await orchestrator.tick();
+  await waitForAttemptActivityToDrain({
+    workspacePaths: bootstrapped.workspacePaths,
+    runId: run.id,
+    failureMessage: `verifier-kit ${input.verifierKit}: attempt activity did not settle`
+  });
+
+  return {
+    run,
+    attempt,
+    workspacePaths: bootstrapped.workspacePaths
   };
 }
 
@@ -2077,6 +2286,130 @@ async function assertRunHarnessSlotBindingMismatchDetection(): Promise<void> {
   assert.equal(slots.preflight_review.binding_status, "aligned");
 }
 
+async function assertRunHarnessExecutionSlotBindingBlocksDispatchDuringTick(): Promise<void> {
+  const rootDir = await createVerifyTempDir("aisa-harness-slot-dispatch-");
+  const bootstrapped = await bootstrapRun(rootDir, "harness-slot-dispatch");
+  const run = updateRun(bootstrapped.run, {
+    harness_profile: {
+      execution: {
+        default_verifier_kit: "repo"
+      },
+      slots: {
+        execution: {
+          binding: "attempt_dispatch_preflight"
+        }
+      }
+    }
+  });
+  await saveRun(bootstrapped.workspacePaths, run);
+  await initializeGitRepo(rootDir, false);
+  const attempt = await seedCreatedExecutionAttempt({
+    run,
+    workspacePaths: bootstrapped.workspacePaths,
+    verifierKit: "repo"
+  });
+  const adapter = new ContextCaptureAdapter();
+  const orchestrator = new Orchestrator(
+    bootstrapped.workspacePaths,
+    adapter as never,
+    undefined,
+    60_000
+  );
+
+  await orchestrator.tick();
+  await waitForAttemptActivityToDrain({
+    workspacePaths: bootstrapped.workspacePaths,
+    runId: run.id,
+    failureMessage: "slot binding dispatch blocker should settle after one failed attempt"
+  });
+
+  const [persistedAttempt, preflight, mailbox] = await Promise.all([
+    listAttempts(bootstrapped.workspacePaths, run.id),
+    getAttemptPreflightEvaluation(bootstrapped.workspacePaths, run.id, attempt.id),
+    getRunMailbox(bootstrapped.workspacePaths, run.id)
+  ]);
+
+  assert.equal(
+    adapter.capturedCalls.length,
+    0,
+    "run_harness_execution_slot_binding_blocks_dispatch_during_tick: worker dispatch must stay blocked when execution slot binding drifts"
+  );
+  assert.equal(
+    persistedAttempt[0]?.status,
+    "failed",
+    "run_harness_execution_slot_binding_blocks_dispatch_during_tick: attempt should fail closed"
+  );
+  assert.equal(
+    preflight?.failure_code,
+    "slot_binding_mismatch",
+    "run_harness_execution_slot_binding_blocks_dispatch_during_tick: preflight should record slot_binding_mismatch"
+  );
+  assert.ok(
+    preflight?.checks.some(
+      (check) =>
+        check.code === "slot_execution_binding" &&
+        check.status === "failed" &&
+        check.message.includes("attempt_dispatch_preflight")
+    ),
+    "run_harness_execution_slot_binding_blocks_dispatch_during_tick: preflight should persist the failing execution slot check"
+  );
+  assert.ok(
+    mailbox?.entries.some(
+      (entry) =>
+        entry.message_type === "handoff_ready" &&
+        entry.thread_id === `handoff:${attempt.id}` &&
+        entry.source_attempt_id === attempt.id
+    ),
+    "run_harness_execution_slot_binding_blocks_dispatch_during_tick: settled failure should still emit a structured handoff mailbox entry"
+  );
+}
+
+async function assertApprovalRequestMailboxThreadCreated(): Promise<void> {
+  const rootDir = await createVerifyTempDir("aisa-mailbox-approval-");
+  const { run, workspacePaths } = await bootstrapRun(rootDir, "mailbox-approval");
+  await initializeGitRepo(rootDir, false);
+  const orchestrator = new Orchestrator(
+    workspacePaths,
+    new ScenarioAdapter("happy_path") as never,
+    undefined,
+    60_000
+  );
+
+  await settle({
+    orchestrator,
+    workspacePaths,
+    runId: run.id,
+    iterations: 3,
+    autoApprovePendingExecution: false
+  });
+  await waitForAttemptActivityToDrain({
+    workspacePaths,
+    runId: run.id,
+    failureMessage: "approval mailbox case should settle after research finishes"
+  });
+
+  const [policyRuntime, mailbox] = await Promise.all([
+    getRunPolicyRuntime(workspacePaths, run.id),
+    getRunMailbox(workspacePaths, run.id)
+  ]);
+  assert.equal(
+    policyRuntime?.approval_status,
+    "pending",
+    "approval_request_mailbox_thread_created: research completion should leave a pending approval"
+  );
+  assert.ok(policyRuntime?.proposed_signature, "expected a proposed signature");
+  assert.ok(
+    mailbox?.entries.some(
+      (entry) =>
+        entry.message_type === "approval_request" &&
+        entry.status === "open" &&
+        entry.thread_id === `approval:${policyRuntime?.proposed_signature}` &&
+        entry.required_action === "approve_execution_plan"
+    ),
+    "approval_request_mailbox_thread_created: pending execution approval should create an open approval mailbox thread"
+  );
+}
+
 async function assertRunHarnessAdversarialGateProfileControlsContractAndPreflight(): Promise<void> {
   const rootDir = await createVerifyTempDir("aisa-harness-adversarial-gate-");
   const workspacePaths = resolveWorkspacePaths(rootDir);
@@ -2260,6 +2593,187 @@ async function assertVerifierKitScopesDefaultInference(): Promise<void> {
     explicitApiContract.verifier_kit,
     "api",
     "verifier_kit_scopes_default_inference: explicit verifier kits should survive contract creation"
+  );
+}
+
+async function assertVerifierKitRuntimeAndPostflightMatrix(): Promise<void> {
+  const matrix = [
+    {
+      verifierKit: "repo" as const,
+      workerArtifacts: [
+        { type: "patch", path: "artifacts/diff.patch" },
+        { type: "test_result", path: "artifacts/adversarial-verification.json" }
+      ],
+      adversarial: {
+        summary: "Repo replay probe stayed green after the workspace change.",
+        checkCode: "repo_replay_probe",
+        checkMessage: "The repo replay stayed green.",
+        commandPurpose: "probe repo replay output"
+      }
+    },
+    {
+      verifierKit: "web" as const,
+      workerArtifacts: [
+        { type: "patch", path: "artifacts/diff.patch" },
+        { type: "screenshot", path: "artifacts/ui-state.png" },
+        { type: "test_result", path: "artifacts/adversarial-verification.json" }
+      ],
+      adversarial: {
+        summary: "UI interaction probe stayed green after the browser render check.",
+        checkCode: "ui_interaction_probe",
+        checkMessage: "The browser interaction path stayed green.",
+        commandPurpose: "probe browser ui interaction output"
+      }
+    },
+    {
+      verifierKit: "api" as const,
+      workerArtifacts: [
+        { type: "patch", path: "artifacts/diff.patch" },
+        { type: "command_result", path: "artifacts/http-response.log" },
+        { type: "test_result", path: "artifacts/adversarial-verification.json" }
+      ],
+      adversarial: {
+        summary: "API error-path probe stayed green across the endpoint response boundary.",
+        checkCode: "api_error_path_probe",
+        checkMessage: "The API error path stayed green.",
+        commandPurpose: "probe api endpoint response output"
+      }
+    },
+    {
+      verifierKit: "cli" as const,
+      workerArtifacts: [
+        { type: "patch", path: "artifacts/diff.patch" },
+        { type: "command_result", path: "artifacts/cli-output.log" },
+        { type: "test_result", path: "artifacts/adversarial-verification.json" }
+      ],
+      adversarial: {
+        summary: "CLI bad-flag probe kept stderr and exit behavior stable.",
+        checkCode: "cli_bad_flag_probe",
+        checkMessage: "The CLI bad-flag path stayed green.",
+        commandPurpose: "probe cli flag stderr output"
+      }
+    }
+  ];
+
+  for (const scenario of matrix) {
+    const { run, attempt, workspacePaths } = await runVerifierKitFixtureCase(scenario);
+    const [runtimeVerification, adversarialVerification, handoffBundle] = await Promise.all([
+      getAttemptRuntimeVerification(workspacePaths, run.id, attempt.id),
+      getAttemptAdversarialVerification(workspacePaths, run.id, attempt.id),
+      getAttemptHandoffBundle(workspacePaths, run.id, attempt.id)
+    ]);
+
+    assert.equal(
+      runtimeVerification?.status,
+      "passed",
+      `verifier_kit_runtime_and_postflight_matrix: ${scenario.verifierKit} runtime verification should pass`
+    );
+    assert.ok(
+      runtimeVerification?.checks.some(
+        (check) =>
+          check.code === "verifier_kit_runtime_expectations_loaded" &&
+          check.status === "passed"
+      ),
+      `verifier_kit_runtime_and_postflight_matrix: ${scenario.verifierKit} should persist runtime expectation checks`
+    );
+    assert.ok(
+      runtimeVerification?.checks.some(
+        (check) =>
+          check.code === "verifier_kit_evidence_present" &&
+          check.status === "passed"
+      ),
+      `verifier_kit_runtime_and_postflight_matrix: ${scenario.verifierKit} should persist runtime evidence checks`
+    );
+    assert.equal(
+      adversarialVerification?.status,
+      "passed",
+      `verifier_kit_runtime_and_postflight_matrix: ${scenario.verifierKit} adversarial verification should pass`
+    );
+    assert.ok(
+      adversarialVerification?.checks.some(
+        (check) =>
+          check.code === "verifier_kit_focus_present" &&
+          check.status === "passed"
+      ),
+      `verifier_kit_runtime_and_postflight_matrix: ${scenario.verifierKit} should persist postflight focus checks`
+    );
+    assert.equal(
+      handoffBundle?.runtime_verification?.verifier_kit,
+      scenario.verifierKit,
+      `verifier_kit_runtime_and_postflight_matrix: ${scenario.verifierKit} handoff should carry the runtime verifier kit`
+    );
+    assert.equal(
+      handoffBundle?.adversarial_verification?.verifier_kit,
+      scenario.verifierKit,
+      `verifier_kit_runtime_and_postflight_matrix: ${scenario.verifierKit} handoff should carry the adversarial verifier kit`
+    );
+  }
+}
+
+async function assertVerifierKitSpecificFailuresFailClosed(): Promise<void> {
+  const webMissingEvidence = await runVerifierKitFixtureCase({
+    verifierKit: "web",
+    workerArtifacts: [
+      { type: "patch", path: "artifacts/diff.patch" },
+      { type: "test_result", path: "artifacts/adversarial-verification.json" }
+    ],
+    adversarial: {
+      summary: "UI interaction probe stayed green after the browser render check.",
+      checkCode: "ui_interaction_probe",
+      checkMessage: "The browser interaction path stayed green.",
+      commandPurpose: "probe browser ui interaction output"
+    }
+  });
+  const webRuntime = await getAttemptRuntimeVerification(
+    webMissingEvidence.workspacePaths,
+    webMissingEvidence.run.id,
+    webMissingEvidence.attempt.id
+  );
+  assert.equal(
+    webRuntime?.failure_code,
+    "missing_verifier_kit_evidence",
+    "verifier_kit_specific_failures_fail_closed: web tasks must fail when runtime evidence lacks screenshot/report/log artifacts"
+  );
+  assert.ok(
+    webRuntime?.checks.some(
+      (check) =>
+        check.code === "verifier_kit_evidence_present" &&
+        check.status === "failed"
+    ),
+    "verifier_kit_specific_failures_fail_closed: web runtime failure should explain the missing verifier-kit evidence"
+  );
+
+  const cliMissingFocus = await runVerifierKitFixtureCase({
+    verifierKit: "cli",
+    workerArtifacts: [
+      { type: "patch", path: "artifacts/diff.patch" },
+      { type: "command_result", path: "artifacts/cli-output.log" },
+      { type: "test_result", path: "artifacts/adversarial-verification.json" }
+    ],
+    adversarial: {
+      summary: "Non happy path probe stayed green.",
+      checkCode: "generic_probe",
+      checkMessage: "A generic probe stayed green.",
+      commandPurpose: "probe repeated execution output"
+    }
+  });
+  const cliAdversarial = await getAttemptAdversarialVerification(
+    cliMissingFocus.workspacePaths,
+    cliMissingFocus.run.id,
+    cliMissingFocus.attempt.id
+  );
+  assert.equal(
+    cliAdversarial?.failure_code,
+    "missing_kit_focus",
+    "verifier_kit_specific_failures_fail_closed: cli tasks must fail when adversarial evidence does not mention cli-specific focus"
+  );
+  assert.ok(
+    cliAdversarial?.checks.some(
+      (check) =>
+        check.code === "verifier_kit_focus_present" &&
+        check.status === "failed"
+    ),
+    "verifier_kit_specific_failures_fail_closed: cli postflight failure should persist the missing focus check"
   );
 }
 
@@ -5823,6 +6337,34 @@ async function main(): Promise<void> {
     }
 
     try {
+      await assertRunHarnessExecutionSlotBindingBlocksDispatchDuringTick();
+      results.push({
+        id: "run_harness_execution_slot_binding_blocks_dispatch_during_tick",
+        status: "pass"
+      });
+    } catch (error) {
+      results.push({
+        id: "run_harness_execution_slot_binding_blocks_dispatch_during_tick",
+        status: "fail",
+        error: error instanceof Error ? error.message : String(error)
+      });
+    }
+
+    try {
+      await assertApprovalRequestMailboxThreadCreated();
+      results.push({
+        id: "approval_request_mailbox_thread_created",
+        status: "pass"
+      });
+    } catch (error) {
+      results.push({
+        id: "approval_request_mailbox_thread_created",
+        status: "fail",
+        error: error instanceof Error ? error.message : String(error)
+      });
+    }
+
+    try {
       await assertRunHarnessAdversarialGateProfileControlsContractAndPreflight();
       results.push({
         id: "run_harness_adversarial_gate_profile_controls_contract_and_preflight",
@@ -5845,6 +6387,34 @@ async function main(): Promise<void> {
     } catch (error) {
       results.push({
         id: "verifier_kit_scopes_default_inference",
+        status: "fail",
+        error: error instanceof Error ? error.message : String(error)
+      });
+    }
+
+    try {
+      await assertVerifierKitRuntimeAndPostflightMatrix();
+      results.push({
+        id: "verifier_kit_runtime_and_postflight_matrix",
+        status: "pass"
+      });
+    } catch (error) {
+      results.push({
+        id: "verifier_kit_runtime_and_postflight_matrix",
+        status: "fail",
+        error: error instanceof Error ? error.message : String(error)
+      });
+    }
+
+    try {
+      await assertVerifierKitSpecificFailuresFailClosed();
+      results.push({
+        id: "verifier_kit_specific_failures_fail_closed",
+        status: "pass"
+      });
+    } catch (error) {
+      results.push({
+        id: "verifier_kit_specific_failures_fail_closed",
         status: "fail",
         error: error instanceof Error ? error.message : String(error)
       });

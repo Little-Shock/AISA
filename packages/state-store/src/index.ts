@@ -32,6 +32,7 @@ import type {
   EvalSpec,
   Goal,
   RunMaintenancePlane,
+  RunMailbox,
   RunPolicyRuntime,
   RunGovernanceState,
   RunAutomationControl,
@@ -68,6 +69,7 @@ import {
   GoalSchema,
   RunAutomationControlSchema,
   RunBriefSchema,
+  RunMailboxSchema,
   RunPolicyRuntimeSchema,
   RunGovernanceStateSchema,
   RunMaintenancePlaneSchema,
@@ -119,6 +121,7 @@ export interface RunPaths {
   currentFile: string;
   automationFile: string;
   policyFile: string;
+  mailboxFile: string;
   runBriefFile: string;
   workingContextFile: string;
   governanceFile: string;
@@ -179,6 +182,7 @@ export function resolveRunPaths(paths: WorkspacePaths, runId: string): RunPaths 
     currentFile: join(runDir, "current.json"),
     automationFile: join(runDir, "automation.json"),
     policyFile: join(runDir, "policy-runtime.json"),
+    mailboxFile: join(runDir, "mailbox.json"),
     runBriefFile: join(runDir, "run-brief.json"),
     workingContextFile: join(runDir, "working-context.json"),
     governanceFile: join(runDir, "governance.json"),
@@ -598,6 +602,14 @@ export async function saveRunPolicyRuntime(
   await writeJsonFile(runPaths.policyFile, policyRuntime);
 }
 
+export async function saveRunMailbox(
+  paths: WorkspacePaths,
+  mailbox: RunMailbox
+): Promise<void> {
+  const runPaths = await ensureRunDirectories(paths, mailbox.run_id);
+  await writeJsonFile(runPaths.mailboxFile, mailbox);
+}
+
 export async function getRunPolicyRuntime(
   paths: WorkspacePaths,
   runId: string
@@ -610,6 +622,26 @@ export async function getRunPolicyRuntime(
   } catch {
     return null;
   }
+}
+
+export async function getRunMailbox(
+  paths: WorkspacePaths,
+  runId: string
+): Promise<RunMailbox | null> {
+  try {
+    const mailbox = await readJsonFile<RunMailbox>(resolveRunPaths(paths, runId).mailboxFile);
+    return RunMailboxSchema.parse(mailbox);
+  } catch {
+    return null;
+  }
+}
+
+export async function readRunMailboxStrict(
+  paths: WorkspacePaths,
+  runId: string
+): Promise<RunMailbox> {
+  const mailbox = await readJsonFile<RunMailbox>(resolveRunPaths(paths, runId).mailboxFile);
+  return RunMailboxSchema.parse(mailbox);
 }
 
 export async function readRunPolicyRuntimeStrict(
