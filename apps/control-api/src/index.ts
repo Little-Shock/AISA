@@ -160,6 +160,227 @@ function buildPlanningPolicyRuntime(runId: string) {
   });
 }
 
+type RunPolicyRuntimeSurface = {
+  policyRuntime: Awaited<ReturnType<typeof getRunPolicyRuntime>> | null;
+  policyRuntimeRef: string | null;
+  policyRuntimeInvalidReason: string | null;
+};
+
+type RunPolicyActivityItem = {
+  id: string;
+  ts: string;
+  kind: "decision" | "hook";
+  status:
+    | "pending"
+    | "approved"
+    | "rejected"
+    | "blocked"
+    | "active"
+    | "cleared"
+    | "passed"
+    | "failed";
+  headline: string;
+  summary: string | null;
+  actor: string | null;
+  note: string | null;
+  proposed_signature: string | null;
+  attempt_type: string | null;
+  objective: string | null;
+  permission_profile: string | null;
+  hook_policy: string | null;
+  danger_mode: string | null;
+  verifier_kit: string | null;
+  verification_commands: string[];
+  source_attempt_id: string | null;
+  source_ref: string | null;
+  evidence_ref: string | null;
+  hook_key: string | null;
+};
+
+async function readRunPolicyRuntimeSurface(
+  workspacePaths: ReturnType<typeof resolveWorkspacePaths>,
+  runId: string
+): Promise<RunPolicyRuntimeSurface> {
+  const policyRuntimeRef = relative(
+    workspacePaths.rootDir,
+    resolveRunPaths(workspacePaths, runId).policyFile
+  );
+
+  try {
+    return {
+      policyRuntime: await readRunPolicyRuntimeStrict(workspacePaths, runId),
+      policyRuntimeRef,
+      policyRuntimeInvalidReason: null
+    };
+  } catch (error) {
+    const err = error as NodeJS.ErrnoException;
+    if (err?.code === "ENOENT") {
+      return {
+        policyRuntime: null,
+        policyRuntimeRef: null,
+        policyRuntimeInvalidReason: null
+      };
+    }
+
+    return {
+      policyRuntime: null,
+      policyRuntimeRef,
+      policyRuntimeInvalidReason:
+        error instanceof Error ? error.message : "Policy runtime is unreadable."
+    };
+  }
+}
+
+function buildRunPolicyActivity(input: {
+  workspacePaths: ReturnType<typeof resolveWorkspacePaths>;
+  runId: string;
+  journal: Awaited<ReturnType<typeof listRunJournal>>;
+}): {
+  policyActivity: RunPolicyActivityItem[];
+  policyActivityRef: string | null;
+} {
+  const coerceStringArray = (value: unknown): string[] =>
+    Array.isArray(value)
+      ? value.filter((item: unknown): item is string => typeof item === "string")
+      : [];
+  const policyActivityRef = relative(
+    input.workspacePaths.rootDir,
+    resolveRunPaths(input.workspacePaths, input.runId).journalFile
+  );
+  const policyEntries: RunPolicyActivityItem[] = input.journal
+    .filter((entry) =>
+      [
+        "run.policy.approval_requested",
+        "run.policy.approved",
+        "run.policy.rejected",
+        "run.policy.dispatch_blocked",
+        "run.policy.killswitch_enabled",
+        "run.policy.killswitch_cleared",
+        "run.policy.hook_evaluated"
+      ].includes(entry.type)
+    )
+    .slice(-8)
+    .reverse()
+    .map((entry) => {
+      const payload = entry.payload;
+      if (entry.type === "run.policy.hook_evaluated") {
+        const hookStatus =
+          payload.hook_status === "failed" ? "failed" : "passed";
+        return {
+          id: entry.id,
+          ts: entry.ts,
+          kind: "hook" as const,
+          status: hookStatus,
+          headline:
+            hookStatus === "failed"
+              ? "Policy hook blocked the proposal."
+              : "Policy hook accepted the proposal.",
+          summary:
+            typeof payload.message === "string" ? payload.message : null,
+          actor: null,
+          note: null,
+          proposed_signature:
+            typeof payload.proposed_signature === "string"
+              ? payload.proposed_signature
+              : null,
+          attempt_type:
+            typeof payload.attempt_type === "string" ? payload.attempt_type : null,
+          objective:
+            typeof payload.objective === "string" ? payload.objective : null,
+          permission_profile:
+            typeof payload.permission_profile === "string"
+              ? payload.permission_profile
+              : null,
+          hook_policy:
+            typeof payload.hook_policy === "string" ? payload.hook_policy : null,
+          danger_mode:
+            typeof payload.danger_mode === "string" ? payload.danger_mode : null,
+          verifier_kit:
+            typeof payload.verifier_kit === "string" ? payload.verifier_kit : null,
+          verification_commands: coerceStringArray(payload.verification_commands),
+          source_attempt_id: entry.attempt_id,
+          source_ref:
+            typeof payload.source_ref === "string" ? payload.source_ref : null,
+          evidence_ref:
+            typeof payload.evidence_ref === "string" ? payload.evidence_ref : null,
+          hook_key:
+            typeof payload.hook_key === "string" ? payload.hook_key : null
+        };
+      }
+
+      const status: RunPolicyActivityItem["status"] =
+        entry.type === "run.policy.approval_requested"
+          ? "pending"
+          : entry.type === "run.policy.approved"
+            ? "approved"
+            : entry.type === "run.policy.rejected"
+              ? "rejected"
+              : entry.type === "run.policy.killswitch_enabled"
+                ? "active"
+                : entry.type === "run.policy.killswitch_cleared"
+                  ? "cleared"
+                  : "blocked";
+
+      const headline =
+        entry.type === "run.policy.approval_requested"
+          ? "Execution plan is waiting for leader approval."
+          : entry.type === "run.policy.approved"
+            ? "Execution plan was approved."
+            : entry.type === "run.policy.rejected"
+              ? "Execution plan was rejected."
+              : entry.type === "run.policy.killswitch_enabled"
+                ? "Policy killswitch is active."
+                : entry.type === "run.policy.killswitch_cleared"
+                  ? "Policy killswitch was cleared."
+                  : "Policy runtime blocked dispatch.";
+
+      return {
+        id: entry.id,
+        ts: entry.ts,
+        kind: "decision" as const,
+        status,
+        headline,
+        summary:
+          typeof payload.message === "string"
+            ? payload.message
+            : typeof payload.note === "string"
+              ? payload.note
+              : null,
+        actor: typeof payload.actor === "string" ? payload.actor : null,
+        note: typeof payload.note === "string" ? payload.note : null,
+        proposed_signature:
+          typeof payload.proposed_signature === "string"
+            ? payload.proposed_signature
+            : null,
+        attempt_type:
+          typeof payload.attempt_type === "string" ? payload.attempt_type : null,
+        objective:
+          typeof payload.objective === "string" ? payload.objective : null,
+        permission_profile:
+          typeof payload.permission_profile === "string"
+            ? payload.permission_profile
+            : null,
+        hook_policy:
+          typeof payload.hook_policy === "string" ? payload.hook_policy : null,
+        danger_mode:
+          typeof payload.danger_mode === "string" ? payload.danger_mode : null,
+        verifier_kit:
+          typeof payload.verifier_kit === "string" ? payload.verifier_kit : null,
+        verification_commands: coerceStringArray(payload.verification_commands),
+        source_attempt_id: entry.attempt_id,
+        source_ref:
+          typeof payload.source_ref === "string" ? payload.source_ref : null,
+        evidence_ref: null,
+        hook_key: null
+      };
+    });
+
+  return {
+    policyActivity: policyEntries,
+    policyActivityRef: policyEntries.length > 0 ? policyActivityRef : null
+  };
+}
+
 export async function buildServer(
   options: {
     workspaceRoot?: string;
@@ -486,12 +707,12 @@ export async function buildServer(
   };
 
   const buildRunDetailPayload = async (runId: string) => {
-    const [run, current, automation, governance, policyRuntime, attempts, steers, journal, report, workingContextView, runBriefView, maintenancePlaneView] = await Promise.all([
+    const [run, current, automation, governance, policyRuntimeSurface, attempts, steers, journal, report, workingContextView, runBriefView, maintenancePlaneView] = await Promise.all([
       getRun(workspacePaths, runId),
       getCurrentDecision(workspacePaths, runId),
       getRunAutomationControl(workspacePaths, runId),
       getRunGovernanceState(workspacePaths, runId),
-      getRunPolicyRuntime(workspacePaths, runId),
+      readRunPolicyRuntimeSurface(workspacePaths, runId),
       listAttempts(workspacePaths, runId),
       listRunSteers(workspacePaths, runId),
       listRunJournal(workspacePaths, runId),
@@ -506,6 +727,11 @@ export async function buildServer(
       runId,
       current,
       attempts
+    });
+    const { policyActivity, policyActivityRef } = buildRunPolicyActivity({
+      workspacePaths,
+      runId,
+      journal
     });
     const automationView =
       automation ??
@@ -543,10 +769,11 @@ export async function buildServer(
       current,
       automation: automationView,
       governance,
-      policy_runtime: policyRuntime,
-      policy_runtime_ref: policyRuntime
-        ? relative(workspacePaths.rootDir, resolveRunPaths(workspacePaths, runId).policyFile)
-        : null,
+      policy_runtime: policyRuntimeSurface.policyRuntime,
+      policy_runtime_ref: policyRuntimeSurface.policyRuntimeRef,
+      policy_runtime_invalid_reason: policyRuntimeSurface.policyRuntimeInvalidReason,
+      policy_activity: policyActivity,
+      policy_activity_ref: policyActivityRef,
       failure_signal:
         runBriefView.run_brief?.failure_signal ??
         latestAttemptSurface.latest_handoff_bundle?.failure_signal ??
@@ -580,11 +807,11 @@ export async function buildServer(
   };
 
   const buildRunSummaryItem = async (run: Awaited<ReturnType<typeof listRuns>>[number]) => {
-    const [current, automation, governance, policyRuntime, attempts, workingContextView, runBriefView, maintenancePlaneView] = await Promise.all([
+    const [current, automation, governance, policyRuntimeSurface, attempts, workingContextView, runBriefView, maintenancePlaneView] = await Promise.all([
       getCurrentDecision(workspacePaths, run.id),
       getRunAutomationControl(workspacePaths, run.id),
       getRunGovernanceState(workspacePaths, run.id),
-      getRunPolicyRuntime(workspacePaths, run.id),
+      readRunPolicyRuntimeSurface(workspacePaths, run.id),
       listAttempts(workspacePaths, run.id),
       readRunWorkingContextView(workspacePaths, run.id),
       readRunBriefView(workspacePaths, run.id),
@@ -632,10 +859,9 @@ export async function buildServer(
       current,
       automation: automationView,
       governance,
-      policy_runtime: policyRuntime,
-      policy_runtime_ref: policyRuntime
-        ? relative(workspacePaths.rootDir, resolveRunPaths(workspacePaths, run.id).policyFile)
-        : null,
+      policy_runtime: policyRuntimeSurface.policyRuntime,
+      policy_runtime_ref: policyRuntimeSurface.policyRuntimeRef,
+      policy_runtime_invalid_reason: policyRuntimeSurface.policyRuntimeInvalidReason,
       failure_signal:
         runBriefView.run_brief?.failure_signal ??
         latestAttemptSurface.latest_handoff_bundle?.failure_signal ??
@@ -1134,10 +1360,12 @@ export async function buildServer(
       const policyRuntime = await readRunPolicyRuntimeStrict(workspacePaths, runId);
       if (
         policyRuntime.approval_required !== true ||
-        policyRuntime.proposed_attempt_type !== "execution"
+        policyRuntime.proposed_attempt_type !== "execution" ||
+        policyRuntime.approval_status !== "pending" ||
+        policyRuntime.stage !== "approval"
       ) {
         return reply.code(409).send({
-          message: "There is no execution plan waiting for approval."
+          message: "There is no pending execution plan waiting for approval."
         });
       }
 
@@ -1211,10 +1439,12 @@ export async function buildServer(
       const policyRuntime = await readRunPolicyRuntimeStrict(workspacePaths, runId);
       if (
         policyRuntime.approval_required !== true ||
-        policyRuntime.proposed_attempt_type !== "execution"
+        policyRuntime.proposed_attempt_type !== "execution" ||
+        policyRuntime.approval_status !== "pending" ||
+        policyRuntime.stage !== "approval"
       ) {
         return reply.code(409).send({
-          message: "There is no execution plan waiting for rejection."
+          message: "There is no pending execution plan waiting for rejection."
         });
       }
 
@@ -1261,6 +1491,184 @@ export async function buildServer(
         })
       );
       await refreshRunOperatorSurface(workspacePaths, runId);
+
+      return {
+        current: nextCurrent,
+        policy_runtime: nextPolicy
+      };
+    } catch (error) {
+      return reply.code(409).send({
+        message:
+          error instanceof Error
+            ? error.message
+            : "Policy runtime is missing or unreadable."
+      });
+    }
+  });
+
+  app.post("/runs/:runId/policy/killswitch/enable", async (request, reply) => {
+    const { runId } = request.params as { runId: string };
+    const body =
+      (request.body as
+        | {
+            actor?: string;
+            reason?: string;
+            note?: string;
+          }
+        | undefined) ?? {};
+
+    try {
+      const [run, policySurface, attempts] = await Promise.all([
+        getRun(workspacePaths, runId),
+        readRunPolicyRuntimeSurface(workspacePaths, runId),
+        listAttempts(workspacePaths, runId)
+      ]);
+      if (policySurface.policyRuntimeInvalidReason) {
+        return reply.code(409).send({
+          message: policySurface.policyRuntimeInvalidReason
+        });
+      }
+
+      const current =
+        (await getCurrentDecision(workspacePaths, runId)) ??
+        createCurrentDecision({
+          run_id: runId,
+          run_status: "draft"
+        });
+      const reason =
+        body.reason?.trim() ||
+        body.note?.trim() ||
+        "Execution is paused because the policy killswitch is active.";
+      const actor = body.actor?.trim() || "control-api";
+      const basePolicy = policySurface.policyRuntime ?? buildPlanningPolicyRuntime(runId);
+      const preservedBlockingReason =
+        basePolicy.blocking_reason && basePolicy.blocking_reason !== basePolicy.killswitch_reason
+          ? basePolicy.blocking_reason
+          : reason;
+      const nextPolicy = updateRunPolicyRuntime(basePolicy, {
+        run_id: runId,
+        killswitch_active: true,
+        killswitch_reason: reason,
+        blocking_reason: preservedBlockingReason,
+        last_decision: "killswitch_enabled"
+      });
+
+      await saveRunPolicyRuntime(workspacePaths, nextPolicy);
+      const hasActiveAttempt = attempts.some((attempt) =>
+        ["created", "queued", "running"].includes(attempt.status)
+      );
+      const nextCurrent = hasActiveAttempt
+        ? current
+        : updateCurrentDecision(current, {
+            run_status: "waiting_steer",
+            waiting_for_human: true,
+            recommended_next_action: "wait_for_human",
+            blocking_reason: reason,
+            summary: reason
+          });
+      if (!hasActiveAttempt) {
+        await saveCurrentDecision(workspacePaths, nextCurrent);
+      }
+      await appendRunJournal(
+        workspacePaths,
+        createRunJournalEntry({
+          run_id: runId,
+          attempt_id: current.latest_attempt_id,
+          type: "run.policy.killswitch_enabled",
+          payload: {
+            actor,
+            note: body.note?.trim() || null,
+            message: reason,
+            proposed_signature: nextPolicy.proposed_signature,
+            source_ref: nextPolicy.source_ref
+          }
+        })
+      );
+      await refreshRunOperatorSurface(workspacePaths, run.id);
+
+      return {
+        current: nextCurrent,
+        policy_runtime: nextPolicy
+      };
+    } catch {
+      return reply.code(404).send({ message: `Run ${runId} not found` });
+    }
+  });
+
+  app.post("/runs/:runId/policy/killswitch/clear", async (request, reply) => {
+    const { runId } = request.params as { runId: string };
+    const body =
+      (request.body as
+        | {
+            actor?: string;
+            note?: string;
+          }
+        | undefined) ?? {};
+
+    try {
+      const policyRuntime = await readRunPolicyRuntimeStrict(workspacePaths, runId);
+      if (!policyRuntime.killswitch_active) {
+        return reply.code(409).send({
+          message: "The policy killswitch is not active."
+        });
+      }
+
+      const [run, attempts] = await Promise.all([
+        getRun(workspacePaths, runId),
+        listAttempts(workspacePaths, runId)
+      ]);
+      const current =
+        (await getCurrentDecision(workspacePaths, runId)) ??
+        createCurrentDecision({
+          run_id: runId,
+          run_status: "draft"
+        });
+      const actor = body.actor?.trim() || "control-api";
+      const restoredBlockingReason =
+        policyRuntime.blocking_reason === policyRuntime.killswitch_reason
+          ? null
+          : policyRuntime.blocking_reason;
+      const nextPolicy = updateRunPolicyRuntime(policyRuntime, {
+        killswitch_active: false,
+        killswitch_reason: null,
+        blocking_reason: restoredBlockingReason,
+        last_decision: "killswitch_cleared"
+      });
+      await saveRunPolicyRuntime(workspacePaths, nextPolicy);
+
+      const hasActiveAttempt = attempts.some((attempt) =>
+        ["created", "queued", "running"].includes(attempt.status)
+      );
+      const clearMessage =
+        restoredBlockingReason ?? "Policy killswitch cleared. Relaunch when ready.";
+      const nextCurrent = hasActiveAttempt
+        ? current
+        : updateCurrentDecision(current, {
+            run_status: "waiting_steer",
+            waiting_for_human: true,
+            recommended_next_action: "wait_for_human",
+            blocking_reason: restoredBlockingReason,
+            summary: clearMessage
+          });
+      if (!hasActiveAttempt) {
+        await saveCurrentDecision(workspacePaths, nextCurrent);
+      }
+      await appendRunJournal(
+        workspacePaths,
+        createRunJournalEntry({
+          run_id: runId,
+          attempt_id: current.latest_attempt_id,
+          type: "run.policy.killswitch_cleared",
+          payload: {
+            actor,
+            note: body.note?.trim() || null,
+            message: clearMessage,
+            proposed_signature: nextPolicy.proposed_signature,
+            source_ref: nextPolicy.source_ref
+          }
+        })
+      );
+      await refreshRunOperatorSurface(workspacePaths, run.id);
 
       return {
         current: nextCurrent,

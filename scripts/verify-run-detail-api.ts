@@ -232,6 +232,45 @@ async function main(): Promise<void> {
       source_attempt_id: attempt.id
     })
   );
+  await appendRunJournal(
+    workspacePaths,
+    createRunJournalEntry({
+      run_id: run.id,
+      attempt_id: attempt.id,
+      type: "run.policy.hook_evaluated",
+      payload: {
+        proposed_signature: "verify-run-detail-policy",
+        attempt_type: "execution",
+        objective: attempt.objective,
+        verifier_kit: "api",
+        verification_commands: ["pnpm verify:runtime"],
+        permission_profile: "workspace_write",
+        hook_policy: "enforce_runtime_contract",
+        danger_mode: "forbid",
+        hook_key: "dangerous_verification_commands",
+        hook_status: "passed",
+        message: "Replay commands passed the destructive command guard.",
+        source_ref: `runs/${run.id}/attempts/${attempt.id}/result.json`
+      }
+    })
+  );
+  await appendRunJournal(
+    workspacePaths,
+    createRunJournalEntry({
+      run_id: run.id,
+      attempt_id: attempt.id,
+      type: "run.policy.approved",
+      payload: {
+        actor: "verify-run-detail-api",
+        note: "Approved after replay-safe contract review.",
+        proposed_signature: "verify-run-detail-policy",
+        permission_profile: "workspace_write",
+        hook_policy: "enforce_runtime_contract",
+        danger_mode: "forbid",
+        source_ref: `runs/${run.id}/attempts/${attempt.id}/result.json`
+      }
+    })
+  );
   await saveAttempt(workspacePaths, attempt);
   const attemptContract = createAttemptContract({
     attempt_id: attempt.id,
@@ -983,6 +1022,78 @@ async function main(): Promise<void> {
     assert.equal(resumedPolicy?.approval_status, "pending");
     assert.equal(resumedPolicy?.proposed_attempt_type, "execution");
 
+    const invalidPolicyRun = createRun({
+      title: "Invalid policy surface verification",
+      description: "Ensure unreadable policy runtime is surfaced instead of silently swallowed.",
+      success_criteria: ["Expose the invalid policy state in run detail and summary."],
+      constraints: [],
+      owner_id: "test-owner",
+      workspace_root: projectRoot
+    });
+    await saveRun(workspacePaths, invalidPolicyRun);
+    await saveCurrentDecision(
+      workspacePaths,
+      createCurrentDecision({
+        run_id: invalidPolicyRun.id,
+        run_status: "waiting_steer",
+        summary: "Invalid policy should be surfaced."
+      })
+    );
+    await writeFile(resolveRunPaths(workspacePaths, invalidPolicyRun.id).policyFile, "{\n", "utf8");
+    await refreshRunOperatorSurface(workspacePaths, invalidPolicyRun.id);
+    const invalidPolicyResponse = await app.inject({
+      method: "GET",
+      url: `/runs/${invalidPolicyRun.id}`
+    });
+    assert.equal(invalidPolicyResponse.statusCode, 200);
+    const invalidPolicyPayload = invalidPolicyResponse.json() as {
+      policy_runtime: null;
+      policy_runtime_ref: string | null;
+      policy_runtime_invalid_reason: string | null;
+      maintenance_plane: {
+        outputs: Array<{
+          key: string;
+          status: string;
+          summary: string | null;
+        }>;
+        signal_sources: Array<{
+          key: string;
+          summary: string | null;
+        }>;
+      } | null;
+    };
+    assert.equal(invalidPolicyPayload.policy_runtime, null);
+    assert.ok(invalidPolicyPayload.policy_runtime_ref?.endsWith("policy-runtime.json"));
+    assert.match(invalidPolicyPayload.policy_runtime_invalid_reason ?? "", /policy|json|parse/i);
+    assert.ok(
+      invalidPolicyPayload.maintenance_plane?.outputs.some(
+        (item) => item.key === "policy_runtime" && item.status === "degraded"
+      )
+    );
+    assert.ok(
+      invalidPolicyPayload.maintenance_plane?.signal_sources.some(
+        (item) =>
+          item.key === "policy_runtime" &&
+          (item.summary ?? "").includes(
+            invalidPolicyPayload.policy_runtime_invalid_reason ?? ""
+          )
+      )
+    );
+    const invalidSummaryResponse = await app.inject({
+      method: "GET",
+      url: "/runs"
+    });
+    assert.equal(invalidSummaryResponse.statusCode, 200);
+    const invalidSummaryPayload = invalidSummaryResponse.json() as {
+      runs: Array<{
+        run: { id: string };
+        policy_runtime_invalid_reason: string | null;
+      }>;
+    };
+    const invalidRunSummary =
+      invalidSummaryPayload.runs.find((item) => item.run.id === invalidPolicyRun.id) ?? null;
+    assert.match(invalidRunSummary?.policy_runtime_invalid_reason ?? "", /policy|json|parse/i);
+
     const staleRun = createRun({
       title: "Stale run health verification",
       description: "Ensure control-api exposes zombie running attempts clearly.",
@@ -1163,10 +1274,19 @@ async function main(): Promise<void> {
       policy_runtime: {
         stage: string;
         approval_status: string;
+        proposed_signature: string | null;
         proposed_attempt_type: string | null;
         proposed_objective: string | null;
       } | null;
       policy_runtime_ref: string | null;
+      policy_runtime_invalid_reason: string | null;
+      policy_activity: Array<{
+        kind: string;
+        status: string;
+        headline: string;
+        proposed_signature: string | null;
+      }>;
+      policy_activity_ref: string | null;
       failure_signal: {
         failure_class: string;
         failure_code: string | null;
@@ -1469,6 +1589,8 @@ async function main(): Promise<void> {
     assert.deepEqual(
       completedDetail?.journal.map((entry) => entry.type),
       [
+        "run.policy.hook_evaluated",
+        "run.policy.approved",
         "attempt.created",
         "attempt.started",
         "attempt.completed",
@@ -1564,9 +1686,21 @@ async function main(): Promise<void> {
     assert.equal(payload.automation?.mode, "active");
     assert.equal(payload.policy_runtime?.stage, "execution");
     assert.equal(payload.policy_runtime?.approval_status, "approved");
+    assert.equal(payload.policy_runtime?.proposed_signature, "verify-run-detail-policy");
     assert.equal(payload.policy_runtime?.proposed_attempt_type, "execution");
     assert.equal(payload.policy_runtime?.proposed_objective, attempt.objective);
     assert.ok(payload.policy_runtime_ref?.endsWith("policy-runtime.json"));
+    assert.equal(payload.policy_runtime_invalid_reason, null);
+    assert.equal(payload.policy_activity_ref, `runs/${run.id}/journal.ndjson`);
+    assert.equal(payload.policy_activity[0]?.kind, "decision");
+    assert.equal(payload.policy_activity[0]?.status, "approved");
+    assert.equal(payload.policy_activity[0]?.headline, "Execution plan was approved.");
+    assert.equal(
+      payload.policy_activity[0]?.proposed_signature,
+      "verify-run-detail-policy"
+    );
+    assert.equal(payload.policy_activity[1]?.kind, "hook");
+    assert.equal(payload.policy_activity[1]?.status, "passed");
     assert.equal(payload.failure_signal?.failure_class, "preflight_blocked");
     assert.equal(
       payload.failure_signal?.failure_code,
@@ -1824,6 +1958,7 @@ async function main(): Promise<void> {
           approval_status: string;
         } | null;
         policy_runtime_ref: string | null;
+        policy_runtime_invalid_reason: string | null;
         maintenance_plane: {
           blocked_diagnosis: {
             status: string;
@@ -1882,6 +2017,7 @@ async function main(): Promise<void> {
     assert.equal(runSummary?.policy_runtime?.stage, "execution");
     assert.equal(runSummary?.policy_runtime?.approval_status, "approved");
     assert.ok(runSummary?.policy_runtime_ref?.endsWith("policy-runtime.json"));
+    assert.equal(runSummary?.policy_runtime_invalid_reason, null);
     assert.equal(runSummary?.run_health.status, "waiting_steer");
     assert.equal(runSummary?.working_context_degraded.is_degraded, false);
     assert.equal(runSummary?.failure_signal?.failure_class, "preflight_blocked");

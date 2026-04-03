@@ -165,6 +165,37 @@ export type RunPolicyRuntime = {
   updated_at: string;
 } | null;
 
+export type RunPolicyActivityItem = {
+  id: string;
+  ts: string;
+  kind: "decision" | "hook";
+  status:
+    | "pending"
+    | "approved"
+    | "rejected"
+    | "blocked"
+    | "active"
+    | "cleared"
+    | "passed"
+    | "failed";
+  headline: string;
+  summary: string | null;
+  actor: string | null;
+  note: string | null;
+  proposed_signature: string | null;
+  attempt_type: string | null;
+  objective: string | null;
+  permission_profile: string | null;
+  hook_policy: string | null;
+  danger_mode: string | null;
+  verifier_kit: string | null;
+  verification_commands: string[];
+  source_attempt_id: string | null;
+  source_ref: string | null;
+  evidence_ref: string | null;
+  hook_key: string | null;
+};
+
 export type RunHarnessProfileView = {
   version: number;
   execution: {
@@ -458,6 +489,7 @@ export type RunSummaryItem = {
   governance: RunGovernanceState;
   policy_runtime: RunPolicyRuntime;
   policy_runtime_ref: string | null;
+  policy_runtime_invalid_reason: string | null;
   failure_signal: RunFailureSignal;
   latest_preflight_evaluation: RunLatestPreflightEvaluation;
   latest_preflight_evaluation_ref: string | null;
@@ -522,6 +554,9 @@ export type RunDetail = {
   governance: RunGovernanceState;
   policy_runtime: RunPolicyRuntime;
   policy_runtime_ref: string | null;
+  policy_runtime_invalid_reason: string | null;
+  policy_activity: RunPolicyActivityItem[];
+  policy_activity_ref: string | null;
   failure_signal: RunFailureSignal;
   latest_preflight_evaluation: RunLatestPreflightEvaluation;
   latest_preflight_evaluation_ref: string | null;

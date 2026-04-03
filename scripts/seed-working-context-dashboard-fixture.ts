@@ -50,6 +50,8 @@ export type SeedWorkingContextDashboardFixtureResult = {
   expected_task_focus: string;
   expected_policy_stage: "approval";
   expected_policy_approval_status: "pending";
+  expected_policy_signature: string;
+  expected_policy_activity_headline: string;
 };
 
 export async function seedWorkingContextDashboardFixture(input: {
@@ -230,6 +232,47 @@ export async function seedWorkingContextDashboardFixture(input: {
       source_attempt_id: attempt.id
     })
   );
+  await appendRunJournal(
+    workspacePaths,
+    createRunJournalEntry({
+      run_id: run.id,
+      attempt_id: attempt.id,
+      type: "run.policy.hook_evaluated",
+      payload: {
+        proposed_signature: "fixture-policy-signature",
+        attempt_type: "execution",
+        objective: attempt.objective,
+        verifier_kit: "web",
+        verification_commands: ["pnpm verify:dashboard-control-surface"],
+        permission_profile: "workspace_write",
+        hook_policy: "enforce_runtime_contract",
+        danger_mode: "forbid",
+        hook_key: "dangerous_verification_commands",
+        hook_status: "passed",
+        message: "Replay commands passed the destructive command guard.",
+        source_ref: `runs/${run.id}/attempts/${attempt.id}/result.json`
+      }
+    })
+  );
+  await appendRunJournal(
+    workspacePaths,
+    createRunJournalEntry({
+      run_id: run.id,
+      attempt_id: attempt.id,
+      type: "run.policy.approval_requested",
+      payload: {
+        proposed_signature: "fixture-policy-signature",
+        attempt_type: "execution",
+        objective: attempt.objective,
+        verifier_kit: "web",
+        verification_commands: ["pnpm verify:dashboard-control-surface"],
+        permission_profile: "workspace_write",
+        hook_policy: "enforce_runtime_contract",
+        danger_mode: "forbid",
+        source_ref: `runs/${run.id}/attempts/${attempt.id}/result.json`
+      }
+    })
+  );
   const preflightEvaluation = createAttemptPreflightEvaluation({
     run_id: run.id,
     attempt_id: attempt.id,
@@ -309,7 +352,9 @@ export async function seedWorkingContextDashboardFixture(input: {
     expected_verifier_kit: "web",
     expected_task_focus: attempt.objective,
     expected_policy_stage: "approval",
-    expected_policy_approval_status: "pending"
+    expected_policy_approval_status: "pending",
+    expected_policy_signature: "fixture-policy-signature",
+    expected_policy_activity_headline: "Execution plan is waiting for leader approval."
   };
 }
 

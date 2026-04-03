@@ -105,6 +105,16 @@ async function main(): Promise<void> {
       runDetail.policy_runtime?.approval_status,
       fixture.expected_policy_approval_status
     );
+    assert.equal(
+      runDetail.policy_runtime?.proposed_signature,
+      fixture.expected_policy_signature
+    );
+    assert.equal(runDetail.policy_runtime_invalid_reason, null);
+    assert.equal(runDetail.policy_activity[0]?.headline, fixture.expected_policy_activity_headline);
+    assert.equal(
+      runDetail.policy_activity[0]?.proposed_signature,
+      fixture.expected_policy_signature
+    );
     assert.equal(runDetail.failure_signal?.failure_class, fixture.expected_failure_class);
     assert.equal(runDetail.failure_signal?.failure_code, fixture.expected_failure_code);
     assert.equal(
@@ -271,14 +281,30 @@ async function main(): Promise<void> {
         onNoteChange={() => {}}
         onApprove={() => {}}
         onReject={() => {}}
+        onEnableKillswitch={() => {}}
+        onClearKillswitch={() => {}}
         approveBusy={false}
         rejectBusy={false}
+        killswitchEnableBusy={false}
+        killswitchClearBusy={false}
       />
     );
     assert.match(policyMarkup, /Policy Lane/);
     assert.match(policyMarkup, /批准 Execution/);
     assert.match(policyMarkup, /打回重规划/);
+    assert.match(policyMarkup, /开启 Killswitch/);
+    assert.match(policyMarkup, /清除 Killswitch/);
     assert.match(policyMarkup, /Harness Profile/);
+    assert.match(policyMarkup, /待批执行契约/);
+    assert.match(policyMarkup, /最近策略活动/);
+    assert.match(
+      policyMarkup,
+      new RegExp(escapeRegExp(fixture.expected_policy_signature))
+    );
+    assert.match(
+      policyMarkup,
+      new RegExp(escapeRegExp(fixture.expected_policy_activity_headline))
+    );
     assert.match(policyMarkup, /Registry Contract/);
     assert.match(policyMarkup, /codex_cli_execution_worker/);
     assert.match(policyMarkup, /binding status: aligned/);

@@ -336,6 +336,7 @@ export default function Page() {
               governance: nextDetail.governance,
               policy_runtime: nextDetail.policy_runtime,
               policy_runtime_ref: nextDetail.policy_runtime_ref,
+              policy_runtime_invalid_reason: nextDetail.policy_runtime_invalid_reason,
               latest_preflight_evaluation: nextDetail.latest_preflight_evaluation,
               latest_preflight_evaluation_ref: nextDetail.latest_preflight_evaluation_ref,
               latest_runtime_verification: nextDetail.latest_runtime_verification,
@@ -704,6 +705,67 @@ export default function Page() {
     }
   }
 
+  async function enableRunPolicyKillswitch(runId: string) {
+    setBusy(`policy-killswitch-enable:${runId}`);
+    setError(null);
+
+    try {
+      const response = await fetch(`${apiBaseUrl}/runs/${runId}/policy/killswitch/enable`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          actor: "dashboard-ui",
+          reason: runPolicyNote.trim() || undefined,
+          note: runPolicyNote.trim() || undefined
+        })
+      });
+
+      if (!response.ok) {
+        throw new Error(await readErrorMessage(response, "开启 killswitch 失败"));
+      }
+
+      setRunPolicyNote("");
+      await refreshDashboard({
+        goalId: selectedGoalId,
+        runId
+      });
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function clearRunPolicyKillswitch(runId: string) {
+    setBusy(`policy-killswitch-clear:${runId}`);
+    setError(null);
+
+    try {
+      const response = await fetch(`${apiBaseUrl}/runs/${runId}/policy/killswitch/clear`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          actor: "dashboard-ui",
+          note: runPolicyNote.trim() || undefined
+        })
+      });
+
+      if (!response.ok) {
+        throw new Error(await readErrorMessage(response, "清除 killswitch 失败"));
+      }
+
+      setRunPolicyNote("");
+      await refreshDashboard({
+        goalId: selectedGoalId,
+        runId
+      });
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setBusy(null);
+    }
+  }
+
   return (
     <main className="dashboard-shell">
       <div className="dashboard-frame space-y-6">
@@ -815,8 +877,20 @@ export default function Page() {
                         onReject={() => {
                           void rejectRunPolicy(runDetail.run.id);
                         }}
+                        onEnableKillswitch={() => {
+                          void enableRunPolicyKillswitch(runDetail.run.id);
+                        }}
+                        onClearKillswitch={() => {
+                          void clearRunPolicyKillswitch(runDetail.run.id);
+                        }}
                         approveBusy={busy === `policy-approve:${runDetail.run.id}`}
                         rejectBusy={busy === `policy-reject:${runDetail.run.id}`}
+                        killswitchEnableBusy={
+                          busy === `policy-killswitch-enable:${runDetail.run.id}`
+                        }
+                        killswitchClearBusy={
+                          busy === `policy-killswitch-clear:${runDetail.run.id}`
+                        }
                       />
                       <RunVerificationPanel selectedRunAttemptDetail={selectedRunAttemptDetail} />
                       <RunSteerPanel

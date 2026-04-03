@@ -192,7 +192,13 @@ async function driveOrchestratorUntil(input: {
   throw new Error(`Timed out after ${timeoutMs}ms while driving orchestrator`);
 }
 
-async function bootstrapExecutionApprovalRun(title: string): Promise<{
+async function bootstrapExecutionApprovalRun(
+  title: string,
+  options?: {
+    verificationCommand?: string;
+    verificationPurpose?: string;
+  }
+): Promise<{
   runtimeDataRoot: string;
   workspaceRoot: string;
   workspacePaths: ReturnType<typeof resolveWorkspacePaths>;
@@ -294,8 +300,9 @@ async function bootstrapExecutionApprovalRun(title: string): Promise<{
       verification_plan: {
         commands: [
           {
-            purpose: "confirm the approved artifact exists",
-            command: "test -f approved-execution.txt"
+            purpose:
+              options?.verificationPurpose ?? "confirm the approved artifact exists",
+            command: options?.verificationCommand ?? "test -f approved-execution.txt"
           }
         ]
       }
@@ -557,6 +564,216 @@ async function verifyRejectRouteForcesResearchReplan(): Promise<void> {
   assert.equal(latestAttempt?.attempt_type, "research");
 }
 
+async function verifyApproveAndRejectRequirePendingApproval(): Promise<void> {
+  const { runtimeDataRoot, workspaceRoot, workspacePaths, run } =
+    await bootstrapExecutionApprovalRun("pending-only-routes");
+  const orchestrator = await createScenarioOrchestrator({
+    runtimeDataRoot,
+    workspaceRoot,
+    workspacePaths
+  });
+  await waitForPendingApproval(orchestrator, workspacePaths, run.id);
+
+  const app = await buildServer({
+    runtimeDataRoot,
+    workspaceRoot,
+    startOrchestrator: false
+  });
+  try {
+    const rejectResponse = await app.inject({
+      method: "POST",
+      url: `/runs/${run.id}/policy/reject`,
+      payload: {
+        actor: "policy-verifier",
+        note: "Need more evidence before execution."
+      }
+    });
+    assert.equal(rejectResponse.statusCode, 200);
+
+    const approveAfterReject = await app.inject({
+      method: "POST",
+      url: `/runs/${run.id}/policy/approve`,
+      payload: {
+        actor: "policy-verifier",
+        note: "This should stay blocked."
+      }
+    });
+    assert.equal(approveAfterReject.statusCode, 409);
+    assert.match(approveAfterReject.body, /pending/i);
+  } finally {
+    await app.close();
+  }
+
+  const secondScenario = await bootstrapExecutionApprovalRun("approved-cannot-reject");
+  const secondOrchestrator = await createScenarioOrchestrator({
+    runtimeDataRoot: secondScenario.runtimeDataRoot,
+    workspaceRoot: secondScenario.workspaceRoot,
+    workspacePaths: secondScenario.workspacePaths
+  });
+  await waitForPendingApproval(
+    secondOrchestrator,
+    secondScenario.workspacePaths,
+    secondScenario.run.id
+  );
+
+  const secondApp = await buildServer({
+    runtimeDataRoot: secondScenario.runtimeDataRoot,
+    workspaceRoot: secondScenario.workspaceRoot,
+    startOrchestrator: false
+  });
+  try {
+    const approveResponse = await secondApp.inject({
+      method: "POST",
+      url: `/runs/${secondScenario.run.id}/policy/approve`,
+      payload: {
+        actor: "policy-verifier",
+        note: "Execution plan is approved."
+      }
+    });
+    assert.equal(approveResponse.statusCode, 200);
+
+    const rejectAfterApprove = await secondApp.inject({
+      method: "POST",
+      url: `/runs/${secondScenario.run.id}/policy/reject`,
+      payload: {
+        actor: "policy-verifier",
+        note: "This should not revert the approved plan."
+      }
+    });
+    assert.equal(rejectAfterApprove.statusCode, 409);
+    assert.match(rejectAfterApprove.body, /pending/i);
+  } finally {
+    await secondApp.close();
+  }
+}
+
+async function verifyDangerousVerificationCommandsFailClosed(): Promise<void> {
+  const {
+    runtimeDataRoot,
+    workspaceRoot,
+    workspacePaths,
+    run
+  } = await bootstrapExecutionApprovalRun("dangerous-verification", {
+    verificationPurpose: "dangerous replay that should be blocked",
+    verificationCommand: "git reset --hard HEAD"
+  });
+  const orchestrator = await createScenarioOrchestrator({
+    runtimeDataRoot,
+    workspaceRoot,
+    workspacePaths
+  });
+  await driveOrchestratorUntil({
+    orchestrator,
+    predicate: async () => {
+      const policy = await getRunPolicyRuntime(workspacePaths, run.id);
+      return policy?.last_decision === "dangerous_rule_blocked";
+    }
+  });
+
+  const [attempts, current, policy, journal] = await Promise.all([
+    listAttempts(workspacePaths, run.id),
+    getCurrentDecision(workspacePaths, run.id),
+    readRunPolicyRuntimeStrict(workspacePaths, run.id),
+    listRunJournal(workspacePaths, run.id)
+  ]);
+  assert.equal(attempts.length, 1, "dangerous replay commands should stop before a new execution attempt is created");
+  assert.equal(current?.waiting_for_human, true);
+  assert.equal(current?.recommended_attempt_type, "research");
+  assert.equal(policy.stage, "approval");
+  assert.equal(policy.approval_status, "rejected");
+  assert.equal(policy.danger_mode, "manual_only");
+  assert.match(policy.blocking_reason ?? "", /destructive command/i);
+  assert.ok(
+    journal.some(
+      (entry) =>
+        entry.type === "run.policy.hook_evaluated" &&
+        entry.payload.hook_status === "failed" &&
+        entry.payload.dangerous_command === "git reset --hard HEAD"
+    ),
+    "dangerous replay guard should leave a structured hook event"
+  );
+}
+
+async function verifyKillswitchRoutesGateLaunch(): Promise<void> {
+  const { runtimeDataRoot, workspaceRoot, workspacePaths, run } =
+    await bootstrapExecutionApprovalRun("killswitch-routes");
+  const orchestrator = await createScenarioOrchestrator({
+    runtimeDataRoot,
+    workspaceRoot,
+    workspacePaths
+  });
+  await waitForPendingApproval(orchestrator, workspacePaths, run.id);
+
+  const app = await buildServer({
+    runtimeDataRoot,
+    workspaceRoot,
+    startOrchestrator: false
+  });
+  try {
+    const approveResponse = await app.inject({
+      method: "POST",
+      url: `/runs/${run.id}/policy/approve`,
+      payload: {
+        actor: "policy-verifier",
+        note: "Execution plan is approved."
+      }
+    });
+    assert.equal(approveResponse.statusCode, 200);
+
+    const enableResponse = await app.inject({
+      method: "POST",
+      url: `/runs/${run.id}/policy/killswitch/enable`,
+      payload: {
+        actor: "policy-verifier",
+        reason: "Manual stop for policy review."
+      }
+    });
+    assert.equal(enableResponse.statusCode, 200);
+    const enabledPayload = enableResponse.json() as {
+      policy_runtime: {
+        killswitch_active: boolean;
+        killswitch_reason: string | null;
+      };
+    };
+    assert.equal(enabledPayload.policy_runtime.killswitch_active, true);
+    assert.equal(
+      enabledPayload.policy_runtime.killswitch_reason,
+      "Manual stop for policy review."
+    );
+
+    const blockedLaunch = await app.inject({
+      method: "POST",
+      url: `/runs/${run.id}/launch`
+    });
+    assert.equal(blockedLaunch.statusCode, 409);
+    assert.match(blockedLaunch.body, /Manual stop for policy review/i);
+
+    const clearResponse = await app.inject({
+      method: "POST",
+      url: `/runs/${run.id}/policy/killswitch/clear`,
+      payload: {
+        actor: "policy-verifier",
+        note: "Resume normal policy dispatch."
+      }
+    });
+    assert.equal(clearResponse.statusCode, 200);
+    const clearedPayload = clearResponse.json() as {
+      policy_runtime: {
+        killswitch_active: boolean;
+      };
+    };
+    assert.equal(clearedPayload.policy_runtime.killswitch_active, false);
+
+    const launchResponse = await app.inject({
+      method: "POST",
+      url: `/runs/${run.id}/launch`
+    });
+    assert.equal(launchResponse.statusCode, 200);
+  } finally {
+    await app.close();
+  }
+}
+
 async function verifyCorruptPolicyFailsClosed(): Promise<void> {
   const { runtimeDataRoot, workspaceRoot, workspacePaths, run } =
     await bootstrapExecutionApprovalRun("corrupt-policy");
@@ -674,6 +891,12 @@ async function main(): Promise<void> {
       ],
       ["approve_route_unlocks_execution", verifyApproveRouteUnlocksExecution],
       ["reject_route_forces_research_replan", verifyRejectRouteForcesResearchReplan],
+      ["approve_and_reject_require_pending", verifyApproveAndRejectRequirePendingApproval],
+      [
+        "dangerous_verification_commands_fail_closed",
+        verifyDangerousVerificationCommandsFailClosed
+      ],
+      ["killswitch_routes_gate_launch", verifyKillswitchRoutesGateLaunch],
       ["corrupt_policy_fails_closed", verifyCorruptPolicyFailsClosed],
       ["killswitch_fails_closed", verifyKillswitchFailsClosed]
     ];

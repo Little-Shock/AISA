@@ -705,18 +705,27 @@ export function RunPolicyPanel({
   onNoteChange,
   onApprove,
   onReject,
+  onEnableKillswitch,
+  onClearKillswitch,
   approveBusy,
-  rejectBusy
+  rejectBusy,
+  killswitchEnableBusy,
+  killswitchClearBusy
 }: {
   runDetail: RunDetail;
   note: string;
   onNoteChange: (value: string) => void;
   onApprove: () => void;
   onReject: () => void;
+  onEnableKillswitch: () => void;
+  onClearKillswitch: () => void;
   approveBusy: boolean;
   rejectBusy: boolean;
+  killswitchEnableBusy: boolean;
+  killswitchClearBusy: boolean;
 }) {
   const policyRuntime = runDetail.policy_runtime;
+  const policyActivity = runDetail.policy_activity ?? [];
   const defaultVerifierKitProfile = runDetail.default_verifier_kit_profile;
   const harnessProfile = runDetail.run.harness_profile;
   const harnessSlots = [
@@ -731,6 +740,8 @@ export function RunPolicyPanel({
   );
   const canApprove = policyRuntime?.approval_status === "pending";
   const canReject = policyRuntime?.approval_status === "pending";
+  const canEnableKillswitch = policyRuntime?.killswitch_active !== true;
+  const canClearKillswitch = policyRuntime?.killswitch_active === true;
 
   return (
     <Panel
@@ -752,16 +763,66 @@ export function RunPolicyPanel({
         />
       </div>
 
+      {runDetail.policy_runtime_invalid_reason ? (
+        <Callout tone="rose" title="Policy Runtime 已损坏">
+          {localizeUiText(runDetail.policy_runtime_invalid_reason)}
+        </Callout>
+      ) : null}
+
       <SectionList
         title="当前策略判断"
         items={[
           `目标：${localizeUiText(policyRuntime?.proposed_objective ?? "暂无")}`,
           `待批类型：${attemptTypeLabel(policyRuntime?.proposed_attempt_type ?? "暂无")}`,
+          `签名：${policyRuntime?.proposed_signature ?? "暂无"}`,
           `来源尝试：${policyRuntime?.source_attempt_id ?? "暂无"}`,
+          `来源工件：${policyRuntime?.source_ref ?? "暂无"}`,
           `阻塞原因：${localizeUiText(policyRuntime?.blocking_reason ?? "暂无")}`,
           `最后决议：${localizeUiText(policyRuntime?.last_decision ?? "暂无")}`,
+          `发起时间：${formatDateTime(policyRuntime?.approval_requested_at)}`,
+          `决议时间：${formatDateTime(policyRuntime?.approval_decided_at)}`,
+          `审批备注：${localizeUiText(policyRuntime?.approval_note ?? "暂无")}`,
           `更新时间：${formatDateTime(policyRuntime?.updated_at)}`
         ]}
+      />
+
+      <SectionList
+        title="待批执行契约"
+        items={[
+          `signature：${policyRuntime?.proposed_signature ?? "暂无"}`,
+          `objective：${localizeUiText(policyRuntime?.proposed_objective ?? "暂无")}`,
+          `source ref：${policyRuntime?.source_ref ?? "暂无"}`,
+          `policy ref：${runDetail.policy_runtime_ref ?? "未落盘"}`,
+          `policy activity ref：${runDetail.policy_activity_ref ?? "暂无"}`
+        ]}
+      />
+
+      <SectionList
+        title="Success Criteria"
+        items={
+          policyRuntime?.proposed_success_criteria?.length
+            ? policyRuntime.proposed_success_criteria.map((item) => localizeUiText(item))
+            : ["暂无"]
+        }
+      />
+
+      <SectionList
+        title="最近策略活动"
+        items={
+          policyActivity.length > 0
+            ? policyActivity.map((item) => {
+                const parts = [
+                  `${formatDateTime(item.ts)} · ${item.kind} · ${item.status}`,
+                  item.headline,
+                  item.hook_key ? `hook=${item.hook_key}` : null,
+                  item.proposed_signature ? `signature=${item.proposed_signature}` : null,
+                  item.actor ? `actor=${item.actor}` : null,
+                  item.summary ? localizeUiText(item.summary) : null
+                ].filter((value): value is string => Boolean(value));
+                return parts.join(" | ");
+              })
+            : ["暂无策略活动"]
+        }
       />
 
       <SectionList
@@ -862,6 +923,27 @@ export function RunPolicyPanel({
           disabled={!canReject || rejectBusy}
         >
           {rejectBusy ? "打回中..." : "打回重规划"}
+        </Button>
+      </div>
+
+      <div className="action-row mt-3">
+        <Button
+          type="button"
+          variant="outline"
+          className="h-10 flex-1 border-rose-900/18 bg-rose-900/8 font-pixel text-[10px] tracking-[0.16em] text-[var(--rose)]"
+          onClick={onEnableKillswitch}
+          disabled={!canEnableKillswitch || killswitchEnableBusy}
+        >
+          {killswitchEnableBusy ? "开启中..." : "开启 Killswitch"}
+        </Button>
+        <Button
+          type="button"
+          variant="outline"
+          className="h-10 flex-1 border-emerald-900/16 bg-emerald-900/8 font-pixel text-[10px] tracking-[0.16em] text-[var(--emerald)]"
+          onClick={onClearKillswitch}
+          disabled={!canClearKillswitch || killswitchClearBusy}
+        >
+          {killswitchClearBusy ? "清除中..." : "清除 Killswitch"}
         </Button>
       </div>
     </Panel>

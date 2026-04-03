@@ -29,9 +29,9 @@ import {
   getCurrentDecision,
   getRunGovernanceState,
   getRunMaintenancePlane,
-  getRunPolicyRuntime,
   getRunRuntimeHealthSnapshot,
   listAttempts,
+  readRunPolicyRuntimeStrict,
   resolveAttemptPaths,
   resolveRunPaths,
   saveRunMaintenancePlane,
@@ -59,6 +59,12 @@ export type RefreshRunMaintenancePlaneOptions = {
   staleAfterMs: number;
 };
 
+type RunPolicyRuntimeSurface = {
+  policyRuntime: RunPolicyRuntime | null;
+  policyRuntimeRef: string | null;
+  policyRuntimeInvalidReason: string | null;
+};
+
 type LatestEvidenceArtifacts = {
   evidenceAttempt: Attempt | null;
   latestPreflight: Awaited<ReturnType<typeof getAttemptPreflightEvaluation>> | null;
@@ -80,8 +86,34 @@ function buildRunGovernanceRef(paths: WorkspacePaths, runId: string): string {
   return buildRelativeRef(paths, resolveRunPaths(paths, runId).governanceFile);
 }
 
-function buildRunPolicyRef(paths: WorkspacePaths, runId: string): string {
-  return buildRelativeRef(paths, resolveRunPaths(paths, runId).policyFile);
+async function readRunPolicyRuntimeSurface(
+  paths: WorkspacePaths,
+  runId: string
+): Promise<RunPolicyRuntimeSurface> {
+  const policyRuntimeRef = buildRelativeRef(paths, resolveRunPaths(paths, runId).policyFile);
+  try {
+    return {
+      policyRuntime: await readRunPolicyRuntimeStrict(paths, runId),
+      policyRuntimeRef,
+      policyRuntimeInvalidReason: null
+    };
+  } catch (error) {
+    const err = error as NodeJS.ErrnoException;
+    if (err?.code === "ENOENT") {
+      return {
+        policyRuntime: null,
+        policyRuntimeRef: null,
+        policyRuntimeInvalidReason: null
+      };
+    }
+
+    return {
+      policyRuntime: null,
+      policyRuntimeRef,
+      policyRuntimeInvalidReason:
+        error instanceof Error ? error.message : "Policy runtime is unreadable."
+    };
+  }
 }
 
 function buildRunMaintenancePlaneRef(paths: WorkspacePaths, runId: string): string {
@@ -227,13 +259,16 @@ function buildRunBriefOutput(runBriefView: RunBriefView): RunMaintenanceOutput {
 function buildRunPolicyOutput(input: {
   policyRuntime: RunPolicyRuntime | null;
   policyRuntimeRef: string | null;
+  policyRuntimeInvalidReason: string | null;
 }): RunMaintenanceOutput {
   const policyRuntime = input.policyRuntime;
   return {
     key: "policy_runtime",
     label: "策略边界",
     plane: "maintenance",
-    status: !policyRuntime
+    status: input.policyRuntimeInvalidReason
+      ? "degraded"
+      : !policyRuntime
       ? "not_available"
       : policyRuntime.killswitch_active ||
           policyRuntime.approval_status === "pending" ||
@@ -241,7 +276,7 @@ function buildRunPolicyOutput(input: {
         ? "attention"
         : "ready",
     ref: input.policyRuntimeRef,
-    summary:
+    summary: input.policyRuntimeInvalidReason ??
       policyRuntime?.blocking_reason ??
       policyRuntime?.proposed_objective ??
       policyRuntime?.last_decision ??
@@ -445,6 +480,7 @@ function buildSignalSources(input: {
   governance: RunGovernanceState | null;
   policyRuntime: RunPolicyRuntime | null;
   policyRuntimeRef: string | null;
+  policyRuntimeInvalidReason: string | null;
   workingContextView: RunWorkingContextView;
   runBriefView: RunBriefView;
   runHealth: RunHealthAssessment;
@@ -475,16 +511,17 @@ function buildSignalSources(input: {
         input.governance.context_summary.headline
     });
   }
-  if (input.policyRuntime) {
+  if (input.policyRuntime || input.policyRuntimeInvalidReason) {
     sources.push({
       key: "policy_runtime",
       label: "策略边界",
       plane: "mainline",
       ref: input.policyRuntimeRef,
       summary:
-        input.policyRuntime.blocking_reason ??
-        input.policyRuntime.proposed_objective ??
-        input.policyRuntime.last_decision
+        input.policyRuntimeInvalidReason ??
+        input.policyRuntime?.blocking_reason ??
+        input.policyRuntime?.proposed_objective ??
+        input.policyRuntime?.last_decision
     });
   }
   if (input.latestEvidence.latestPreflight && input.latestEvidence.evidenceAttempt) {
@@ -587,7 +624,7 @@ export async function buildRunMaintenancePlane(
   const [
     current,
     governance,
-    policyRuntime,
+    policyRuntimeSurface,
     attempts,
     workingContextView,
     runBriefView,
@@ -596,12 +633,13 @@ export async function buildRunMaintenancePlane(
     await Promise.all([
       getCurrentDecision(paths, runId),
       getRunGovernanceState(paths, runId),
-      getRunPolicyRuntime(paths, runId),
+      readRunPolicyRuntimeSurface(paths, runId),
       listAttempts(paths, runId),
       readRunWorkingContextView(paths, runId),
       readRunBriefView(paths, runId),
       getRunRuntimeHealthSnapshot(paths, runId)
     ]);
+  const policyRuntime = policyRuntimeSurface.policyRuntime;
   const latestAttempt = pickLatestAttempt(attempts, current);
   const latestEvidence = await resolveLatestEvidenceArtifacts({
     paths,
@@ -668,7 +706,8 @@ export async function buildRunMaintenancePlane(
     outputs: [
       buildRunPolicyOutput({
         policyRuntime,
-        policyRuntimeRef: policyRuntime ? buildRunPolicyRef(paths, runId) : null
+        policyRuntimeRef: policyRuntimeSurface.policyRuntimeRef,
+        policyRuntimeInvalidReason: policyRuntimeSurface.policyRuntimeInvalidReason
       }),
       buildWorkingContextOutput(workingContextView),
       buildRunBriefOutput(runBriefView),
@@ -683,7 +722,8 @@ export async function buildRunMaintenancePlane(
       current,
       governance,
       policyRuntime,
-      policyRuntimeRef: policyRuntime ? buildRunPolicyRef(paths, runId) : null,
+      policyRuntimeRef: policyRuntimeSurface.policyRuntimeRef,
+      policyRuntimeInvalidReason: policyRuntimeSurface.policyRuntimeInvalidReason,
       workingContextView,
       runBriefView,
       runHealth,

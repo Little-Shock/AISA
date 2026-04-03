@@ -286,6 +286,11 @@ class RunDispatchLeaseError extends Error {
 const RUN_DISPATCH_LEASE_FILE_NAME = "run-dispatch-lease.json";
 
 export type ExecutionVerificationToolchainAssessment = {
+  verifier_kit: ExecutionVerifierKit | null;
+  command_policy:
+    | "workspace_script_inference"
+    | "contract_locked_commands"
+    | null;
   has_package_json: boolean;
   has_local_node_modules: boolean;
   inferred_pnpm_commands: string[];
@@ -378,23 +383,25 @@ export async function assessExecutionVerificationToolchain(input: {
   const hasLocalNodeModules = await workspaceHasLocalNodeModules(input.workspaceRoot);
   const unrunnableVerificationCommands = (
     await Promise.all(
-      (input.verificationPlan?.commands ?? []).map(async (command) => {
-        const readiness = await probeVerificationCommandReadiness({
-          workspaceRoot: input.workspaceRoot,
-          command
-        });
+      (input.verificationPlan?.commands ?? []).map(
+        async (command: ExecutionVerificationPlan["commands"][number]) => {
+          const readiness = await probeVerificationCommandReadiness({
+            workspaceRoot: input.workspaceRoot,
+            command
+          });
 
-        if (readiness.ok) {
-          return null;
+          if (readiness.ok) {
+            return null;
+          }
+
+          return {
+            purpose: command.purpose,
+            command: command.command,
+            cwd: command.cwd ?? null,
+            reason: readiness.reason
+          };
         }
-
-        return {
-          purpose: command.purpose,
-          command: command.command,
-          cwd: command.cwd ?? null,
-          reason: readiness.reason
-        };
-      })
+      )
     )
   ).filter(
     (entry): entry is NonNullable<ExecutionVerificationToolchainAssessment["unrunnable_verification_commands"][number]> =>
@@ -554,6 +561,8 @@ type RunPolicyProposal = {
   permissionProfile: RunPolicyRuntime["permission_profile"];
   hookPolicy: RunPolicyRuntime["hook_policy"];
   dangerMode: RunPolicyRuntime["danger_mode"];
+  verifierKit: ExecutionVerifierKit | null;
+  verificationCommands: string[];
   sourceAttemptId: string | null;
 };
 
@@ -561,15 +570,32 @@ function buildRunPolicyProposal(input: {
   attemptType: Attempt["attempt_type"];
   objective: string;
   successCriteria: string[];
+  verifierKit?: ExecutionVerifierKit | null;
+  verificationCommands?: string[];
   sourceAttemptId?: string | null;
 }): RunPolicyProposal {
+  const verifierKit = input.verifierKit ?? null;
+  const verificationCommands = input.verificationCommands ?? [];
+  const permissionProfile =
+    input.attemptType === "execution" ? "workspace_write" : "read_only";
+  const hookPolicy =
+    input.attemptType === "execution"
+      ? "enforce_runtime_contract"
+      : "not_required";
+  const dangerMode = "forbid";
+
   return {
     signature: createHash("sha256")
       .update(
         JSON.stringify({
           attempt_type: input.attemptType,
           objective: input.objective,
-          success_criteria: input.successCriteria
+          success_criteria: input.successCriteria,
+          verifier_kit: verifierKit,
+          verification_commands: verificationCommands,
+          permission_profile: permissionProfile,
+          hook_policy: hookPolicy,
+          danger_mode: dangerMode
         })
       )
       .digest("hex")
@@ -577,13 +603,11 @@ function buildRunPolicyProposal(input: {
     attemptType: input.attemptType,
     objective: input.objective,
     successCriteria: input.successCriteria,
-    permissionProfile:
-      input.attemptType === "execution" ? "workspace_write" : "read_only",
-    hookPolicy:
-      input.attemptType === "execution"
-        ? "enforce_runtime_contract"
-        : "not_required",
-    dangerMode: "forbid",
+    permissionProfile,
+    hookPolicy,
+    dangerMode,
+    verifierKit,
+    verificationCommands,
     sourceAttemptId: input.sourceAttemptId ?? null
   };
 }
@@ -592,6 +616,61 @@ function buildPendingApprovalSummary(proposal: RunPolicyProposal): string {
   return proposal.attemptType === "execution"
     ? "Execution plan is ready, but dispatch is blocked pending leader approval."
     : "Attempt plan is waiting for explicit approval.";
+}
+
+type DangerousVerificationCommandFinding = {
+  command: string;
+  rule: "destructive_git_reset" | "destructive_git_checkout" | "destructive_git_clean" | "destructive_rm";
+};
+
+const DANGEROUS_VERIFICATION_COMMAND_PATTERNS: Array<{
+  rule: DangerousVerificationCommandFinding["rule"];
+  pattern: RegExp;
+}> = [
+  {
+    rule: "destructive_git_reset",
+    pattern: /(^|[;&|]\s*)git\s+reset\s+--hard(\s|$)/i
+  },
+  {
+    rule: "destructive_git_checkout",
+    pattern: /(^|[;&|]\s*)git\s+checkout\s+--(\s|$)/i
+  },
+  {
+    rule: "destructive_git_clean",
+    pattern: /(^|[;&|]\s*)git\s+clean\s+-[^\n]*f/i
+  },
+  {
+    rule: "destructive_rm",
+    pattern: /(^|[;&|]\s*)rm\s+-rf(\s|$)/i
+  }
+];
+
+function findDangerousVerificationCommand(
+  commands: string[]
+): DangerousVerificationCommandFinding | null {
+  for (const command of commands) {
+    const normalized = command.trim().replace(/\s+/g, " ");
+    for (const candidate of DANGEROUS_VERIFICATION_COMMAND_PATTERNS) {
+      if (candidate.pattern.test(normalized)) {
+        return {
+          command: normalized,
+          rule: candidate.rule
+        };
+      }
+    }
+  }
+
+  return null;
+}
+
+function buildDangerousVerificationCommandMessage(input: {
+  proposal: RunPolicyProposal;
+  finding: DangerousVerificationCommandFinding;
+}): string {
+  return [
+    `Execution plan cannot enter approval because runtime replay includes a destructive command: ${input.finding.command}.`,
+    "Rewrite the execution contract with replay-safe verification commands before requesting approval."
+  ].join(" ");
 }
 
 export class Orchestrator {
@@ -1345,12 +1424,27 @@ export class Orchestrator {
     await saveRunPolicyRuntime(this.workspacePaths, nextPolicy);
   }
 
+  private buildRunPolicySourceRef(
+    runId: string,
+    sourceAttemptId: string | null
+  ): string | null {
+    if (!sourceAttemptId) {
+      return null;
+    }
+
+    return this.buildAttemptResultRef(runId, sourceAttemptId);
+  }
+
   private async persistRunPolicyReadyForDispatch(input: {
     runId: string;
     proposal: RunPolicyProposal;
   }): Promise<void> {
     const existingPolicy = await getRunPolicyRuntime(this.workspacePaths, input.runId);
     const approvalRequired = input.proposal.attemptType === "execution";
+    const sourceRef = this.buildRunPolicySourceRef(
+      input.runId,
+      input.proposal.sourceAttemptId
+    );
     const nextPolicy = existingPolicy
       ? updateRunPolicyRuntime(existingPolicy, {
           stage: "execution",
@@ -1368,7 +1462,8 @@ export class Orchestrator {
           danger_mode: input.proposal.dangerMode,
           blocking_reason: null,
           last_decision: "dispatch_ready",
-          source_attempt_id: input.proposal.sourceAttemptId
+          source_attempt_id: input.proposal.sourceAttemptId,
+          source_ref: sourceRef
         })
       : createRunPolicyRuntime({
           run_id: input.runId,
@@ -1383,10 +1478,60 @@ export class Orchestrator {
           hook_policy: input.proposal.hookPolicy,
           danger_mode: input.proposal.dangerMode,
           last_decision: "dispatch_ready",
-          source_attempt_id: input.proposal.sourceAttemptId
+          source_attempt_id: input.proposal.sourceAttemptId,
+          source_ref: sourceRef
         });
 
     await saveRunPolicyRuntime(this.workspacePaths, nextPolicy);
+  }
+
+  private async appendRunPolicyHookEvaluation(input: {
+    runId: string;
+    proposal: RunPolicyProposal;
+    hookKey: string;
+    hookStatus: "passed" | "failed";
+    message: string;
+    evidenceRef?: string | null;
+    dangerousCommand?: string | null;
+  }): Promise<void> {
+    const journal = await listRunJournal(this.workspacePaths, input.runId);
+    const latestEntry = journal.at(-1);
+    if (
+      latestEntry?.type === "run.policy.hook_evaluated" &&
+      latestEntry.payload.proposed_signature === input.proposal.signature &&
+      latestEntry.payload.hook_key === input.hookKey &&
+      latestEntry.payload.hook_status === input.hookStatus
+    ) {
+      return;
+    }
+
+    await appendRunJournal(
+      this.workspacePaths,
+      createRunJournalEntry({
+        run_id: input.runId,
+        attempt_id: input.proposal.sourceAttemptId,
+        type: "run.policy.hook_evaluated",
+        payload: {
+          proposed_signature: input.proposal.signature,
+          attempt_type: input.proposal.attemptType,
+          objective: input.proposal.objective,
+          verifier_kit: input.proposal.verifierKit,
+          verification_commands: input.proposal.verificationCommands,
+          permission_profile: input.proposal.permissionProfile,
+          hook_policy: input.proposal.hookPolicy,
+          danger_mode: input.proposal.dangerMode,
+          hook_key: input.hookKey,
+          hook_status: input.hookStatus,
+          message: input.message,
+          evidence_ref: input.evidenceRef ?? null,
+          dangerous_command: input.dangerousCommand ?? null,
+          source_ref: this.buildRunPolicySourceRef(
+            input.runId,
+            input.proposal.sourceAttemptId
+          )
+        }
+      })
+    );
   }
 
   private async readRunPolicyGate(input: {
@@ -1424,6 +1569,10 @@ export class Orchestrator {
     const existingPolicy = await getRunPolicyRuntime(this.workspacePaths, input.runId);
     const now = new Date().toISOString();
     const message = buildPendingApprovalSummary(input.proposal);
+    const sourceRef = this.buildRunPolicySourceRef(
+      input.runId,
+      input.proposal.sourceAttemptId
+    );
     const nextPolicy = existingPolicy
       ? updateRunPolicyRuntime(existingPolicy, {
           stage: "approval",
@@ -1446,7 +1595,8 @@ export class Orchestrator {
           approval_decided_at: null,
           approval_actor: null,
           approval_note: null,
-          source_attempt_id: input.proposal.sourceAttemptId
+          source_attempt_id: input.proposal.sourceAttemptId,
+          source_ref: sourceRef
         })
       : createRunPolicyRuntime({
           run_id: input.runId,
@@ -1463,10 +1613,19 @@ export class Orchestrator {
           blocking_reason: message,
           last_decision: "approval_requested",
           approval_requested_at: now,
-          source_attempt_id: input.proposal.sourceAttemptId
+          source_attempt_id: input.proposal.sourceAttemptId,
+          source_ref: sourceRef
         });
 
     await saveRunPolicyRuntime(this.workspacePaths, nextPolicy);
+    await this.appendRunPolicyHookEvaluation({
+      runId: input.runId,
+      proposal: input.proposal,
+      hookKey: "dangerous_verification_commands",
+      hookStatus: "passed",
+      message: "Replay commands passed the destructive command guard.",
+      evidenceRef: sourceRef
+    });
 
     const nextCurrent = updateCurrentDecision(input.current, {
       run_status: "waiting_steer",
@@ -1504,12 +1663,112 @@ export class Orchestrator {
           payload: {
             proposed_signature: input.proposal.signature,
             attempt_type: input.proposal.attemptType,
-            objective: input.proposal.objective
+            objective: input.proposal.objective,
+            verifier_kit: input.proposal.verifierKit,
+            verification_commands: input.proposal.verificationCommands,
+            permission_profile: input.proposal.permissionProfile,
+            hook_policy: input.proposal.hookPolicy,
+            danger_mode: input.proposal.dangerMode,
+            source_ref: sourceRef
           }
         })
       );
     }
 
+    await refreshRunOperatorSurface(this.workspacePaths, input.runId);
+  }
+
+  private async persistRunPolicyDangerousRuleBlocked(input: {
+    runId: string;
+    current: CurrentDecision;
+    proposal: RunPolicyProposal;
+    message: string;
+    dangerousCommand: string;
+  }): Promise<void> {
+    const sourceRef = this.buildRunPolicySourceRef(
+      input.runId,
+      input.proposal.sourceAttemptId
+    );
+    const now = new Date().toISOString();
+    const existingPolicy = await getRunPolicyRuntime(this.workspacePaths, input.runId);
+    const nextPolicy = existingPolicy
+      ? updateRunPolicyRuntime(existingPolicy, {
+          stage: "approval",
+          approval_status: "rejected",
+          approval_required: true,
+          proposed_signature: input.proposal.signature,
+          proposed_attempt_type: input.proposal.attemptType,
+          proposed_objective: input.proposal.objective,
+          proposed_success_criteria: input.proposal.successCriteria,
+          permission_profile: input.proposal.permissionProfile,
+          hook_policy: input.proposal.hookPolicy,
+          danger_mode: "manual_only",
+          blocking_reason: input.message,
+          last_decision: "dangerous_rule_blocked",
+          approval_requested_at: null,
+          approval_decided_at: now,
+          approval_actor: "policy-runtime",
+          approval_note: input.message,
+          source_attempt_id: input.proposal.sourceAttemptId,
+          source_ref: sourceRef
+        })
+      : createRunPolicyRuntime({
+          run_id: input.runId,
+          stage: "approval",
+          approval_status: "rejected",
+          approval_required: true,
+          proposed_signature: input.proposal.signature,
+          proposed_attempt_type: input.proposal.attemptType,
+          proposed_objective: input.proposal.objective,
+          proposed_success_criteria: input.proposal.successCriteria,
+          permission_profile: input.proposal.permissionProfile,
+          hook_policy: input.proposal.hookPolicy,
+          danger_mode: "manual_only",
+          blocking_reason: input.message,
+          last_decision: "dangerous_rule_blocked",
+          approval_decided_at: now,
+          approval_actor: "policy-runtime",
+          approval_note: input.message,
+          source_attempt_id: input.proposal.sourceAttemptId,
+          source_ref: sourceRef
+        });
+    await saveRunPolicyRuntime(this.workspacePaths, nextPolicy);
+    await this.appendRunPolicyHookEvaluation({
+      runId: input.runId,
+      proposal: input.proposal,
+      hookKey: "dangerous_verification_commands",
+      hookStatus: "failed",
+      message: input.message,
+      evidenceRef: sourceRef,
+      dangerousCommand: input.dangerousCommand
+    });
+
+    const nextCurrent = updateCurrentDecision(input.current, {
+      run_status: "waiting_steer",
+      recommended_next_action: "continue_research",
+      recommended_attempt_type: "research",
+      summary: input.message,
+      blocking_reason: input.message,
+      waiting_for_human: true
+    });
+    await saveCurrentDecision(this.workspacePaths, nextCurrent);
+    await appendRunJournal(
+      this.workspacePaths,
+      createRunJournalEntry({
+        run_id: input.runId,
+        attempt_id: input.proposal.sourceAttemptId,
+        type: "run.policy.rejected",
+        payload: {
+          actor: "policy-runtime",
+          note: input.message,
+          proposed_signature: input.proposal.signature,
+          permission_profile: input.proposal.permissionProfile,
+          hook_policy: input.proposal.hookPolicy,
+          danger_mode: "manual_only",
+          source_ref: sourceRef
+        }
+      })
+    );
     await refreshRunOperatorSurface(this.workspacePaths, input.runId);
   }
 
@@ -1568,7 +1827,16 @@ export class Orchestrator {
             reason: input.reason,
             message: input.message,
             proposed_signature: input.proposal.signature,
-            attempt_type: input.proposal.attemptType
+            attempt_type: input.proposal.attemptType,
+            verifier_kit: input.proposal.verifierKit,
+            verification_commands: input.proposal.verificationCommands,
+            permission_profile: input.proposal.permissionProfile,
+            hook_policy: input.proposal.hookPolicy,
+            danger_mode: input.proposal.dangerMode,
+            source_ref: this.buildRunPolicySourceRef(
+              input.runId,
+              input.proposal.sourceAttemptId
+            )
           }
         })
       );
@@ -1598,7 +1866,9 @@ export class Orchestrator {
 
       await this.persistRunPolicyPlanning(run.id);
 
-      let nextAttempt: { attempt: Attempt; contract: AttemptContract } | null;
+      let nextAttempt:
+        | { attempt: Attempt; contract: AttemptContract; proposal: RunPolicyProposal }
+        | null;
       try {
         nextAttempt = await this.planNextAttempt(runId, current, attempts);
       } catch (error) {
@@ -1613,12 +1883,7 @@ export class Orchestrator {
       await saveAttemptContract(this.workspacePaths, nextAttempt.contract);
       await this.persistRunPolicyReadyForDispatch({
         runId: run.id,
-        proposal: buildRunPolicyProposal({
-          attemptType: nextAttempt.attempt.attempt_type,
-          objective: nextAttempt.attempt.objective,
-          successCriteria: nextAttempt.attempt.success_criteria,
-          sourceAttemptId: current.latest_attempt_id
-        })
+        proposal: nextAttempt.proposal
       });
       await appendRunJournal(
         this.workspacePaths,
@@ -1689,7 +1954,14 @@ export class Orchestrator {
     runId: string,
     current: CurrentDecision,
     attempts: Attempt[]
-  ): Promise<{ attempt: Attempt; contract: AttemptContract } | null> {
+  ): Promise<
+    | {
+        attempt: Attempt;
+        contract: AttemptContract;
+        proposal: RunPolicyProposal;
+      }
+    | null
+  > {
     const run = await getRun(this.workspacePaths, runId);
     const queuedSteers = (await listRunSteers(this.workspacePaths, runId)).filter(
       (runSteer) => runSteer.status === "queued"
@@ -1724,7 +1996,13 @@ export class Orchestrator {
         });
         return {
           attempt,
-          contract: await this.buildAttemptContract(run, attempt, null, null)
+          contract: await this.buildAttemptContract(run, attempt, null, null),
+          proposal: buildRunPolicyProposal({
+            attemptType: attempt.attempt_type,
+            objective: attempt.objective,
+            successCriteria: attempt.success_criteria,
+            sourceAttemptId: null
+          })
         };
       }
 
@@ -1738,7 +2016,13 @@ export class Orchestrator {
       });
       return {
         attempt,
-        contract: await this.buildAttemptContract(run, attempt, null, null)
+        contract: await this.buildAttemptContract(run, attempt, null, null),
+        proposal: buildRunPolicyProposal({
+          attemptType: attempt.attempt_type,
+          objective: attempt.objective,
+          successCriteria: attempt.success_criteria,
+          sourceAttemptId: null
+        })
       };
     }
 
@@ -1834,13 +2118,6 @@ export class Orchestrator {
             executionPlanningState.reusableExecutionContract?.success_criteria.length
           ? executionPlanningState.reusableExecutionContract.success_criteria
           : run.success_criteria;
-    let proposal = buildRunPolicyProposal({
-      attemptType,
-      objective,
-      successCriteria,
-      sourceAttemptId: latestAttempt?.id ?? null
-    });
-
     if (attemptType === "execution") {
       const policyGate = await this.readRunPolicyGate({
         runId
@@ -1857,14 +2134,49 @@ export class Orchestrator {
           policyGate.policy.proposed_success_criteria.length > 0
             ? policyGate.policy.proposed_success_criteria
             : successCriteria;
-        proposal = buildRunPolicyProposal({
-          attemptType,
-          objective,
-          successCriteria,
-          sourceAttemptId: latestAttempt?.id ?? null
-        });
       }
 
+      const attempt = createAttempt({
+        run_id: run.id,
+        attempt_type: attemptType,
+        worker: this.adapter.type,
+        objective,
+        success_criteria: successCriteria,
+        workspace_root: getEffectiveRunWorkspaceRoot(run)
+      });
+      const contract = await this.buildAttemptContract(
+        run,
+        attempt,
+        nextExecutionDraft,
+        executionPlanningState.reusableExecutionContract
+      );
+      const proposal = buildRunPolicyProposal({
+        attemptType,
+        objective: attempt.objective,
+        successCriteria: contract.success_criteria,
+        verifierKit: resolveExecutionVerifierKit(contract),
+        verificationCommands:
+          contract.verification_plan?.commands.map(
+            (item: VerificationCommand) => item.command
+          ) ?? [],
+        sourceAttemptId: latestAttempt?.id ?? null
+      });
+      const dangerousCommandFinding = findDangerousVerificationCommand(
+        proposal.verificationCommands
+      );
+      if (dangerousCommandFinding) {
+        await this.persistRunPolicyDangerousRuleBlocked({
+          runId,
+          current,
+          proposal,
+          message: buildDangerousVerificationCommandMessage({
+            proposal,
+            finding: dangerousCommandFinding
+          }),
+          dangerousCommand: dangerousCommandFinding.command
+        });
+        return null;
+      }
       if (policyGate.status === "invalid") {
         await this.persistRunPolicyDispatchBlocked({
           runId,
@@ -1914,6 +2226,12 @@ export class Orchestrator {
         });
         return null;
       }
+
+      return {
+        attempt,
+        contract,
+        proposal
+      };
     }
 
     const attempt = createAttempt({
@@ -1931,7 +2249,13 @@ export class Orchestrator {
         attempt,
         nextExecutionDraft,
         executionPlanningState.reusableExecutionContract
-      )
+      ),
+      proposal: buildRunPolicyProposal({
+        attemptType: attempt.attempt_type,
+        objective: attempt.objective,
+        successCriteria: attempt.success_criteria,
+        sourceAttemptId: latestAttempt?.id ?? null
+      })
     };
   }
 
