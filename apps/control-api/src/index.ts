@@ -185,24 +185,343 @@ function buildRecoveryResumeSummary(input: {
   }
 }
 
+type RecoveryEvidenceRefPayload = {
+  kind: string;
+  ref: string;
+  label: string;
+  summary: string | null;
+};
+
+type RunRecoveryProjectStatus = "not_applicable" | "ready" | "degraded" | "blocked";
+
+type RunRecoveryGuidanceView = Awaited<ReturnType<typeof deriveRunRecoveryGuidance>> & {
+  reasonCode: string;
+  reasonSummary: string;
+  projectStatus: RunRecoveryProjectStatus;
+  projectProfileRef: string | null;
+  baselineSnapshotRef: string | null;
+  capabilitySnapshotRef: string | null;
+  baselineRefs: RecoveryEvidenceRefPayload[];
+  keyFileRefs: RecoveryEvidenceRefPayload[];
+  latestSettledEvidenceRefs: RecoveryEvidenceRefPayload[];
+};
+
+function buildRecoveryReason(input: {
+  path: "first_attempt" | "latest_decision" | "handoff_first" | "degraded_rebuild";
+  handoffBundleRef: string | null;
+}): {
+  code: string;
+  summary: string;
+} {
+  switch (input.path) {
+    case "first_attempt":
+      return {
+        code: "first_attempt",
+        summary: "No settled attempt exists yet, so recovery starts from the first research step."
+      };
+    case "handoff_first":
+      return {
+        code: "settled_handoff_available",
+        summary: input.handoffBundleRef
+          ? `Recovery can trust the settled handoff at ${input.handoffBundleRef}.`
+          : "Recovery can trust the latest settled handoff bundle."
+      };
+    case "degraded_rebuild":
+      return {
+        code: "missing_settled_handoff",
+        summary:
+          "The latest settled attempt has no handoff bundle, so recovery must rebuild from primary evidence."
+      };
+    case "latest_decision":
+    default:
+      return {
+        code: "latest_decision",
+        summary: "Recovery follows the latest in-flight decision because the run has not settled yet."
+      };
+  }
+}
+
+function buildLatestSettledEvidenceRefs(input: {
+  latestAttemptSurface: Awaited<ReturnType<typeof readLatestRunEvidenceSurface>>;
+}): RecoveryEvidenceRefPayload[] {
+  const refs: RecoveryEvidenceRefPayload[] = [];
+
+  if (input.latestAttemptSurface.latestHandoffBundleRef) {
+    refs.push({
+      kind: "handoff_bundle",
+      ref: input.latestAttemptSurface.latestHandoffBundleRef,
+      label: "Settled handoff",
+      summary:
+        input.latestAttemptSurface.latestHandoffBundle?.summary ??
+        input.latestAttemptSurface.latestHandoffBundle?.failure_context?.message ??
+        null
+    });
+  }
+
+  if (input.latestAttemptSurface.latestReviewPacketRef) {
+    refs.push({
+      kind: "review_packet",
+      ref: input.latestAttemptSurface.latestReviewPacketRef,
+      label: "Review packet",
+      summary:
+        input.latestAttemptSurface.latestReviewPacket?.failure_context?.message ??
+        input.latestAttemptSurface.latestReviewPacket?.evaluation?.rationale ??
+        null
+    });
+  }
+
+  if (input.latestAttemptSurface.latestRuntimeVerificationRef) {
+    refs.push({
+      kind: "runtime_verification",
+      ref: input.latestAttemptSurface.latestRuntimeVerificationRef,
+      label: "Runtime verification",
+      summary: input.latestAttemptSurface.latestRuntimeVerification?.failure_reason ??
+        (input.latestAttemptSurface.latestRuntimeVerification
+          ? `status=${input.latestAttemptSurface.latestRuntimeVerification.status}`
+          : null)
+    });
+  }
+
+  if (input.latestAttemptSurface.latestAdversarialVerificationRef) {
+    refs.push({
+      kind: "adversarial_verification",
+      ref: input.latestAttemptSurface.latestAdversarialVerificationRef,
+      label: "Adversarial verification",
+      summary:
+        input.latestAttemptSurface.latestAdversarialVerification?.failure_reason ??
+        input.latestAttemptSurface.latestAdversarialVerification?.summary ??
+        null
+    });
+  }
+
+  if (input.latestAttemptSurface.latestPreflightEvaluationRef) {
+    refs.push({
+      kind: "preflight_evaluation",
+      ref: input.latestAttemptSurface.latestPreflightEvaluationRef,
+      label: "Preflight evaluation",
+      summary: input.latestAttemptSurface.latestPreflightEvaluation?.failure_reason ??
+        (input.latestAttemptSurface.latestPreflightEvaluation
+          ? `status=${input.latestAttemptSurface.latestPreflightEvaluation.status}`
+          : null)
+    });
+  }
+
+  return refs;
+}
+
+function buildAttachedProjectKeyFileRefs(
+  project: AttachedProjectProfile | null
+): RecoveryEvidenceRefPayload[] {
+  if (!project) {
+    return [];
+  }
+
+  const manifestFiles = Array.from(
+    new Set(
+      project.manifest_files.filter(
+        (file: unknown): file is string => typeof file === "string"
+      )
+    )
+  ) as string[];
+
+  return manifestFiles
+    .slice(0, 5)
+    .map((file) => ({
+      kind: "project_manifest",
+      ref: join(project.workspace_root, file),
+      label: file,
+      summary: project.detection_reasons[0] ?? null
+    }));
+}
+
+function toRecoveryPayload(guidance: RunRecoveryGuidanceView) {
+  return {
+    path: guidance.path,
+    recommended_next_action: guidance.nextAction,
+    recommended_attempt_type: guidance.attemptType,
+    summary: guidance.summary,
+    blocking_reason: guidance.blockingReason,
+    handoff_bundle_ref: guidance.handoffBundleRef,
+    reason_code: guidance.reasonCode,
+    reason: guidance.reasonSummary,
+    project_status: guidance.projectStatus,
+    project_profile_ref: guidance.projectProfileRef,
+    baseline_snapshot_ref: guidance.baselineSnapshotRef,
+    capability_snapshot_ref: guidance.capabilitySnapshotRef,
+    baseline_refs: guidance.baselineRefs,
+    key_file_refs: guidance.keyFileRefs,
+    latest_settled_evidence_refs: guidance.latestSettledEvidenceRefs
+  };
+}
+
 async function readRunRecoveryGuidance(input: {
   workspacePaths: ReturnType<typeof resolveWorkspacePaths>;
   runId: string;
   current: Awaited<ReturnType<typeof getCurrentDecision>> | null;
   attempts: Awaited<ReturnType<typeof listAttempts>>;
-}) {
-  const latestAttemptSurface = await readLatestRunEvidenceSurface({
-    paths: input.workspacePaths,
-    runId: input.runId,
-    current: input.current,
-    attempts: input.attempts
-  });
-  return deriveRunRecoveryGuidance({
+  run?: Awaited<ReturnType<typeof getRun>>;
+}): Promise<RunRecoveryGuidanceView> {
+  const [run, latestAttemptSurface] = await Promise.all([
+    input.run ?? getRun(input.workspacePaths, input.runId),
+    readLatestRunEvidenceSurface({
+      paths: input.workspacePaths,
+      runId: input.runId,
+      current: input.current,
+      attempts: input.attempts
+    })
+  ]);
+  const guidance = deriveRunRecoveryGuidance({
     current: input.current,
     latestAttempt: pickLatestAttempt(input.attempts, input.current),
     latestHandoffBundle: latestAttemptSurface.latestHandoffBundle,
     latestHandoffBundleRef: latestAttemptSurface.latestHandoffBundleRef
   });
+  const recoveryReason = buildRecoveryReason({
+    path: guidance.path,
+    handoffBundleRef: guidance.handoffBundleRef
+  });
+  const latestSettledEvidenceRefs = buildLatestSettledEvidenceRefs({
+    latestAttemptSurface
+  });
+
+  if (!run.attached_project_id) {
+    return {
+      ...guidance,
+      reasonCode: recoveryReason.code,
+      reasonSummary: recoveryReason.summary,
+      projectStatus: "not_applicable",
+      projectProfileRef: null,
+      baselineSnapshotRef: null,
+      capabilitySnapshotRef: null,
+      baselineRefs: [],
+      keyFileRefs: [],
+      latestSettledEvidenceRefs
+    };
+  }
+
+  const projectId = run.attached_project_id;
+  const [project, baselineSnapshot, capabilitySnapshot] = await Promise.all([
+    getAttachedProjectProfile(input.workspacePaths, projectId).catch((error) => {
+      const err = error as NodeJS.ErrnoException;
+      if (err?.code === "ENOENT") {
+        return null;
+      }
+      throw error;
+    }),
+    getAttachedProjectBaselineSnapshot(input.workspacePaths, projectId),
+    getAttachedProjectCapabilitySnapshot(input.workspacePaths, projectId)
+  ]);
+  const projectProfileRef = project
+    ? buildProjectRef(input.workspacePaths, projectId, "profileFile")
+    : null;
+  const baselineSnapshotRef = baselineSnapshot
+    ? buildProjectRef(input.workspacePaths, projectId, "baselineSnapshotFile")
+    : null;
+  const capabilitySnapshotRef = capabilitySnapshot
+    ? buildProjectRef(input.workspacePaths, projectId, "capabilitySnapshotFile")
+    : null;
+  const baselineRefs: RecoveryEvidenceRefPayload[] = [];
+
+  if (projectProfileRef && project) {
+    baselineRefs.push({
+      kind: "project_profile",
+      ref: projectProfileRef,
+      label: "Project profile",
+      summary: `${project.project_type} / ${project.primary_language}`
+    });
+  }
+  if (baselineSnapshotRef && baselineSnapshot) {
+    baselineRefs.push({
+      kind: "baseline_snapshot",
+      ref: baselineSnapshotRef,
+      label: "Baseline snapshot",
+      summary:
+        baselineSnapshot.git.head_sha
+          ? `head=${baselineSnapshot.git.head_sha}`
+          : "git baseline captured"
+    });
+  }
+  if (capabilitySnapshotRef && capabilitySnapshot) {
+    baselineRefs.push({
+      kind: "capability_snapshot",
+      ref: capabilitySnapshotRef,
+      label: "Capability snapshot",
+      summary: `status=${capabilitySnapshot.overall_status}`
+    });
+  }
+
+  let projectStatus: RunRecoveryProjectStatus = "ready";
+  let projectReasonCode: string | null = null;
+  let projectReasonSummary: string | null = null;
+
+  if (!project) {
+    projectStatus = "blocked";
+    projectReasonCode = "attached_project_missing";
+    projectReasonSummary =
+      "Attached project facts are missing, so recovery stays manual until the project is re-attached.";
+  } else if (project.workspace_root !== run.workspace_root) {
+    projectStatus = "blocked";
+    projectReasonCode = "attached_project_workspace_mismatch";
+    projectReasonSummary =
+      "Attached project workspace no longer matches the run workspace, so recovery must stop for operator repair.";
+  } else if (!baselineSnapshot) {
+    projectStatus = "degraded";
+    projectReasonCode = "attached_project_baseline_missing";
+    projectReasonSummary =
+      "Attached project baseline snapshot is missing, so recovery should rebuild project facts before resuming.";
+  } else if (!capabilitySnapshot) {
+    projectStatus = "degraded";
+    projectReasonCode = "attached_project_capability_missing";
+    projectReasonSummary =
+      "Attached project capability snapshot is missing, so recovery should refresh project readiness before relaunch.";
+  } else {
+    const launchGate = capabilitySnapshot.launch_readiness[guidance.attemptType];
+    if (launchGate.status === "blocked") {
+      projectStatus = "blocked";
+      projectReasonCode = "attached_project_capability_blocked";
+      projectReasonSummary = launchGate.summary;
+    } else if (capabilitySnapshot.overall_status === "degraded") {
+      projectStatus = "degraded";
+      projectReasonCode = "attached_project_capability_degraded";
+      projectReasonSummary =
+        capabilitySnapshot.blocking_reasons[0]?.message ??
+        "Attached project capability is degraded and should be refreshed before execution."
+    }
+  }
+
+  const forcesProjectDegradedRebuild =
+    projectReasonCode === "attached_project_baseline_missing" ||
+    projectReasonCode === "attached_project_capability_missing";
+
+  return {
+    ...guidance,
+    path: forcesProjectDegradedRebuild ? "degraded_rebuild" : guidance.path,
+    nextAction: projectStatus === "blocked"
+      ? "wait_for_human"
+      : forcesProjectDegradedRebuild
+        ? "continue_research"
+        : guidance.nextAction,
+    attemptType: forcesProjectDegradedRebuild ? "research" : guidance.attemptType,
+    summary: forcesProjectDegradedRebuild
+      ? "Attached project recovery facts are incomplete, so recovery must rebuild from project and run evidence first."
+      : guidance.summary,
+    blockingReason:
+      projectStatus === "blocked" || forcesProjectDegradedRebuild
+        ? [projectReasonSummary, guidance.blockingReason].filter(Boolean).join(" ")
+        : guidance.blockingReason,
+    reasonCode: projectReasonCode ?? recoveryReason.code,
+    reasonSummary:
+      projectReasonSummary === null
+        ? recoveryReason.summary
+        : [projectReasonSummary, recoveryReason.summary].join(" "),
+    projectStatus,
+    projectProfileRef,
+    baselineSnapshotRef,
+    capabilitySnapshotRef,
+    baselineRefs,
+    keyFileRefs: buildAttachedProjectKeyFileRefs(project),
+    latestSettledEvidenceRefs
+  };
 }
 
 function isExecutionApprovalPending(
@@ -916,6 +1235,13 @@ export async function buildServer(
       handoff: latestAttemptSurface.latest_handoff_bundle,
       ref: latestAttemptSurface.latest_handoff_bundle_ref
     });
+    const recoveryGuidance = await readRunRecoveryGuidance({
+      workspacePaths,
+      runId,
+      run,
+      current,
+      attempts
+    });
     const runHealth =
       maintenancePlaneView.maintenance_plane?.run_health ??
       assessRunHealth({
@@ -989,6 +1315,7 @@ export async function buildServer(
       default_verifier_kit_profile: defaultVerifierKitProfile,
       effective_policy_bundle: effectivePolicyBundle,
       worker_effort: workerEffort,
+      recovery_guidance: toRecoveryPayload(recoveryGuidance),
       attempts,
       attempt_details: attemptDetails,
       steers,
@@ -1846,11 +2173,12 @@ export async function buildServer(
         });
       }
       const latestAttempt = pickLatestAttempt(attempts, current);
-      const recoveryGuidance = deriveRunRecoveryGuidance({
+      const recoveryGuidance = await readRunRecoveryGuidance({
+        workspacePaths,
+        runId,
+        run,
         current,
-        latestAttempt,
-        latestHandoffBundle: latestAttemptSurface.latestHandoffBundle,
-        latestHandoffBundleRef: latestAttemptSurface.latestHandoffBundleRef
+        attempts
       });
       const resumesApprovedExecution = hasApprovedExecutionPlan(policyRuntime);
       const forcesResearchReplan =
@@ -2004,6 +2332,7 @@ export async function buildServer(
       return {
         current: nextCurrent,
         recovery: {
+          ...toRecoveryPayload(recoveryGuidance),
           path: resumesApprovedExecution
             ? "approved_execution_plan"
             : forcesResearchReplan
@@ -2425,6 +2754,7 @@ export async function buildServer(
         current: nextCurrent,
         policy_runtime: nextPolicy,
         recovery: {
+          ...toRecoveryPayload(recoveryGuidance),
           path: resumesApprovedExecution
             ? "approved_execution_plan"
             : recoveryGuidance.path,
@@ -2523,10 +2853,7 @@ export async function buildServer(
             status: "noop",
             message: summary
           },
-          recovery: {
-            path: recoveryGuidance.path,
-            handoff_bundle_ref: recoveryGuidance.handoffBundleRef
-          }
+          recovery: toRecoveryPayload(recoveryGuidance)
         };
       } catch (error) {
         if (
@@ -2599,10 +2926,7 @@ export async function buildServer(
           run: repair.run,
           current: nextCurrent,
           repair,
-          recovery: {
-            path: recoveryGuidance.path,
-            handoff_bundle_ref: recoveryGuidance.handoffBundleRef
-          }
+          recovery: toRecoveryPayload(recoveryGuidance)
         };
       }
     } catch (error) {

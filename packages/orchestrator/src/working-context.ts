@@ -14,11 +14,15 @@ import {
   type RunWorkingContextDegradedState
 } from "@autoresearch/domain";
 import {
+  buildProjectRef,
   getAttemptContract,
   getAttemptHandoffBundle,
   getAttemptPreflightEvaluation,
   getAttemptReviewPacket,
   getAttemptRuntimeVerification,
+  getAttachedProjectBaselineSnapshot,
+  getAttachedProjectCapabilitySnapshot,
+  getAttachedProjectProfile,
   getCurrentDecision,
   getRun,
   getRunAutomationControl,
@@ -136,6 +140,69 @@ function buildAttemptHandoffBundleRef(
     paths,
     resolveAttemptPaths(paths, runId, attemptId).handoffBundleFile
   );
+}
+
+function buildAttachedProjectBaselineRefs(input: {
+  paths: WorkspacePaths;
+  projectId: string;
+  project: Awaited<ReturnType<typeof getAttachedProjectProfile>> | null;
+  baselineSnapshot: Awaited<ReturnType<typeof getAttachedProjectBaselineSnapshot>>;
+  capabilitySnapshot: Awaited<ReturnType<typeof getAttachedProjectCapabilitySnapshot>>;
+}): RunWorkingContext["baseline_refs"] {
+  const refs: RunWorkingContext["baseline_refs"] = [];
+
+  if (input.project) {
+    refs.push({
+      kind: "project_profile",
+      ref: buildProjectRef(input.paths, input.projectId, "profileFile"),
+      note: `${input.project.project_type} / ${input.project.primary_language}`
+    });
+  }
+
+  if (input.baselineSnapshot) {
+    refs.push({
+      kind: "baseline_snapshot",
+      ref: buildProjectRef(input.paths, input.projectId, "baselineSnapshotFile"),
+      note:
+        input.baselineSnapshot.git.head_sha
+          ? `head=${input.baselineSnapshot.git.head_sha}`
+          : "git baseline captured"
+    });
+  }
+
+  if (input.capabilitySnapshot) {
+    refs.push({
+      kind: "capability_snapshot",
+      ref: buildProjectRef(input.paths, input.projectId, "capabilitySnapshotFile"),
+      note: `status=${input.capabilitySnapshot.overall_status}`
+    });
+  }
+
+  return refs;
+}
+
+function buildAttachedProjectKeyFileRefs(input: {
+  project: Awaited<ReturnType<typeof getAttachedProjectProfile>> | null;
+}): RunWorkingContext["key_file_refs"] {
+  if (!input.project) {
+    return [];
+  }
+
+  const manifestFiles = Array.from(
+    new Set(
+      input.project.manifest_files.filter(
+        (file: unknown): file is string => typeof file === "string"
+      )
+    )
+  ) as string[];
+
+  return manifestFiles
+    .slice(0, 5)
+    .map((file) => ({
+      kind: "project_manifest",
+      ref: join(input.project.workspace_root, file),
+      note: input.project.detection_reasons[0] ?? "detected project manifest"
+    }));
 }
 
 function pickLatestAttempt(
@@ -454,6 +521,31 @@ export async function buildRunWorkingContext(
           getAttemptHandoffBundle(paths, runId, latestAttempt.id)
         ])
       : [null, null, null, null, null];
+  const attachedProjectId = run.attached_project_id;
+  const attachedProject =
+    attachedProjectId === null
+      ? null
+      : await getAttachedProjectProfile(paths, attachedProjectId).catch(() => null);
+  const [attachedProjectBaselineSnapshot, attachedProjectCapabilitySnapshot] =
+    attachedProjectId === null
+      ? [null, null]
+      : await Promise.all([
+          getAttachedProjectBaselineSnapshot(paths, attachedProjectId),
+          getAttachedProjectCapabilitySnapshot(paths, attachedProjectId)
+        ]);
+  const baselineRefs =
+    attachedProjectId === null
+      ? []
+      : buildAttachedProjectBaselineRefs({
+          paths,
+          projectId: attachedProjectId,
+          project: attachedProject,
+          baselineSnapshot: attachedProjectBaselineSnapshot,
+          capabilitySnapshot: attachedProjectCapabilitySnapshot
+        });
+  const keyFileRefs = buildAttachedProjectKeyFileRefs({
+    project: attachedProject
+  });
 
   const activeTaskRefs: RunWorkingContext["active_task_refs"] = [];
   if (latestAttempt) {
@@ -535,6 +627,8 @@ export async function buildRunWorkingContext(
         ? buildAttemptContractRef(paths, runId, latestAttempt.id)
         : buildRunContractRef(paths, runId),
     active_task_refs: activeTaskRefs,
+    baseline_refs: baselineRefs,
+    key_file_refs: keyFileRefs,
     recent_evidence_refs: recentEvidenceRefs,
     current_focus: focus,
     current_blocker: blocker,

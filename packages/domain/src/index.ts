@@ -794,6 +794,8 @@ export const RunWorkingContextSchema = z.object({
   run_id: z.string(),
   plan_ref: z.string().nullable().default(null),
   active_task_refs: z.array(RunWorkingContextTaskRefSchema).default([]),
+  baseline_refs: z.array(RunWorkingContextEvidenceRefSchema).default([]),
+  key_file_refs: z.array(RunWorkingContextEvidenceRefSchema).default([]),
   recent_evidence_refs: z.array(RunWorkingContextEvidenceRefSchema).default([]),
   current_focus: z.string().nullable().default(null),
   current_blocker: RunWorkingContextBlockerSchema.nullable().default(null),
@@ -2724,6 +2726,8 @@ export function createRunWorkingContext(input: {
   run_id: string;
   plan_ref?: string | null;
   active_task_refs?: RunWorkingContextTaskRef[];
+  baseline_refs?: RunWorkingContextEvidenceRef[];
+  key_file_refs?: RunWorkingContextEvidenceRef[];
   recent_evidence_refs?: RunWorkingContextEvidenceRef[];
   current_focus?: string | null;
   current_blocker?: RunWorkingContextBlocker | null;
@@ -2744,6 +2748,8 @@ export function createRunWorkingContext(input: {
     run_id: input.run_id,
     plan_ref: input.plan_ref ?? null,
     active_task_refs: input.active_task_refs ?? [],
+    baseline_refs: input.baseline_refs ?? [],
+    key_file_refs: input.key_file_refs ?? [],
     recent_evidence_refs: input.recent_evidence_refs ?? [],
     current_focus: input.current_focus ?? null,
     current_blocker: input.current_blocker ?? null,

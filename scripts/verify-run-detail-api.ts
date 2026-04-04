@@ -30,6 +30,7 @@ import {
   getRunMailbox,
   getRunPolicyRuntime,
   listAttempts,
+  resolveProjectPaths,
   resolveRunPaths,
   resolveAttemptPaths,
   resolveWorkspacePaths,
@@ -1985,6 +1986,94 @@ async function main(): Promise<void> {
     assert.equal(resumedCurrent?.waiting_for_human, false);
     const resumedPolicy = await getRunPolicyRuntime(workspacePaths, resumableRun.id);
     assert.ok(resumedPolicy, "relaunch should keep policy runtime readable after degraded rebuild");
+    await rm(
+      resolveProjectPaths(
+        workspacePaths,
+        attachedNodeProject.project.id
+      ).baselineSnapshotFile,
+      {
+        force: true
+      }
+    );
+    const attachedRecoveryDetailResponse = await app.inject({
+      method: "GET",
+      url: `/runs/${attachedResearchRun.run.id}`
+    });
+    assert.equal(attachedRecoveryDetailResponse.statusCode, 200);
+    const attachedRecoveryDetailPayload = attachedRecoveryDetailResponse.json() as {
+      recovery_guidance: {
+        path: string;
+        recommended_next_action: string;
+        recommended_attempt_type: string;
+        reason_code: string;
+        project_status: string;
+        project_profile_ref: string | null;
+        baseline_snapshot_ref: string | null;
+        capability_snapshot_ref: string | null;
+        baseline_refs: Array<{
+          kind: string;
+          ref: string;
+          label: string;
+          summary: string | null;
+        }>;
+        key_file_refs: Array<{
+          kind: string;
+          ref: string;
+          label: string;
+          summary: string | null;
+        }>;
+        latest_settled_evidence_refs: Array<{
+          kind: string;
+          ref: string;
+          label: string;
+          summary: string | null;
+        }>;
+      };
+    };
+    assert.equal(
+      attachedRecoveryDetailPayload.recovery_guidance.path,
+      "degraded_rebuild"
+    );
+    assert.equal(
+      attachedRecoveryDetailPayload.recovery_guidance.recommended_next_action,
+      "continue_research"
+    );
+    assert.equal(
+      attachedRecoveryDetailPayload.recovery_guidance.recommended_attempt_type,
+      "research"
+    );
+    assert.equal(
+      attachedRecoveryDetailPayload.recovery_guidance.reason_code,
+      "attached_project_baseline_missing"
+    );
+    assert.equal(
+      attachedRecoveryDetailPayload.recovery_guidance.project_status,
+      "degraded"
+    );
+    assert.ok(
+      attachedRecoveryDetailPayload.recovery_guidance.project_profile_ref?.endsWith(
+        "project-profile.json"
+      )
+    );
+    assert.equal(
+      attachedRecoveryDetailPayload.recovery_guidance.baseline_snapshot_ref,
+      null
+    );
+    assert.ok(
+      attachedRecoveryDetailPayload.recovery_guidance.capability_snapshot_ref?.endsWith(
+        "capability-snapshot.json"
+      )
+    );
+    assert.ok(
+      attachedRecoveryDetailPayload.recovery_guidance.baseline_refs.some(
+        (ref) => ref.kind === "project_profile"
+      )
+    );
+    assert.ok(
+      attachedRecoveryDetailPayload.recovery_guidance.key_file_refs.some(
+        (ref) => ref.label === "package.json"
+      )
+    );
 
     const approvalRun = createRun({
       title: "Mailbox approval verification",
@@ -2688,6 +2777,36 @@ async function main(): Promise<void> {
       harness_slots: HarnessSlotsPayload;
       default_verifier_kit_profile: VerifierKitProfilePayload;
       effective_policy_bundle: EffectivePolicyBundlePayload;
+      recovery_guidance: {
+        path: string;
+        recommended_next_action: string;
+        recommended_attempt_type: string;
+        handoff_bundle_ref: string | null;
+        reason_code: string;
+        reason: string;
+        project_status: string;
+        project_profile_ref: string | null;
+        baseline_snapshot_ref: string | null;
+        capability_snapshot_ref: string | null;
+        baseline_refs: Array<{
+          kind: string;
+          ref: string;
+          label: string;
+          summary: string | null;
+        }>;
+        key_file_refs: Array<{
+          kind: string;
+          ref: string;
+          label: string;
+          summary: string | null;
+        }>;
+        latest_settled_evidence_refs: Array<{
+          kind: string;
+          ref: string;
+          label: string;
+          summary: string | null;
+        }>;
+      };
       worker_effort: {
         execution: { requested_effort: string; status: string };
         reviewer: { requested_effort: string; status: string };
@@ -3560,6 +3679,35 @@ async function main(): Promise<void> {
         (item) => item.kind === "handoff_bundle" && item.ref.endsWith("handoff_bundle.json")
       )
     );
+    assert.equal(payload.recovery_guidance.path, "handoff_first");
+    assert.equal(
+      payload.recovery_guidance.recommended_next_action,
+      "retry_attempt"
+    );
+    assert.equal(
+      payload.recovery_guidance.recommended_attempt_type,
+      "execution"
+    );
+    assert.equal(
+      payload.recovery_guidance.reason_code,
+      "settled_handoff_available"
+    );
+    assert.equal(payload.recovery_guidance.project_status, "not_applicable");
+    assert.ok(
+      payload.recovery_guidance.handoff_bundle_ref?.endsWith("handoff_bundle.json")
+    );
+    assert.ok(
+      payload.recovery_guidance.latest_settled_evidence_refs.some(
+        (item) => item.kind === "handoff_bundle"
+      )
+    );
+    assert.ok(
+      payload.recovery_guidance.latest_settled_evidence_refs.some(
+        (item) => item.kind === "runtime_verification"
+      )
+    );
+    assert.equal(payload.recovery_guidance.baseline_refs.length, 0);
+    assert.equal(payload.recovery_guidance.key_file_refs.length, 0);
     assert.equal(payload.working_context_degraded.is_degraded, false);
     assert.equal(payload.working_context?.version, 1);
     assert.equal(payload.working_context?.source_attempt_id, blockerAttempt.id);

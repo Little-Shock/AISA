@@ -22,3 +22,7 @@
 
 - `run` 级入口，比如创建、启动、读取和恢复
 - project attach / project-first run 入口，用来把外部仓库先收成 project profile、baseline snapshot、capability snapshot，给出 stack pack / task preset 推荐和 execution contract 预览，并从 attached project 直接创建 run
+
+当前 run detail 读面还会额外暴露一份 `recovery_guidance`。
+
+它把 recovery path、reason、latest settled evidence refs、project profile / baseline / capability refs 收成一处，避免外部项目恢复时只能自己拼判断。
