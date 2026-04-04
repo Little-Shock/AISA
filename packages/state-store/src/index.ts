@@ -10,6 +10,7 @@ import {
 import { basename, dirname, join, relative } from "node:path";
 import type {
   AttachedProjectBaselineSnapshot,
+  AttachedProjectCapabilitySnapshot,
   AttachedProjectProfile,
   Attempt,
   AttemptAdversarialVerification,
@@ -51,6 +52,7 @@ import type {
 } from "@autoresearch/domain";
 import {
   AttachedProjectBaselineSnapshotSchema,
+  AttachedProjectCapabilitySnapshotSchema,
   AttachedProjectProfileSchema,
   AttemptSchema,
   AttemptAdversarialVerificationSchema,
@@ -104,6 +106,7 @@ export interface ProjectPaths {
   artifactDir: string;
   profileFile: string;
   baselineSnapshotFile: string;
+  capabilitySnapshotFile: string;
 }
 
 export interface GoalPaths {
@@ -186,7 +189,10 @@ export type RunRefKey =
   | "journalFile"
   | "runtimeHealthSnapshotFile";
 
-export type ProjectRefKey = "profileFile" | "baselineSnapshotFile";
+export type ProjectRefKey =
+  | "profileFile"
+  | "baselineSnapshotFile"
+  | "capabilitySnapshotFile";
 
 export type AttemptRefKey =
   | "metaFile"
@@ -279,6 +285,12 @@ export function resolveProjectPaths(
       "projects",
       projectId,
       "baseline-snapshot.json"
+    ),
+    capabilitySnapshotFile: join(
+      paths.artifactsDir,
+      "projects",
+      projectId,
+      "capability-snapshot.json"
     )
   };
 }
@@ -819,6 +831,33 @@ export async function getAttachedProjectBaselineSnapshot(
         resolveProjectPaths(paths, projectId).baselineSnapshotFile
       );
     return AttachedProjectBaselineSnapshotSchema.parse(baselineSnapshot);
+  } catch {
+    return null;
+  }
+}
+
+export async function saveAttachedProjectCapabilitySnapshot(
+  paths: WorkspacePaths,
+  capabilitySnapshot: AttachedProjectCapabilitySnapshot
+): Promise<void> {
+  await ensureWorkspace(paths);
+  const projectPaths = await ensureProjectDirectories(
+    paths,
+    capabilitySnapshot.project_id
+  );
+  await writeJsonFile(projectPaths.capabilitySnapshotFile, capabilitySnapshot);
+}
+
+export async function getAttachedProjectCapabilitySnapshot(
+  paths: WorkspacePaths,
+  projectId: string
+): Promise<AttachedProjectCapabilitySnapshot | null> {
+  try {
+    const capabilitySnapshot =
+      await readJsonFile<AttachedProjectCapabilitySnapshot>(
+        resolveProjectPaths(paths, projectId).capabilitySnapshotFile
+      );
+    return AttachedProjectCapabilitySnapshotSchema.parse(capabilitySnapshot);
   } catch {
     return null;
   }

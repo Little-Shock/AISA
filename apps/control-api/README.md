@@ -21,4 +21,4 @@
 当前还额外承担两类入口：
 
 - `run` 级入口，比如创建、启动、读取和恢复
-- project attach 入口，用来把外部仓库先收成 project profile 和 baseline snapshot
+- project attach / project-first run 入口，用来把外部仓库先收成 project profile、baseline snapshot、capability snapshot，并从 attached project 直接创建 run

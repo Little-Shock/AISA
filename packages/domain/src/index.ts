@@ -254,6 +254,7 @@ export const RunSchema = z.object({
   constraints: z.array(z.string().min(1)).default([]),
   owner_id: z.string(),
   workspace_root: z.string().min(1),
+  attached_project_id: z.string().nullable().default(null),
   managed_workspace_root: z.string().min(1).nullable().default(null),
   harness_profile: RunHarnessProfileSchema.default(DEFAULT_RUN_HARNESS_PROFILE),
   budget: BudgetSchema,
@@ -379,6 +380,83 @@ export const AttachedProjectBaselineSnapshotSchema = z.object({
   git: AttachedProjectGitBaselineSchema,
   toolchain: AttachedProjectToolchainSnapshotSchema,
   repo_health: AttachedProjectRepoHealthSchema
+});
+
+export const AttachedProjectCapabilityStatusSchema = z.enum([
+  "ready",
+  "blocked",
+  "warning",
+  "not_applicable"
+]);
+
+export const AttachedProjectCapabilityReasonSchema = z.object({
+  code: z.string().min(1),
+  message: z.string().min(1)
+});
+
+export const AttachedProjectCapabilityToolSchema = z.object({
+  tool: z.string().min(1),
+  required: z.boolean(),
+  available: z.boolean(),
+  version: z.string().nullable().default(null),
+  reason: z.string().nullable().default(null)
+});
+
+export const AttachedProjectCapabilityWorkerAdapterSchema = z.object({
+  type: z.string().min(1),
+  command: z.string().min(1),
+  model: z.string().nullable().default(null),
+  available: z.boolean(),
+  summary: z.string().min(1),
+  blocking_reasons: z.array(AttachedProjectCapabilityReasonSchema).default([])
+});
+
+export const AttachedProjectCapabilityCommandCheckSchema = z.object({
+  label: z.string().min(1),
+  command: z.string().nullable().default(null),
+  entrypoint: z.string().nullable().default(null),
+  status: AttachedProjectCapabilityStatusSchema,
+  summary: z.string().min(1),
+  reason_code: z.string().nullable().default(null)
+});
+
+export const AttachedProjectCapabilityLaunchGateSchema = z.object({
+  attempt_type: AttemptTypeSchema,
+  status: z.enum(["ready", "blocked"]),
+  summary: z.string().min(1),
+  blocking_reasons: z.array(AttachedProjectCapabilityReasonSchema).default([])
+});
+
+export const AttachedProjectCapabilitySnapshotSchema = z.object({
+  project_id: z.string(),
+  workspace_root: z.string().min(1),
+  captured_at: z.string().datetime(),
+  overall_status: z.enum(["ready", "degraded", "blocked"]),
+  blocking_reasons: z.array(AttachedProjectCapabilityReasonSchema).default([]),
+  workspace_scope: z.object({
+    within_allowed_scope: z.boolean(),
+    matched_scope_root: z.string().nullable().default(null),
+    summary: z.string().min(1)
+  }),
+  worker_adapter: AttachedProjectCapabilityWorkerAdapterSchema,
+  toolchain: z.object({
+    git: AttachedProjectCapabilityToolSchema,
+    node: AttachedProjectCapabilityToolSchema,
+    pnpm: AttachedProjectCapabilityToolSchema,
+    npm: AttachedProjectCapabilityToolSchema,
+    python: AttachedProjectCapabilityToolSchema,
+    pip: AttachedProjectCapabilityToolSchema,
+    poetry: AttachedProjectCapabilityToolSchema,
+    uv: AttachedProjectCapabilityToolSchema,
+    go: AttachedProjectCapabilityToolSchema
+  }),
+  verification_commands: z.array(
+    AttachedProjectCapabilityCommandCheckSchema
+  ).default([]),
+  launch_readiness: z.object({
+    research: AttachedProjectCapabilityLaunchGateSchema,
+    execution: AttachedProjectCapabilityLaunchGateSchema
+  })
 });
 
 export const AttachProjectInputSchema = z.object({
@@ -1576,6 +1654,27 @@ export type AttachedProjectRepoHealth = z.infer<
 export type AttachedProjectBaselineSnapshot = z.infer<
   typeof AttachedProjectBaselineSnapshotSchema
 >;
+export type AttachedProjectCapabilityStatus = z.infer<
+  typeof AttachedProjectCapabilityStatusSchema
+>;
+export type AttachedProjectCapabilityReason = z.infer<
+  typeof AttachedProjectCapabilityReasonSchema
+>;
+export type AttachedProjectCapabilityTool = z.infer<
+  typeof AttachedProjectCapabilityToolSchema
+>;
+export type AttachedProjectCapabilityWorkerAdapter = z.infer<
+  typeof AttachedProjectCapabilityWorkerAdapterSchema
+>;
+export type AttachedProjectCapabilityCommandCheck = z.infer<
+  typeof AttachedProjectCapabilityCommandCheckSchema
+>;
+export type AttachedProjectCapabilityLaunchGate = z.infer<
+  typeof AttachedProjectCapabilityLaunchGateSchema
+>;
+export type AttachedProjectCapabilitySnapshot = z.infer<
+  typeof AttachedProjectCapabilitySnapshotSchema
+>;
 export type AttachProjectInput = z.infer<typeof AttachProjectInputSchema>;
 export type Branch = z.infer<typeof BranchSchema>;
 export type WorkerRun = z.infer<typeof WorkerRunSchema>;
@@ -1925,6 +2024,29 @@ export function createAttachedProjectBaselineSnapshot(input: {
     captured_at: new Date().toISOString(),
     toolchain: input.toolchain,
     repo_health: input.repo_health
+  });
+}
+
+export function createAttachedProjectCapabilitySnapshot(input: {
+  project_id: string;
+  workspace_root: string;
+  overall_status: "ready" | "degraded" | "blocked";
+  blocking_reasons?: AttachedProjectCapabilityReason[];
+  workspace_scope: {
+    within_allowed_scope: boolean;
+    matched_scope_root?: string | null;
+    summary: string;
+  };
+  worker_adapter: AttachedProjectCapabilityWorkerAdapter;
+  toolchain: AttachedProjectCapabilitySnapshot["toolchain"];
+  verification_commands?: AttachedProjectCapabilityCommandCheck[];
+  launch_readiness: AttachedProjectCapabilitySnapshot["launch_readiness"];
+}): AttachedProjectCapabilitySnapshot {
+  return AttachedProjectCapabilitySnapshotSchema.parse({
+    ...input,
+    captured_at: new Date().toISOString(),
+    blocking_reasons: input.blocking_reasons ?? [],
+    verification_commands: input.verification_commands ?? []
   });
 }
 

@@ -7485,6 +7485,10 @@ export {
 } from "./effective-policy-bundle.js";
 
 export {
+  captureAttachedProjectCapabilitySnapshot,
+} from "./project-capability.js";
+
+export {
   inspectAttachedProjectWorkspace,
   ProjectAttachError
 } from "./project-attach.js";

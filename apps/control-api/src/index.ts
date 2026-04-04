@@ -28,9 +28,10 @@ import { appendEvent, listEvents } from "@autoresearch/event-log";
 import {
   assessRunHealth,
   buildRuntimeWorkspaceScopeRoots,
+  captureAttachedProjectCapabilitySnapshot,
   captureSelfBootstrapRuntimeHealthSnapshot,
-  createRunWorkspaceScopePolicy,
   captureSelfBootstrapNextTaskArtifacts,
+  createRunWorkspaceScopePolicy,
   deriveRunRecoveryGuidance,
   deriveRunSurfaceFailureSignal,
   lockRunWorkspaceRoot,
@@ -57,6 +58,7 @@ import {
   buildProjectRef,
   buildRunRef,
   getAttachedProjectBaselineSnapshot,
+  getAttachedProjectCapabilitySnapshot,
   getAttachedProjectProfile,
   getAttemptAdversarialVerification,
   getAttemptContract,
@@ -102,6 +104,7 @@ import {
   readRunMailboxStrict,
   saveCurrentDecision,
   saveAttachedProjectBaselineSnapshot,
+  saveAttachedProjectCapabilitySnapshot,
   saveAttachedProjectProfile,
   saveBranch,
   saveGoal,
@@ -1119,15 +1122,31 @@ export async function buildServer(
     };
   };
 
+  const captureAndPersistAttachedProjectCapability = async (
+    project: AttachedProjectProfile
+  ) => {
+    const capabilitySnapshot = await captureAttachedProjectCapabilitySnapshot({
+      project,
+      policy: runWorkspaceScopePolicy,
+      executionAdapter: {
+        type: adapter.type,
+        command: adapterConfig.command,
+        model: adapterConfig.model ?? null
+      }
+    });
+    await saveAttachedProjectCapabilitySnapshot(workspacePaths, capabilitySnapshot);
+    return capabilitySnapshot;
+  };
+
   const buildAttachedProjectPayload = async (
     projectId: string,
     ownerId?: string | null
   ) => {
-    const project = await getAttachedProjectProfile(workspacePaths, projectId);
-    const baselineSnapshot = await getAttachedProjectBaselineSnapshot(
-      workspacePaths,
-      projectId
-    );
+    const [project, baselineSnapshot, capabilitySnapshot] = await Promise.all([
+      getAttachedProjectProfile(workspacePaths, projectId),
+      getAttachedProjectBaselineSnapshot(workspacePaths, projectId),
+      getAttachedProjectCapabilitySnapshot(workspacePaths, projectId)
+    ]);
 
     return {
       project,
@@ -1135,6 +1154,10 @@ export async function buildServer(
       baseline_snapshot: baselineSnapshot,
       baseline_snapshot_ref: baselineSnapshot
         ? buildProjectRef(workspacePaths, projectId, "baselineSnapshotFile")
+        : null,
+      capability_snapshot: capabilitySnapshot,
+      capability_snapshot_ref: capabilitySnapshot
+        ? buildProjectRef(workspacePaths, projectId, "capabilitySnapshotFile")
         : null,
       run_template: buildAttachedProjectRunTemplate({
         project,
@@ -1149,10 +1172,10 @@ export async function buildServer(
     return {
       projects: await Promise.all(
         projects.map(async (project) => {
-          const baselineSnapshot = await getAttachedProjectBaselineSnapshot(
-            workspacePaths,
-            project.id
-          );
+          const [baselineSnapshot, capabilitySnapshot] = await Promise.all([
+            getAttachedProjectBaselineSnapshot(workspacePaths, project.id),
+            getAttachedProjectCapabilitySnapshot(workspacePaths, project.id)
+          ]);
           return {
             project,
             project_profile_ref: buildProjectRef(
@@ -1167,7 +1190,17 @@ export async function buildServer(
                   "baselineSnapshotFile"
                 )
               : null,
-            baseline_captured_at: baselineSnapshot?.captured_at ?? null
+            baseline_captured_at: baselineSnapshot?.captured_at ?? null,
+            capability_snapshot: capabilitySnapshot,
+            capability_snapshot_ref: capabilitySnapshot
+              ? buildProjectRef(
+                  workspacePaths,
+                  project.id,
+                  "capabilitySnapshotFile"
+                )
+              : null,
+            capability_captured_at: capabilitySnapshot?.captured_at ?? null,
+            capability_overall_status: capabilitySnapshot?.overall_status ?? null
           };
         })
       )
@@ -1213,6 +1246,7 @@ export async function buildServer(
         workspacePaths,
         inspection.baselineSnapshot
       );
+      await captureAndPersistAttachedProjectCapability(inspection.project);
 
       return reply.code(201).send({
         ...(await buildAttachedProjectPayload(
@@ -1241,6 +1275,79 @@ export async function buildServer(
       return reply.code(400).send({
         message: describeWorkspaceScopeError(error)
       });
+    }
+  });
+
+  app.post("/projects/:projectId/runs", async (request, reply) => {
+    const { projectId } = request.params as { projectId: string };
+    const body =
+      (request.body as
+        | {
+            owner_id?: string;
+          }
+        | undefined) ?? {};
+
+    try {
+      const project = await getAttachedProjectProfile(workspacePaths, projectId);
+      const template = buildAttachedProjectRunTemplate({
+        project,
+        ownerId:
+          typeof body.owner_id === "string" ? body.owner_id : null
+      });
+      const lockedWorkspaceRoot = await lockWorkspaceRootOrThrow(
+        template.workspace_root
+      );
+      const run = createRun({
+        ...template,
+        attached_project_id: project.id,
+        workspace_root: lockedWorkspaceRoot
+      });
+      const current = createCurrentDecision({
+        run_id: run.id,
+        run_status: "draft",
+        summary: "Attached project run created. Waiting to launch."
+      });
+
+      await saveRun(workspacePaths, run);
+      await saveCurrentDecision(workspacePaths, current);
+      await appendRunJournal(
+        workspacePaths,
+        createRunJournalEntry({
+          run_id: run.id,
+          type: "run.created",
+          payload: {
+            title: run.title,
+            owner_id: run.owner_id,
+            workspace_root: run.workspace_root,
+            attached_project_id: project.id
+          }
+        })
+      );
+      await refreshRunOperatorSurface(workspacePaths, run.id);
+
+      return reply.code(201).send({
+        run,
+        current,
+        attached_project: await buildAttachedProjectPayload(
+          project.id,
+          body.owner_id ?? null
+        )
+      });
+    } catch (error) {
+      const err = error as NodeJS.ErrnoException;
+      if (err?.code === "ENOENT") {
+        return reply.code(404).send({
+          message: `Attached project not found: ${projectId}`
+        });
+      }
+
+      if (error instanceof RunWorkspaceScopeError) {
+        return reply.code(400).send({
+          message: error.message
+        });
+      }
+
+      throw error;
     }
   });
 
@@ -1694,6 +1801,51 @@ export async function buildServer(
               attempts
             })
           : recoveryGuidance.attemptType;
+      if (run.attached_project_id) {
+        let attachedProject: AttachedProjectProfile;
+
+        try {
+          attachedProject = await getAttachedProjectProfile(
+            workspacePaths,
+            run.attached_project_id
+          );
+        } catch (error) {
+          const err = error as NodeJS.ErrnoException;
+          if (err?.code === "ENOENT") {
+            return reply.code(409).send({
+              code: "attached_project_missing",
+              message: `Attached project not found: ${run.attached_project_id}`
+            });
+          }
+
+          throw error;
+        }
+
+        if (attachedProject.workspace_root !== run.workspace_root) {
+          return reply.code(409).send({
+            code: "attached_project_workspace_mismatch",
+            message:
+              "Attached project workspace no longer matches the run workspace."
+          });
+        }
+
+        const capabilitySnapshot =
+          await captureAndPersistAttachedProjectCapability(attachedProject);
+        const capabilityGate = capabilitySnapshot.launch_readiness[nextAttemptType];
+        if (capabilityGate.status === "blocked") {
+          return reply.code(409).send({
+            code: "attached_project_capability_blocked",
+            message: capabilityGate.summary,
+            attempt_type: nextAttemptType,
+            capability_snapshot: capabilitySnapshot,
+            capability_snapshot_ref: buildProjectRef(
+              workspacePaths,
+              attachedProject.id,
+              "capabilitySnapshotFile"
+            )
+          });
+        }
+      }
       const launchSummary = resumesApprovedExecution
         ? "Run resumed. Loop will dispatch the approved execution plan."
         : forcesResearchReplan

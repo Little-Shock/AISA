@@ -206,9 +206,12 @@ type EffectivePolicyBundlePayload = {
 };
 
 async function main(): Promise<void> {
+  const previousExecutionCommand = process.env.AISA_EXECUTION_COMMAND;
+
   try {
   const rootDir = await createTrackedVerifyTempDir("aisa-run-detail-api-");
   const projectScopeDir = await createTrackedVerifyTempDir("aisa-run-scope-");
+  process.env.AISA_EXECUTION_COMMAND = "node";
   const projectRoot = join(projectScopeDir, "project-a");
   const selfBootstrapSourceAssetPath = join(
     rootDir,
@@ -1067,9 +1070,30 @@ async function main(): Promise<void> {
       };
       baseline_snapshot_ref: string | null;
       run_template: {
+        title: string;
         owner_id: string;
         workspace_root: string;
+        constraints: string[];
       };
+      capability_snapshot: {
+        overall_status: string;
+        verification_commands: Array<{
+          label: string;
+          reason_code: string | null;
+        }>;
+        launch_readiness: {
+          research: {
+            status: string;
+          };
+          execution: {
+            status: string;
+            blocking_reasons: Array<{
+              code: string;
+            }>;
+          };
+        };
+      };
+      capability_snapshot_ref: string | null;
     };
     assert.equal(attachedNodeProject.project.project_type, "node_repo");
     assert.equal(attachedNodeProject.project.primary_language, "typescript");
@@ -1108,12 +1132,48 @@ async function main(): Promise<void> {
     );
     assert.equal(attachedNodeProject.run_template.owner_id, "attach-owner");
     assert.equal(
+      attachedNodeProject.run_template.title,
+      "Attach attached-node-project"
+    );
+    assert.equal(
       attachedNodeProject.run_template.workspace_root,
       await realpath(attachedNodeProjectRoot)
     );
     assert.ok(
+      attachedNodeProject.run_template.constraints.some((constraint) =>
+        constraint.includes(attachedNodeProject.project.workspace_root)
+      )
+    );
+    assert.ok(
       attachedNodeProject.baseline_snapshot.git.head_sha,
       "attach should capture git baseline head sha for committed repos"
+    );
+    assert.match(
+      attachedNodeProject.capability_snapshot_ref ?? "",
+      /artifacts\/projects\/project_[a-f0-9]{10}\/capability-snapshot\.json$/u
+    );
+    assert.equal(attachedNodeProject.capability_snapshot.overall_status, "degraded");
+    assert.equal(
+      attachedNodeProject.capability_snapshot.launch_readiness.research.status,
+      "ready"
+    );
+    assert.equal(
+      attachedNodeProject.capability_snapshot.launch_readiness.execution.status,
+      "blocked"
+    );
+    assert.ok(
+      attachedNodeProject.capability_snapshot.launch_readiness.execution.blocking_reasons.some(
+        (reason) => reason.code === "missing_local_verifier_toolchain"
+      ),
+      "node attach should surface missing_local_verifier_toolchain for execution readiness"
+    );
+    assert.ok(
+      attachedNodeProject.capability_snapshot.verification_commands.some(
+        (command) =>
+          ["build", "test", "start"].includes(command.label) &&
+          command.reason_code === "missing_local_verifier_toolchain"
+      ),
+      "node attach should flag replay commands that require missing node_modules"
     );
 
     const attachedPythonProjectRoot = join(projectScopeDir, "attached-python-project");
@@ -1168,6 +1228,8 @@ async function main(): Promise<void> {
           project_type: string;
         };
         baseline_snapshot_ref: string | null;
+        capability_snapshot_ref: string | null;
+        capability_overall_status: string | null;
       }>;
     };
     assert.ok(
@@ -1175,9 +1237,11 @@ async function main(): Promise<void> {
         (item) =>
           item.project.id === attachedNodeProject.project.id &&
           item.project.project_type === "node_repo" &&
-          item.baseline_snapshot_ref !== null
+          item.baseline_snapshot_ref !== null &&
+          item.capability_snapshot_ref !== null &&
+          item.capability_overall_status === "degraded"
       ),
-      "attached node project should appear in project list with a baseline ref"
+      "attached node project should appear in project list with baseline and capability refs"
     );
     assert.ok(
       attachedProjectsList.projects.some(
@@ -1202,6 +1266,17 @@ async function main(): Promise<void> {
         id: string;
       };
       baseline_snapshot_ref: string | null;
+      capability_snapshot: {
+        launch_readiness: {
+          research: {
+            status: string;
+          };
+          execution: {
+            status: string;
+          };
+        };
+      };
+      capability_snapshot_ref: string | null;
     };
     assert.equal(
       attachedNodeProjectDetail.project.id,
@@ -1210,6 +1285,87 @@ async function main(): Promise<void> {
     assert.equal(
       attachedNodeProjectDetail.baseline_snapshot_ref,
       attachedNodeProject.baseline_snapshot_ref
+    );
+    assert.equal(
+      attachedNodeProjectDetail.capability_snapshot_ref,
+      attachedNodeProject.capability_snapshot_ref
+    );
+    assert.equal(
+      attachedNodeProjectDetail.capability_snapshot.launch_readiness.research.status,
+      attachedNodeProject.capability_snapshot.launch_readiness.research.status
+    );
+    assert.equal(
+      attachedNodeProjectDetail.capability_snapshot.launch_readiness.execution.status,
+      attachedNodeProject.capability_snapshot.launch_readiness.execution.status
+    );
+
+    const attachedResearchRunResponse = await app.inject({
+      method: "POST",
+      url: `/projects/${attachedNodeProject.project.id}/runs`,
+      payload: {
+        owner_id: "project-research-owner"
+      }
+    });
+    assert.equal(attachedResearchRunResponse.statusCode, 201);
+    const attachedResearchRun = attachedResearchRunResponse.json() as {
+      run: {
+        id: string;
+        title: string;
+        owner_id: string;
+        workspace_root: string;
+        attached_project_id: string | null;
+        constraints: string[];
+      };
+      current: {
+        run_status: string;
+        summary: string | null;
+      };
+      attached_project: {
+        project: {
+          id: string;
+        };
+      };
+    };
+    assert.equal(
+      attachedResearchRun.run.attached_project_id,
+      attachedNodeProject.project.id
+    );
+    assert.equal(attachedResearchRun.run.owner_id, "project-research-owner");
+    assert.equal(
+      attachedResearchRun.run.workspace_root,
+      attachedNodeProject.run_template.workspace_root
+    );
+    assert.equal(
+      attachedResearchRun.run.title,
+      attachedNodeProject.run_template.title
+    );
+    assert.deepEqual(
+      attachedResearchRun.run.constraints,
+      attachedNodeProject.run_template.constraints
+    );
+    assert.equal(attachedResearchRun.current.run_status, "draft");
+    assert.equal(
+      attachedResearchRun.attached_project.project.id,
+      attachedNodeProject.project.id
+    );
+
+    const attachedExecutionRunResponse = await app.inject({
+      method: "POST",
+      url: `/projects/${attachedNodeProject.project.id}/runs`,
+      payload: {
+        owner_id: "project-execution-owner"
+      }
+    });
+    assert.equal(attachedExecutionRunResponse.statusCode, 201);
+    const attachedExecutionRun = attachedExecutionRunResponse.json() as {
+      run: {
+        id: string;
+        attached_project_id: string | null;
+      };
+    };
+    assert.equal(
+      attachedExecutionRun.run.attached_project_id,
+      attachedNodeProject.project.id
     );
 
     const nonGitProjectRoot = join(projectScopeDir, "non-git-project");
@@ -1360,6 +1516,102 @@ async function main(): Promise<void> {
     assert.equal(blockedLaunchResponse.statusCode, 400);
     assert.match(blockedLaunchResponse.body, /工作区超出允许范围/u);
 
+    const attachedResearchLaunchResponse = await app.inject({
+      method: "POST",
+      url: `/runs/${attachedResearchRun.run.id}/launch`
+    });
+    assert.equal(attachedResearchLaunchResponse.statusCode, 200);
+    const attachedResearchLaunchPayload = attachedResearchLaunchResponse.json() as {
+      current: {
+        run_status: string;
+        waiting_for_human: boolean;
+        recommended_next_action: string | null;
+        recommended_attempt_type: string | null;
+      };
+      recovery: {
+        path: string;
+      };
+    };
+    assert.equal(attachedResearchLaunchPayload.current.run_status, "running");
+    assert.equal(attachedResearchLaunchPayload.current.waiting_for_human, false);
+    assert.equal(
+      attachedResearchLaunchPayload.current.recommended_next_action,
+      "start_first_attempt"
+    );
+    assert.equal(
+      attachedResearchLaunchPayload.current.recommended_attempt_type,
+      "research"
+    );
+    assert.equal(attachedResearchLaunchPayload.recovery.path, "first_attempt");
+
+    await saveCurrentDecision(
+      workspacePaths,
+      createCurrentDecision({
+        run_id: attachedExecutionRun.run.id,
+        run_status: "waiting_steer",
+        recommended_next_action: "wait_for_human",
+        recommended_attempt_type: "execution",
+        summary: "Prepared to launch execution for the attached project.",
+        waiting_for_human: true
+      })
+    );
+    await saveRunPolicyRuntime(
+      workspacePaths,
+      createRunPolicyRuntime({
+        run_id: attachedExecutionRun.run.id,
+        stage: "execution",
+        approval_status: "approved",
+        approval_required: true,
+        proposed_signature: "attached-project-execution-ready",
+        proposed_attempt_type: "execution",
+        proposed_objective: "Run the attached project execution step.",
+        proposed_success_criteria: ["Execution plan is ready."],
+        permission_profile: "workspace_write",
+        hook_policy: "enforce_runtime_contract"
+      })
+    );
+    const attachedExecutionLaunchResponse = await app.inject({
+      method: "POST",
+      url: `/runs/${attachedExecutionRun.run.id}/launch`
+    });
+    assert.equal(attachedExecutionLaunchResponse.statusCode, 409);
+    const attachedExecutionLaunchPayload = attachedExecutionLaunchResponse.json() as {
+      code: string;
+      message: string;
+      attempt_type: string;
+      capability_snapshot: {
+        launch_readiness: {
+          execution: {
+            status: string;
+            blocking_reasons: Array<{
+              code: string;
+            }>;
+          };
+        };
+      };
+      capability_snapshot_ref: string | null;
+    };
+    assert.equal(
+      attachedExecutionLaunchPayload.code,
+      "attached_project_capability_blocked"
+    );
+    assert.equal(attachedExecutionLaunchPayload.attempt_type, "execution");
+    assert.equal(
+      attachedExecutionLaunchPayload.capability_snapshot.launch_readiness.execution.status,
+      "blocked"
+    );
+    assert.ok(
+      attachedExecutionLaunchPayload.capability_snapshot.launch_readiness.execution.blocking_reasons.some(
+        (reason) => reason.code === "missing_local_verifier_toolchain"
+      ),
+      "execution launch should surface missing_local_verifier_toolchain"
+    );
+    assert.match(attachedExecutionLaunchPayload.message, /node_modules/u);
+    assert.equal(
+      attachedExecutionLaunchPayload.capability_snapshot_ref,
+      attachedNodeProject.capability_snapshot_ref
+    );
+
     const resumableRun = createRun({
       title: "Resumable waiting run",
       description:
@@ -1507,6 +1759,21 @@ async function main(): Promise<void> {
     const resumedAttempts = await listAttempts(workspacePaths, resumableRun.id);
     assert.equal(resumedAttempts.length, 2);
     assert.equal(resumedAttempts.at(-1)?.attempt_type, "research");
+    const attachedResearchAttempts = await listAttempts(
+      workspacePaths,
+      attachedResearchRun.run.id
+    );
+    assert.equal(attachedResearchAttempts.length, 1);
+    assert.equal(attachedResearchAttempts.at(-1)?.attempt_type, "research");
+    const attachedExecutionAttempts = await listAttempts(
+      workspacePaths,
+      attachedExecutionRun.run.id
+    );
+    assert.equal(
+      attachedExecutionAttempts.length,
+      0,
+      "capability-blocked execution launch should not dispatch any attempt"
+    );
     const resumedCurrent = await getCurrentDecision(workspacePaths, resumableRun.id);
     assert.equal(resumedCurrent?.run_status, "running");
     assert.equal(resumedCurrent?.waiting_for_human, false);
@@ -4103,6 +4370,11 @@ async function main(): Promise<void> {
     await idleApp.close();
   }
   } finally {
+    if (previousExecutionCommand === undefined) {
+      delete process.env.AISA_EXECUTION_COMMAND;
+    } else {
+      process.env.AISA_EXECUTION_COMMAND = previousExecutionCommand;
+    }
     await cleanupTrackedVerifyTempDirs();
   }
 }
