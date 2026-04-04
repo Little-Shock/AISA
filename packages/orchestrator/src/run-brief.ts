@@ -19,6 +19,7 @@ import {
   getRun,
   getRunAutomationControl,
   getRunGovernanceState,
+  getRunWorkingContext,
   listRunJournal,
   listAttempts,
   readRunBriefStrict,
@@ -114,8 +115,20 @@ function buildRunAutomationRef(paths: WorkspacePaths, runId: string): string {
   return buildRelativeRef(paths, resolveRunPaths(paths, runId).automationFile);
 }
 
+function buildRunGovernanceRef(paths: WorkspacePaths, runId: string): string {
+  return buildRelativeRef(paths, resolveRunPaths(paths, runId).governanceFile);
+}
+
 function buildRunWorkingContextRef(paths: WorkspacePaths, runId: string): string {
   return buildRelativeRef(paths, resolveRunPaths(paths, runId).workingContextFile);
+}
+
+function buildAttemptMetaRef(
+  paths: WorkspacePaths,
+  runId: string,
+  attemptId: string
+): string {
+  return buildRelativeRef(paths, resolveAttemptPaths(paths, runId, attemptId).metaFile);
 }
 
 function buildAttemptPreflightRef(
@@ -171,6 +184,121 @@ function pickLatestAttempt(
     attempts.at(-1) ??
     null
   );
+}
+
+async function readRunBriefStaleState(input: {
+  paths: WorkspacePaths;
+  runId: string;
+  runBrief: RunBrief;
+  runBriefRef: string;
+}): Promise<RunBriefView["run_brief_degraded"] | null> {
+  const [current, automation, governance, workingContext, attempts] = await Promise.all([
+    getCurrentDecision(input.paths, input.runId),
+    getRunAutomationControl(input.paths, input.runId),
+    getRunGovernanceState(input.paths, input.runId),
+    getRunWorkingContext(input.paths, input.runId),
+    listAttempts(input.paths, input.runId)
+  ]);
+  const latestAttempt = pickLatestAttempt(attempts, current);
+  const {
+    evidenceAttempt,
+    latestPreflight,
+    latestHandoff,
+    latestRuntimeVerification,
+    latestAdversarialVerification
+  } = await resolveLatestEvidenceArtifacts({
+    paths: input.paths,
+    runId: input.runId,
+    latestAttempt,
+    attempts
+  });
+  const runBriefUpdatedAt = toTimestamp(input.runBrief.updated_at);
+  const staleRefs: string[] = [];
+
+  if (
+    current &&
+    (toTimestamp(current.updated_at) > runBriefUpdatedAt ||
+      current.run_status !== input.runBrief.status ||
+      current.waiting_for_human !== input.runBrief.waiting_for_human)
+  ) {
+    staleRefs.push(buildRunCurrentRef(input.paths, input.runId));
+  }
+
+  if (
+    automation &&
+    (toTimestamp(automation.updated_at) > runBriefUpdatedAt ||
+      automation.mode !== input.runBrief.automation_mode)
+  ) {
+    staleRefs.push(buildRunAutomationRef(input.paths, input.runId));
+  }
+
+  if (governance && toTimestamp(governance.updated_at) > runBriefUpdatedAt) {
+    staleRefs.push(buildRunGovernanceRef(input.paths, input.runId));
+  }
+
+  if (workingContext && toTimestamp(workingContext.updated_at) > runBriefUpdatedAt) {
+    staleRefs.push(buildRunWorkingContextRef(input.paths, input.runId));
+  }
+
+  if (
+    latestAttempt &&
+    ((latestAttempt.id ?? null) !== input.runBrief.latest_attempt_id ||
+      toTimestamp(latestAttempt.updated_at) > runBriefUpdatedAt)
+  ) {
+    staleRefs.push(buildAttemptMetaRef(input.paths, input.runId, latestAttempt.id));
+  }
+
+  if (
+    evidenceAttempt &&
+    latestPreflight &&
+    toTimestamp(latestPreflight.updated_at) > runBriefUpdatedAt
+  ) {
+    staleRefs.push(buildAttemptPreflightRef(input.paths, input.runId, evidenceAttempt.id));
+  }
+
+  if (
+    evidenceAttempt &&
+    latestHandoff &&
+    toTimestamp(latestHandoff.generated_at) > runBriefUpdatedAt
+  ) {
+    staleRefs.push(buildAttemptHandoffRef(input.paths, input.runId, evidenceAttempt.id));
+  }
+
+  if (
+    evidenceAttempt &&
+    latestRuntimeVerification &&
+    toTimestamp(latestRuntimeVerification.updated_at) > runBriefUpdatedAt
+  ) {
+    staleRefs.push(
+      buildAttemptRuntimeVerificationRef(input.paths, input.runId, evidenceAttempt.id)
+    );
+  }
+
+  if (
+    evidenceAttempt &&
+    latestAdversarialVerification &&
+    toTimestamp(latestAdversarialVerification.updated_at) > runBriefUpdatedAt
+  ) {
+    staleRefs.push(
+      buildAttemptAdversarialVerificationRef(
+        input.paths,
+        input.runId,
+        evidenceAttempt.id
+      )
+    );
+  }
+
+  const uniqueStaleRefs = Array.from(new Set(staleRefs));
+  if (uniqueStaleRefs.length === 0) {
+    return null;
+  }
+
+  return {
+    is_degraded: true,
+    reason_code: "run_brief_stale",
+    summary: `run brief 落后于 ${uniqueStaleRefs.join(" / ")} 的最新现场。`,
+    source_ref: input.runBriefRef
+  };
 }
 
 async function resolveLatestEvidenceArtifacts(input: {
@@ -503,11 +631,17 @@ export async function readRunBriefView(
 
   try {
     const runBrief = await readRunBriefStrict(paths, runId);
+    const staleState = await readRunBriefStaleState({
+      paths,
+      runId,
+      runBrief,
+      runBriefRef
+    });
     return {
       run_brief: runBrief,
       run_brief_ref: runBriefRef,
       run_brief_invalid_reason: null,
-      run_brief_degraded: RUN_BRIEF_NOT_DEGRADED
+      run_brief_degraded: staleState ?? RUN_BRIEF_NOT_DEGRADED
     };
   } catch (error) {
     const err = error as NodeJS.ErrnoException;

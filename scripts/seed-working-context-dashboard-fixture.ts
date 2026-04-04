@@ -42,6 +42,7 @@ export type SeedWorkingContextDashboardFixtureResult = {
   expected_failure_policy_mode: "fail_closed";
   expected_run_brief_headline: string;
   expected_run_brief_summary: string;
+  expected_run_brief_degraded_reason: "run_brief_stale";
   expected_preflight_failure_reason: string;
   expected_handoff_summary: string;
   expected_latest_runtime_status: "passed";
@@ -345,6 +346,7 @@ export async function seedWorkingContextDashboardFixture(input: {
     expected_failure_policy_mode: "fail_closed",
     expected_run_brief_headline: automationReason,
     expected_run_brief_summary: initialCurrent.summary,
+    expected_run_brief_degraded_reason: "run_brief_stale",
     expected_preflight_failure_reason: preflightFailureReason,
     expected_handoff_summary: preflightFailureReason,
     expected_latest_runtime_status: "passed",

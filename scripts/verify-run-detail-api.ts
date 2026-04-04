@@ -1518,6 +1518,151 @@ async function main(): Promise<void> {
     await mkdir(writeFailedRunBriefPaths.runBriefFile, { recursive: true });
     await refreshRunOperatorSurface(workspacePaths, writeFailedRunBriefRun.id);
 
+    const staleReadableRunBriefRun = createRun({
+      title: "Readable stale run brief verification",
+      description: "Ensure stale run brief surfaces do not override fresher blocker evidence.",
+      success_criteria: ["Prefer fresh blocker evidence over stale run brief summaries."],
+      constraints: [],
+      owner_id: "test-owner",
+      workspace_root: projectRoot
+    });
+    const staleReadableRunBriefAttempt = updateAttempt(
+      createAttempt({
+        run_id: staleReadableRunBriefRun.id,
+        attempt_type: "execution",
+        worker: "fake-codex",
+        objective: "Leave a stale run brief behind for control-api verification.",
+        success_criteria: staleReadableRunBriefRun.success_criteria,
+        workspace_root: projectRoot
+      }),
+      {
+        status: "failed",
+        started_at: new Date().toISOString(),
+        ended_at: new Date().toISOString()
+      }
+    );
+    const staleReadableRunBriefContract = createAttemptContract({
+      attempt_id: staleReadableRunBriefAttempt.id,
+      run_id: staleReadableRunBriefRun.id,
+      attempt_type: "execution",
+      objective: staleReadableRunBriefAttempt.objective,
+      success_criteria: staleReadableRunBriefAttempt.success_criteria,
+      required_evidence: ["leave an operator-visible run brief snapshot"],
+      expected_artifacts: ["runs/<run_id>/run-brief.json"],
+      verification_plan: {
+        commands: [
+          {
+            purpose: "verify stale run brief handling",
+            command: "pnpm verify:run-api"
+          }
+        ]
+      }
+    });
+    const staleReadableOldFailureReason =
+      "Old preflight blocker preserved in the saved run brief.";
+    const staleReadableFreshFailureReason =
+      "Fresh preflight blocker should outrank the stale run brief snapshot.";
+    const staleReadableFreshSourceAt = new Date(Date.now() + 2_000).toISOString();
+    const staleReadableInitialCurrent = createCurrentDecision({
+      run_id: staleReadableRunBriefRun.id,
+      run_status: "waiting_steer",
+      latest_attempt_id: staleReadableRunBriefAttempt.id,
+      best_attempt_id: staleReadableRunBriefAttempt.id,
+      recommended_next_action: "wait_for_human",
+      recommended_attempt_type: "execution",
+      summary: staleReadableOldFailureReason,
+      blocking_reason: staleReadableOldFailureReason,
+      waiting_for_human: true
+    });
+    const staleReadableFreshCurrent = {
+      ...createCurrentDecision({
+        run_id: staleReadableRunBriefRun.id,
+        run_status: "waiting_steer",
+        latest_attempt_id: staleReadableRunBriefAttempt.id,
+        best_attempt_id: staleReadableRunBriefAttempt.id,
+        recommended_next_action: "wait_for_human",
+        recommended_attempt_type: "execution",
+        summary: staleReadableFreshFailureReason,
+        blocking_reason: staleReadableFreshFailureReason,
+        waiting_for_human: true
+      }),
+      updated_at: staleReadableFreshSourceAt
+    };
+    const staleReadableInitialPreflight = createAttemptPreflightEvaluation({
+      run_id: staleReadableRunBriefRun.id,
+      attempt_id: staleReadableRunBriefAttempt.id,
+      attempt_type: "execution",
+      status: "failed",
+      failure_code: "blocked_pnpm_verification_plan",
+      failure_reason: staleReadableOldFailureReason
+    });
+    const staleReadableFreshPreflight = {
+      ...createAttemptPreflightEvaluation({
+        run_id: staleReadableRunBriefRun.id,
+        attempt_id: staleReadableRunBriefAttempt.id,
+        attempt_type: "execution",
+        status: "failed",
+        failure_code: "blocked_pnpm_verification_plan",
+        failure_reason: staleReadableFreshFailureReason
+      }),
+      updated_at: staleReadableFreshSourceAt
+    };
+    await saveRun(workspacePaths, staleReadableRunBriefRun);
+    await saveAttempt(workspacePaths, staleReadableRunBriefAttempt);
+    await saveAttemptContract(workspacePaths, staleReadableRunBriefContract);
+    await saveCurrentDecision(workspacePaths, staleReadableInitialCurrent);
+    await saveAttemptPreflightEvaluation(
+      workspacePaths,
+      staleReadableInitialPreflight
+    );
+    await saveAttemptHandoffBundle(
+      workspacePaths,
+      createAttemptHandoffBundle({
+        attempt: staleReadableRunBriefAttempt,
+        approved_attempt_contract: staleReadableRunBriefContract,
+        preflight_evaluation: staleReadableInitialPreflight,
+        current_decision_snapshot: staleReadableInitialCurrent,
+        source_refs: {
+          run_contract: `runs/${staleReadableRunBriefRun.id}/contract.json`,
+          attempt_meta: `runs/${staleReadableRunBriefRun.id}/attempts/${staleReadableRunBriefAttempt.id}/meta.json`,
+          attempt_contract: `runs/${staleReadableRunBriefRun.id}/attempts/${staleReadableRunBriefAttempt.id}/attempt_contract.json`,
+          preflight_evaluation: `runs/${staleReadableRunBriefRun.id}/attempts/${staleReadableRunBriefAttempt.id}/artifacts/preflight-evaluation.json`,
+          current_decision: `runs/${staleReadableRunBriefRun.id}/current.json`,
+          review_packet: null,
+          runtime_verification: null,
+          adversarial_verification: null
+        }
+      })
+    );
+    await refreshRunOperatorSurface(workspacePaths, staleReadableRunBriefRun.id);
+    await saveCurrentDecision(workspacePaths, staleReadableFreshCurrent);
+    await saveAttemptPreflightEvaluation(
+      workspacePaths,
+      staleReadableFreshPreflight
+    );
+    await saveAttemptHandoffBundle(
+      workspacePaths,
+      {
+        ...createAttemptHandoffBundle({
+          attempt: staleReadableRunBriefAttempt,
+          approved_attempt_contract: staleReadableRunBriefContract,
+          preflight_evaluation: staleReadableFreshPreflight,
+          current_decision_snapshot: staleReadableFreshCurrent,
+          source_refs: {
+            run_contract: `runs/${staleReadableRunBriefRun.id}/contract.json`,
+            attempt_meta: `runs/${staleReadableRunBriefRun.id}/attempts/${staleReadableRunBriefAttempt.id}/meta.json`,
+            attempt_contract: `runs/${staleReadableRunBriefRun.id}/attempts/${staleReadableRunBriefAttempt.id}/attempt_contract.json`,
+            preflight_evaluation: `runs/${staleReadableRunBriefRun.id}/attempts/${staleReadableRunBriefAttempt.id}/artifacts/preflight-evaluation.json`,
+            current_decision: `runs/${staleReadableRunBriefRun.id}/current.json`,
+            review_packet: null,
+            runtime_verification: null,
+            adversarial_verification: null
+          }
+        }),
+        generated_at: staleReadableFreshSourceAt
+      }
+    );
+
     const staleRun = createRun({
       title: "Stale run health verification",
       description: "Ensure control-api exposes zombie running attempts clearly.",
@@ -1732,6 +1877,10 @@ async function main(): Promise<void> {
       method: "GET",
       url: `/runs/${writeFailedRunBriefRun.id}`
     });
+    const staleReadableRunBriefResponse = await app.inject({
+      method: "GET",
+      url: `/runs/${staleReadableRunBriefRun.id}`
+    });
     const staleResponse = await app.inject({
       method: "GET",
       url: `/runs/${staleRun.id}`
@@ -1752,6 +1901,7 @@ async function main(): Promise<void> {
     assert.equal(response.statusCode, 200);
     assert.equal(invalidRunBriefResponse.statusCode, 200);
     assert.equal(writeFailedRunBriefResponse.statusCode, 200);
+    assert.equal(staleReadableRunBriefResponse.statusCode, 200);
     assert.equal(staleResponse.statusCode, 200);
     assert.equal(staleWorkingContextResponse.statusCode, 200);
     assert.equal(writeFailedWorkingContextResponse.statusCode, 200);
@@ -2050,6 +2200,44 @@ async function main(): Promise<void> {
           summary: string | null;
         }>;
       } | null;
+    };
+    const staleReadableRunBriefPayload = staleReadableRunBriefResponse.json() as {
+      failure_signal: {
+        failure_class: string;
+        failure_code: string | null;
+        policy_mode: string;
+        summary: string;
+        source_ref: string | null;
+      } | null;
+      run_brief: {
+        headline: string;
+        summary: string;
+        failure_signal: {
+          failure_class: string;
+          failure_code: string | null;
+          summary: string;
+          source_ref: string | null;
+        } | null;
+      } | null;
+      run_brief_ref: string | null;
+      run_brief_degraded: RunBriefDegradedPayload;
+      maintenance_plane: {
+        blocked_diagnosis: {
+          status: string;
+          summary: string | null;
+          source_ref: string | null;
+        };
+        outputs: Array<{
+          key: string;
+          status: string;
+          ref: string | null;
+          summary: string | null;
+        }>;
+      } | null;
+      working_context_degraded: {
+        is_degraded: boolean;
+        reason_code: string | null;
+      };
     };
     const stalePayload = staleResponse.json() as {
       run_health: {
@@ -2600,6 +2788,65 @@ async function main(): Promise<void> {
       writeFailedWorkingContextPayload.run_brief?.failure_signal?.failure_class,
       "working_context_degraded"
     );
+    assert.equal(
+      staleReadableRunBriefPayload.run_brief?.summary,
+      staleReadableOldFailureReason
+    );
+    assert.ok(staleReadableRunBriefPayload.run_brief_ref?.endsWith("run-brief.json"));
+    assert.equal(staleReadableRunBriefPayload.run_brief_degraded.is_degraded, true);
+    assert.equal(
+      staleReadableRunBriefPayload.run_brief_degraded.reason_code,
+      "run_brief_stale"
+    );
+    assert.ok(
+      staleReadableRunBriefPayload.run_brief_degraded.summary?.includes(
+        `runs/${staleReadableRunBriefRun.id}/current.json`
+      )
+    );
+    assert.ok(
+      staleReadableRunBriefPayload.run_brief_degraded.source_ref?.endsWith(
+        "run-brief.json"
+      )
+    );
+    assert.equal(
+      staleReadableRunBriefPayload.failure_signal?.failure_class,
+      "preflight_blocked"
+    );
+    assert.equal(
+      staleReadableRunBriefPayload.failure_signal?.failure_code,
+      "blocked_pnpm_verification_plan"
+    );
+    assert.equal(
+      staleReadableRunBriefPayload.failure_signal?.summary,
+      staleReadableFreshFailureReason
+    );
+    assert.ok(
+      staleReadableRunBriefPayload.failure_signal?.source_ref?.endsWith(
+        "artifacts/preflight-evaluation.json"
+      )
+    );
+    assert.equal(
+      staleReadableRunBriefPayload.maintenance_plane?.blocked_diagnosis.summary,
+      staleReadableFreshFailureReason
+    );
+    assert.ok(
+      staleReadableRunBriefPayload.maintenance_plane?.blocked_diagnosis.source_ref?.endsWith(
+        "artifacts/preflight-evaluation.json"
+      )
+    );
+    assert.ok(
+      staleReadableRunBriefPayload.maintenance_plane?.outputs.some(
+        (item) =>
+          item.key === "run_brief" &&
+          item.status === "degraded" &&
+          item.summary?.includes(`runs/${staleReadableRunBriefRun.id}/current.json`)
+      )
+    );
+    assert.equal(staleReadableRunBriefPayload.working_context_degraded.is_degraded, true);
+    assert.equal(
+      staleReadableRunBriefPayload.working_context_degraded.reason_code,
+      "context_stale"
+    );
     assert.equal(invalidRunBriefPayload.run_brief, null);
     assert.ok(invalidRunBriefPayload.run_brief_ref?.endsWith("run-brief.json"));
     assert.match(
@@ -2923,6 +3170,9 @@ async function main(): Promise<void> {
     const writeFailedRunBriefSummary = runsPayload.runs.find(
       (item) => item.run.id === writeFailedRunBriefRun.id
     );
+    const staleReadableRunBriefSummary = runsPayload.runs.find(
+      (item) => item.run.id === staleReadableRunBriefRun.id
+    );
     const missingRunBriefSummary = runsPayload.runs.find(
       (item) => item.run.id === missingRunBriefRun.id
     );
@@ -3146,6 +3396,41 @@ async function main(): Promise<void> {
           item.plane === "maintenance" &&
           item.status === "degraded" &&
           item.summary === "run brief 写入失败，控制面摘要已退化。"
+      )
+    );
+    assert.equal(
+      staleReadableRunBriefSummary?.run_brief?.summary,
+      staleReadableOldFailureReason
+    );
+    assert.equal(staleReadableRunBriefSummary?.run_brief_degraded.is_degraded, true);
+    assert.equal(
+      staleReadableRunBriefSummary?.run_brief_degraded.reason_code,
+      "run_brief_stale"
+    );
+    assert.equal(
+      staleReadableRunBriefSummary?.failure_signal?.failure_class,
+      "preflight_blocked"
+    );
+    assert.equal(
+      staleReadableRunBriefSummary?.failure_signal?.summary,
+      staleReadableFreshFailureReason
+    );
+    assert.ok(
+      staleReadableRunBriefSummary?.maintenance_plane?.outputs.some(
+        (item) =>
+          item.key === "run_brief" &&
+          item.plane === "maintenance" &&
+          item.status === "degraded" &&
+          item.summary?.includes(`runs/${staleReadableRunBriefRun.id}/current.json`)
+      )
+    );
+    assert.equal(
+      staleReadableRunBriefSummary?.maintenance_plane?.blocked_diagnosis.summary,
+      staleReadableFreshFailureReason
+    );
+    assert.ok(
+      staleReadableRunBriefSummary?.maintenance_plane?.blocked_diagnosis.source_ref?.endsWith(
+        "artifacts/preflight-evaluation.json"
       )
     );
     assert.equal(missingRunBriefSummary?.run_brief, null);

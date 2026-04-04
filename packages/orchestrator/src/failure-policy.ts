@@ -2,6 +2,7 @@ import {
   createRunFailureSignal,
   type RunFailureClass,
   type RunFailurePolicyMode,
+  type RunFailureSourceKind,
   type Attempt,
   type AttemptAdversarialVerification,
   type AttemptHandoffBundle,
@@ -65,6 +66,15 @@ const RUN_FAILURE_POLICY_MATRIX: ReadonlyArray<RunFailurePolicyEntry> = [
     summary: "Run brief degradation can warn without rewriting mainline truth."
   }
 ];
+
+const RUN_FAILURE_SOURCE_PRIORITY: Record<RunFailureSourceKind, number> = {
+  preflight_evaluation: 10,
+  runtime_verification: 20,
+  adversarial_verification: 30,
+  handoff_bundle: 40,
+  working_context: 50,
+  run_brief: 60
+};
 
 function getFailurePolicyEntry(failureClass: RunFailureClass): RunFailurePolicyEntry {
   const entry = RUN_FAILURE_POLICY_MATRIX.find(
@@ -292,11 +302,16 @@ export function deriveRunSurfaceFailureSignal(input: {
   workingContextDegraded: RunWorkingContextDegradedState;
   workingContextRef?: string | null;
 }): RunFailureSignal | null {
+  const runBriefSignal =
+    input.runBriefDegraded?.is_degraded
+      ? null
+      : deriveFailureSignalFromRunBrief({
+          runBrief: input.runBrief ?? null,
+          sourceRef: input.runBriefRef ?? null
+        });
+
   return pickPrimaryFailureSignal(
-    deriveFailureSignalFromRunBrief({
-      runBrief: input.runBrief ?? null,
-      sourceRef: input.runBriefRef ?? null
-    }),
+    runBriefSignal,
     deriveFailureSignalFromHandoffBundle({
       handoff: input.handoff,
       sourceRef: input.handoffRef ?? null
@@ -350,11 +365,20 @@ export function pickPrimaryFailureSignal(
   const normalizedSignals = signals
     .filter((signal): signal is RunFailureSignal => signal !== null && signal !== undefined)
     .map((signal) => normalizeFailureSignal(signal))
-    .sort(
-      (left, right) =>
+    .sort((left, right) => {
+      const failurePriorityDelta =
         getFailurePolicyEntry(left.failure_class).priority -
-        getFailurePolicyEntry(right.failure_class).priority
-    );
+        getFailurePolicyEntry(right.failure_class).priority;
+
+      if (failurePriorityDelta !== 0) {
+        return failurePriorityDelta;
+      }
+
+      return (
+        RUN_FAILURE_SOURCE_PRIORITY[left.source_kind] -
+        RUN_FAILURE_SOURCE_PRIORITY[right.source_kind]
+      );
+    });
 
   return normalizedSignals[0] ?? null;
 }

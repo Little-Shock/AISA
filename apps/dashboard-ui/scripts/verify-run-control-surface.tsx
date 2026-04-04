@@ -212,7 +212,11 @@ async function main(): Promise<void> {
     assert.equal(runDetail.run_brief?.headline, fixture.expected_run_brief_headline);
     assert.equal(runDetail.run_brief?.summary, fixture.expected_run_brief_summary);
     assert.equal(runDetail.run_brief_invalid_reason, null);
-    assert.equal(runDetail.run_brief_degraded.is_degraded, false);
+    assert.equal(runDetail.run_brief_degraded.is_degraded, true);
+    assert.equal(
+      runDetail.run_brief_degraded.reason_code,
+      fixture.expected_run_brief_degraded_reason
+    );
     assert.equal(
       runDetail.run_brief?.failure_signal?.failure_class,
       fixture.expected_failure_class
@@ -234,7 +238,11 @@ async function main(): Promise<void> {
     );
     assert.equal(selectedRun?.task_focus, fixture.expected_task_focus);
     assert.equal(selectedRun?.run_brief_invalid_reason, null);
-    assert.equal(selectedRun?.run_brief_degraded.is_degraded, false);
+    assert.equal(selectedRun?.run_brief_degraded.is_degraded, true);
+    assert.equal(
+      selectedRun?.run_brief_degraded.reason_code,
+      fixture.expected_run_brief_degraded_reason
+    );
     assert.equal(selectedRun?.failure_signal?.failure_class, fixture.expected_failure_class);
     assert.equal(selectedRun?.failure_signal?.failure_code, fixture.expected_failure_code);
     assert.equal(

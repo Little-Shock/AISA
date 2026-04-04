@@ -178,6 +178,167 @@ async function main(): Promise<void> {
     missingRunBriefVerifierOutput?.ref?.endsWith("artifacts/preflight-evaluation.json")
   );
 
+  const staleReadableRunBriefRun = createRun({
+    title: "Readable stale run brief verification",
+    description: "Fresh blocker evidence must outrank a readable but stale run brief.",
+    success_criteria: ["Use fresh blocker evidence when run brief falls behind."],
+    constraints: [],
+    owner_id: "test-owner",
+    workspace_root: rootDir
+  });
+  const staleReadableRunBriefAttempt = createAttempt({
+    run_id: staleReadableRunBriefRun.id,
+    attempt_type: "execution",
+    worker: "codex",
+    objective: "Leave a stale run brief behind.",
+    success_criteria: staleReadableRunBriefRun.success_criteria,
+    workspace_root: rootDir
+  });
+  const staleReadableRunBriefContract = createAttemptContract({
+    attempt_id: staleReadableRunBriefAttempt.id,
+    run_id: staleReadableRunBriefRun.id,
+    attempt_type: "execution",
+    objective: staleReadableRunBriefAttempt.objective,
+    success_criteria: staleReadableRunBriefAttempt.success_criteria,
+    required_evidence: ["Leave a stale run brief snapshot."],
+    expected_artifacts: ["runs/<run_id>/run-brief.json"]
+  });
+  const staleReadableOldFailureReason =
+    "Old preflight blocker from the saved run brief.";
+  const staleReadableFreshFailureReason =
+    "Fresh preflight blocker should outrank the stale run brief.";
+  const staleReadableFreshSourceAt = new Date(Date.now() + 2_000).toISOString();
+  const staleReadableInitialCurrent = createCurrentDecision({
+    run_id: staleReadableRunBriefRun.id,
+    run_status: "waiting_steer",
+    latest_attempt_id: staleReadableRunBriefAttempt.id,
+    best_attempt_id: staleReadableRunBriefAttempt.id,
+    recommended_next_action: "wait_for_human",
+    recommended_attempt_type: "execution",
+    summary: staleReadableOldFailureReason,
+    blocking_reason: staleReadableOldFailureReason,
+    waiting_for_human: true
+  });
+  const staleReadableFreshCurrent = {
+    ...createCurrentDecision({
+      run_id: staleReadableRunBriefRun.id,
+      run_status: "waiting_steer",
+      latest_attempt_id: staleReadableRunBriefAttempt.id,
+      best_attempt_id: staleReadableRunBriefAttempt.id,
+      recommended_next_action: "wait_for_human",
+      recommended_attempt_type: "execution",
+      summary: staleReadableFreshFailureReason,
+      blocking_reason: staleReadableFreshFailureReason,
+      waiting_for_human: true
+    }),
+    updated_at: staleReadableFreshSourceAt
+  };
+  const staleReadableInitialPreflight = createAttemptPreflightEvaluation({
+    run_id: staleReadableRunBriefRun.id,
+    attempt_id: staleReadableRunBriefAttempt.id,
+    attempt_type: "execution",
+    status: "failed",
+    failure_code: "blocked_pnpm_verification_plan",
+    failure_reason: staleReadableOldFailureReason
+  });
+  const staleReadableFreshPreflight = {
+    ...createAttemptPreflightEvaluation({
+      run_id: staleReadableRunBriefRun.id,
+      attempt_id: staleReadableRunBriefAttempt.id,
+      attempt_type: "execution",
+      status: "failed",
+      failure_code: "blocked_pnpm_verification_plan",
+      failure_reason: staleReadableFreshFailureReason
+    }),
+    updated_at: staleReadableFreshSourceAt
+  };
+
+  await saveRun(workspacePaths, staleReadableRunBriefRun);
+  await saveAttempt(workspacePaths, staleReadableRunBriefAttempt);
+  await saveAttemptContract(workspacePaths, staleReadableRunBriefContract);
+  await saveCurrentDecision(workspacePaths, staleReadableInitialCurrent);
+  await saveAttemptPreflightEvaluation(workspacePaths, staleReadableInitialPreflight);
+  await saveAttemptHandoffBundle(
+    workspacePaths,
+    createAttemptHandoffBundle({
+      attempt: staleReadableRunBriefAttempt,
+      approved_attempt_contract: staleReadableRunBriefContract,
+      preflight_evaluation: staleReadableInitialPreflight,
+      current_decision_snapshot: staleReadableInitialCurrent,
+      source_refs: {
+        run_contract: `runs/${staleReadableRunBriefRun.id}/contract.json`,
+        attempt_meta: `runs/${staleReadableRunBriefRun.id}/attempts/${staleReadableRunBriefAttempt.id}/meta.json`,
+        attempt_contract: `runs/${staleReadableRunBriefRun.id}/attempts/${staleReadableRunBriefAttempt.id}/attempt_contract.json`,
+        preflight_evaluation: `runs/${staleReadableRunBriefRun.id}/attempts/${staleReadableRunBriefAttempt.id}/artifacts/preflight-evaluation.json`,
+        current_decision: `runs/${staleReadableRunBriefRun.id}/current.json`,
+        review_packet: null,
+        runtime_verification: null
+      }
+    })
+  );
+  await refreshRunMaintenancePlane(workspacePaths, staleReadableRunBriefRun.id, {
+    staleAfterMs: 60_000
+  });
+  await saveCurrentDecision(workspacePaths, staleReadableFreshCurrent);
+  await saveAttemptPreflightEvaluation(workspacePaths, staleReadableFreshPreflight);
+  await saveAttemptHandoffBundle(
+    workspacePaths,
+    {
+      ...createAttemptHandoffBundle({
+        attempt: staleReadableRunBriefAttempt,
+        approved_attempt_contract: staleReadableRunBriefContract,
+        preflight_evaluation: staleReadableFreshPreflight,
+        current_decision_snapshot: staleReadableFreshCurrent,
+        source_refs: {
+          run_contract: `runs/${staleReadableRunBriefRun.id}/contract.json`,
+          attempt_meta: `runs/${staleReadableRunBriefRun.id}/attempts/${staleReadableRunBriefAttempt.id}/meta.json`,
+          attempt_contract: `runs/${staleReadableRunBriefRun.id}/attempts/${staleReadableRunBriefAttempt.id}/attempt_contract.json`,
+          preflight_evaluation: `runs/${staleReadableRunBriefRun.id}/attempts/${staleReadableRunBriefAttempt.id}/artifacts/preflight-evaluation.json`,
+          current_decision: `runs/${staleReadableRunBriefRun.id}/current.json`,
+          review_packet: null,
+          runtime_verification: null
+        }
+      }),
+      generated_at: staleReadableFreshSourceAt
+    }
+  );
+  const staleReadableRunBriefView = await readRunMaintenancePlaneView(
+    workspacePaths,
+    staleReadableRunBriefRun.id,
+    {
+      staleAfterMs: 60_000
+    }
+  );
+  const staleReadableRunBriefOutput =
+    staleReadableRunBriefView.maintenance_plane?.outputs.find(
+      (item) => item.key === "run_brief"
+    ) ?? null;
+  const staleReadableVerifierOutput =
+    staleReadableRunBriefView.maintenance_plane?.outputs.find(
+      (item) => item.key === "verifier_summary"
+    ) ?? null;
+  assert.equal(
+    staleReadableRunBriefView.maintenance_plane?.blocked_diagnosis.summary,
+    staleReadableFreshFailureReason
+  );
+  assert.ok(
+    staleReadableRunBriefView.maintenance_plane?.blocked_diagnosis.source_ref?.endsWith(
+      "artifacts/preflight-evaluation.json"
+    )
+  );
+  assert.equal(staleReadableRunBriefOutput?.status, "degraded");
+  assert.ok(staleReadableRunBriefOutput?.summary?.includes("run brief 落后于"));
+  assert.ok(
+    staleReadableRunBriefOutput?.summary?.includes(
+      `runs/${staleReadableRunBriefRun.id}/current.json`
+    )
+  );
+  assert.equal(staleReadableVerifierOutput?.status, "attention");
+  assert.equal(staleReadableVerifierOutput?.summary, staleReadableFreshFailureReason);
+  assert.ok(
+    staleReadableVerifierOutput?.ref?.endsWith("artifacts/preflight-evaluation.json")
+  );
+
   await saveCurrentDecision(
     workspacePaths,
     createCurrentDecision({

@@ -60,6 +60,34 @@ async function main(): Promise<void> {
     "pickPrimaryFailureSignal must prefer the stricter policy from the matrix"
   );
 
+  const chosenFreshEvidenceSignal = pickPrimaryFailureSignal(
+    createRunFailureSignal({
+      failure_class: "preflight_blocked",
+      policy_mode: "fail_closed",
+      source_kind: "run_brief",
+      source_ref: "runs/run_1/run-brief.json",
+      summary: "stale run brief blocker"
+    }),
+    createRunFailureSignal({
+      failure_class: "preflight_blocked",
+      policy_mode: "fail_closed",
+      source_kind: "preflight_evaluation",
+      source_ref: "runs/run_1/attempts/att_1/artifacts/preflight-evaluation.json",
+      summary: "fresh preflight blocker"
+    })
+  );
+
+  assert.equal(
+    chosenFreshEvidenceSignal?.source_kind,
+    "preflight_evaluation",
+    "same-class ties must prefer direct evidence over the derived run brief"
+  );
+  assert.equal(chosenFreshEvidenceSignal?.summary, "fresh preflight blocker");
+  assert.equal(
+    chosenFreshEvidenceSignal?.source_ref,
+    "runs/run_1/attempts/att_1/artifacts/preflight-evaluation.json"
+  );
+
   console.log(
     JSON.stringify(
       {
