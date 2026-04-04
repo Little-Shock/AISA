@@ -10,6 +10,7 @@
     "build": "pnpm -r --if-present build",
     "smoke": "tsx scripts/smoke-plan.ts",
     "verify:runtime": "node --experimental-transform-types --loader ./scripts/ts-runtime-loader.mjs scripts/verify-runtime.ts",
+    "verify:judge-evals": "node --experimental-transform-types --loader ./scripts/ts-runtime-loader.mjs scripts/verify-judge-evals.ts",
     "verify:evaluator-calibration": "node --experimental-transform-types --loader ./scripts/ts-runtime-loader.mjs scripts/verify-evaluator-calibration.ts",
     "verify:drive-run": "node --experimental-transform-types --loader ./scripts/ts-runtime-loader.mjs scripts/verify-drive-run.ts",
     "verify:run-api": "node --experimental-transform-types --loader ./scripts/ts-runtime-loader.mjs scripts/verify-run-detail-api.ts",

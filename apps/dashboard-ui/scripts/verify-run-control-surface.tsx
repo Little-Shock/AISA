@@ -327,7 +327,7 @@ async function main(): Promise<void> {
         lastSuccessAtLabel="刚刚"
       />
     );
-    assert.match(overviewMarkup, /Run Brief/);
+    assert.match(overviewMarkup, /处理建议/);
     assert.match(
       overviewMarkup,
       new RegExp(escapeRegExp(fixture.expected_run_brief_headline))
@@ -344,6 +344,9 @@ async function main(): Promise<void> {
     assert.match(overviewMarkup, /preflight_blocked/);
     assert.match(overviewMarkup, /runtime replay：通过/);
     assert.match(overviewMarkup, /adversarial gate：通过/);
+    assert.match(overviewMarkup, /需要处理：是/);
+    assert.match(overviewMarkup, /交接建议：需要处理/);
+    assert.doesNotMatch(overviewMarkup, /等待人工：/);
     assert.match(overviewMarkup, /控制面真相/);
     assert.match(overviewMarkup, /维护平面输出/);
     assert.match(overviewMarkup, /信号来源/);
@@ -354,6 +357,23 @@ async function main(): Promise<void> {
     assert.match(overviewMarkup, /current：.*current\.json/);
     assert.match(overviewMarkup, /automation：.*automation\.json/);
     assert.match(overviewMarkup, /latest attempt：.*meta\.json/);
+    const handoffCalloutIndex = overviewMarkup.indexOf("先看交接说明");
+    const preflightCalloutIndex = overviewMarkup.indexOf("先看发车前结果");
+    const workingContextCalloutIndex = overviewMarkup.indexOf("先看现场记录");
+    assert.ok(handoffCalloutIndex >= 0, "overview should render the handoff callout");
+    assert.ok(preflightCalloutIndex >= 0, "overview should render the preflight callout");
+    assert.ok(
+      workingContextCalloutIndex >= 0,
+      "overview should render the working-context callout"
+    );
+    assert.ok(
+      handoffCalloutIndex < workingContextCalloutIndex,
+      "handoff callout must stay ahead of working-context callout"
+    );
+    assert.ok(
+      preflightCalloutIndex < workingContextCalloutIndex,
+      "preflight callout must stay ahead of working-context callout"
+    );
 
     const policyMarkup = renderToStaticMarkup(
       <RunPolicyPanel
@@ -446,7 +466,21 @@ async function main(): Promise<void> {
     );
     assert.match(
       inboxMarkup,
-      new RegExp(escapeRegExp(fixture.expected_run_brief_summary))
+      /接球：需要人工/
+    );
+    assert.match(inboxMarkup, /需要处理/);
+    assert.doesNotMatch(inboxMarkup, /交接建议：等待人工/);
+    assert.match(
+      inboxMarkup,
+      /统一失败：preflight_blocked \(blocked_pnpm_verification_plan\)/
+    );
+    assert.match(
+      inboxMarkup,
+      /对抗门：required，未进入/
+    );
+    assert.match(
+      inboxMarkup,
+      new RegExp(escapeRegExp(`焦点：${fixture.expected_task_focus.slice(0, 18)}`))
     );
     assert.match(
       inboxMarkup,

@@ -192,27 +192,27 @@ export default function Page() {
   >(
     () => [
       {
-        label: "人工接球",
+        label: "需要你处理",
         value: String(countRunsByFocusLens(runs, "waiting_human", nowTs)).padStart(2, "0"),
-        hint: "等待人工 / blocking reason",
+        hint: "等人拍板 / 已有卡点",
         tone: "rose"
       },
       {
-        label: "Runtime 风险",
+        label: "运行出错",
         value: String(countRunsByFocusLens(runs, "runtime_fault", nowTs)).padStart(2, "0"),
-        hint: "报错 / 心跳陈旧",
+        hint: "报错 / 心跳陈旧 / 卡死",
         tone: "rose"
       },
       {
-        label: "回放债务",
+        label: "验证记录不完整",
         value: String(countRunsByFocusLens(runs, "replay_gap", nowTs)).padStart(2, "0"),
-        hint: "execution 无验证契约",
+        hint: "已经执行，但验证记录还不够",
         tone: "amber"
       },
       {
-        label: "冷启动池",
+        label: "还没开始",
         value: String(countRunsByFocusLens(runs, "unstarted", nowTs)).padStart(2, "0"),
-        hint: "还没首个 attempt",
+        hint: "还没跑出第一次尝试",
         tone: "emerald"
       }
     ],
@@ -229,7 +229,7 @@ export default function Page() {
       { label: "运行任务数", value: String(runs.length).padStart(2, "0") },
       { label: "运行中任务", value: String(runningRuns).padStart(2, "0") },
       { label: "尝试数", value: String(runAttempts).padStart(2, "0") },
-      { label: "等待人工", value: String(waitingRuns).padStart(2, "0") },
+      { label: "需要处理", value: String(waitingRuns).padStart(2, "0") },
       { label: "目标数", value: String(goals.length).padStart(2, "0") },
       { label: "运行中目标", value: String(runningGoals).padStart(2, "0") }
     ];
@@ -349,6 +349,7 @@ export default function Page() {
               policy_runtime_invalid_reason: nextDetail.policy_runtime_invalid_reason,
               latest_preflight_evaluation: nextDetail.latest_preflight_evaluation,
               latest_preflight_evaluation_ref: nextDetail.latest_preflight_evaluation_ref,
+              preflight_evaluation_summary: nextDetail.preflight_evaluation_summary,
               latest_runtime_verification: nextDetail.latest_runtime_verification,
               latest_runtime_verification_ref: nextDetail.latest_runtime_verification_ref,
               latest_adversarial_verification: nextDetail.latest_adversarial_verification,
@@ -356,6 +357,7 @@ export default function Page() {
                 nextDetail.latest_adversarial_verification_ref,
               latest_handoff_bundle: nextDetail.latest_handoff_bundle,
               latest_handoff_bundle_ref: nextDetail.latest_handoff_bundle_ref,
+              handoff_summary: nextDetail.handoff_summary,
               run_brief: nextDetail.run_brief,
               run_brief_ref: nextDetail.run_brief_ref,
               run_brief_invalid_reason: nextDetail.run_brief_invalid_reason,

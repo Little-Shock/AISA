@@ -557,6 +557,30 @@ export type RunLatestHandoffBundle = {
   generated_at: string;
 } | null;
 
+export type RunPreflightEvaluationSummary = {
+  status: string;
+  summary: string;
+  failure_class: string | null;
+  failure_policy_mode: string | null;
+  failure_code: string | null;
+  failure_reason: string | null;
+  requires_adversarial_verification: boolean;
+  verifier_kit: string | null;
+  verification_command_count: number;
+  source_ref: string | null;
+} | null;
+
+export type RunHandoffSummary = {
+  summary: string | null;
+  recommended_next_action: string | null;
+  recommended_attempt_type: string | null;
+  failure_class: string | null;
+  failure_policy_mode: string | null;
+  failure_code: string | null;
+  adversarial_failure_code: string | null;
+  source_ref: string | null;
+} | null;
+
 export type RunSummaryItem = {
   run: {
     id: string;
@@ -584,12 +608,14 @@ export type RunSummaryItem = {
   failure_signal: RunFailureSignal;
   latest_preflight_evaluation: RunLatestPreflightEvaluation;
   latest_preflight_evaluation_ref: string | null;
+  preflight_evaluation_summary?: RunPreflightEvaluationSummary;
   latest_runtime_verification: RunLatestRuntimeVerification;
   latest_runtime_verification_ref: string | null;
   latest_adversarial_verification: RunLatestAdversarialVerification;
   latest_adversarial_verification_ref: string | null;
   latest_handoff_bundle: RunLatestHandoffBundle;
   latest_handoff_bundle_ref: string | null;
+  handoff_summary?: RunHandoffSummary;
   run_brief: RunBrief;
   run_brief_ref: string | null;
   run_brief_invalid_reason: string | null;
@@ -655,12 +681,14 @@ export type RunDetail = {
   failure_signal: RunFailureSignal;
   latest_preflight_evaluation: RunLatestPreflightEvaluation;
   latest_preflight_evaluation_ref: string | null;
+  preflight_evaluation_summary?: RunPreflightEvaluationSummary;
   latest_runtime_verification: RunLatestRuntimeVerification;
   latest_runtime_verification_ref: string | null;
   latest_adversarial_verification: RunLatestAdversarialVerification;
   latest_adversarial_verification_ref: string | null;
   latest_handoff_bundle: RunLatestHandoffBundle;
   latest_handoff_bundle_ref: string | null;
+  handoff_summary?: RunHandoffSummary;
   run_brief: RunBrief;
   run_brief_ref: string | null;
   run_brief_invalid_reason: string | null;

@@ -9,9 +9,12 @@ import {
   workerLabel
 } from "./copy";
 import {
+  readHandoffSummary,
   readMaintenancePlane,
   readPolicyRuntime,
+  readPreflightSummary,
   readRunBrief,
+  readWorkingContextSignal,
   readWorkingContext
 } from "./dashboard-read-model";
 import {
@@ -166,8 +169,11 @@ export function RunOverviewPanel({
   const runBrief = runDetail.run_brief;
   const maintenancePlaneRecord = runDetail.maintenance_plane;
   const runBriefSurface = readRunBrief(runDetail);
+  const preflightSummary = readPreflightSummary(runDetail);
+  const handoffSummary = readHandoffSummary(runDetail);
   const policyRuntimeSurface = readPolicyRuntime(runDetail);
   const workingContextSurface = readWorkingContext(runDetail);
+  const workingContextSignal = readWorkingContextSignal(runDetail);
   const maintenancePlane = readMaintenancePlane(runDetail);
   const failureSignal = runDetail.failure_signal ?? runBrief?.failure_signal ?? null;
   const latestPreflight = runDetail.latest_preflight_evaluation;
@@ -205,7 +211,7 @@ export function RunOverviewPanel({
   return (
     <Panel
       title={runDetail.run.title}
-      subtitle="围绕 operator 决策来读这条 run：先看介入等级、信号标签和恢复建议，再看尝试契约、结果和回放证据。"
+      subtitle="围绕处理决策来读这条 run：先看交接说明 / 发车前结果，再看介入等级、现场卡点和验证证据。"
       actions={
         <div className="action-row">
           <Button
@@ -291,7 +297,7 @@ export function RunOverviewPanel({
         selectedRunOperatorState.kind === "at_risk") ? (
         <Callout
           tone={selectedRunOperatorState.kind === "needs_action" ? "rose" : "amber"}
-          title={selectedRunOperatorState.kind === "needs_action" ? "当前需介入" : "当前需排查"}
+          title={selectedRunOperatorState.kind === "needs_action" ? "现在需要你处理" : "现在需要排查"}
         >
           {selectedRunOperatorState.recovery_hint}
         </Callout>
@@ -351,26 +357,94 @@ export function RunOverviewPanel({
       ) : null}
 
       {workingContextDegraded.is_degraded ? (
-        <Callout tone="amber" title="运行中现场降级">
+        <Callout tone="amber" title="现场记录已降级">
           {localizeUiText(
             workingContextDegraded.summary ??
-              "working context 已落后或缺失，先修现场再继续长任务。"
+              "现场记录已落后或缺失，先修现场再继续长任务。"
           )}
         </Callout>
       ) : null}
 
       {runBriefDegraded.is_degraded ? (
-        <Callout tone="amber" title="Run Brief 降级">
+        <Callout tone="amber" title="处理建议已降级">
           {localizeUiText(
             runBriefDegraded.summary ??
               runDetail.run_brief_invalid_reason ??
-              "run brief 已退化，先修控制面摘要。"
+              "处理建议已退化，先修控制面摘要。"
           )}
         </Callout>
       ) : null}
 
+      {handoffSummary.summary ? (
+        <Callout
+          tone={runBrief?.waiting_for_human ?? runBriefSurface.waiting_for_human ? "rose" : "amber"}
+          title="先看交接说明"
+        >
+          <strong>{localizeUiText(handoffSummary.summary)}</strong>
+          <br />
+          {[
+            handoffSummary.recommended_next_action
+              ? `下一动作 ${nextActionLabel(handoffSummary.recommended_next_action)}`
+              : null,
+            handoffSummary.recommended_attempt_type
+              ? `下一类型 ${attemptTypeLabel(handoffSummary.recommended_attempt_type)}`
+              : null,
+            handoffSummary.failure_code ? `失败码 ${handoffSummary.failure_code}` : null
+          ]
+            .filter(Boolean)
+            .join(" · ")}
+        </Callout>
+      ) : null}
+
+      {preflightSummary.status || preflightSummary.summary || preflightSummary.failure_reason ? (
+        <Callout
+          tone={preflightSummary.status === "passed" ? "amber" : "rose"}
+          title="先看发车前结果"
+        >
+          <strong>
+            {`状态 ${preflightSummary.status ? statusLabel(preflightSummary.status) : "暂无"}`}
+          </strong>
+          <br />
+            {localizeUiText(
+              preflightSummary.failure_reason ??
+                preflightSummary.summary ??
+                "当前没有发车前摘要。"
+            )}
+        </Callout>
+      ) : null}
+
+      {workingContextSignal.artifact_ref || workingContextSignal.degraded_summary ? (
+        <Callout
+          tone={workingContextSignal.is_degraded ? "rose" : "amber"}
+          title="先看现场记录"
+        >
+          <strong>
+            {localizeUiText(
+              workingContextSignal.degraded_summary ??
+                workingContextSignal.summary ??
+                "当前现场记录已落盘，先核快照、卡点和计划锚点。"
+            )}
+          </strong>
+          <br />
+          {[
+            workingContextSignal.artifact_ref
+              ? `现场记录 ${workingContextSignal.artifact_ref}`
+              : null,
+            workingContextSignal.current_snapshot_ref
+              ? `current ${workingContextSignal.current_snapshot_ref}`
+              : null,
+            workingContextSignal.plan_ref ? `plan ${workingContextSignal.plan_ref}` : null,
+            workingContextSignal.current_blocker_summary
+              ? `blocker ${workingContextSignal.current_blocker_summary}`
+              : null
+          ]
+            .filter(Boolean)
+            .join(" · ")}
+        </Callout>
+      ) : null}
+
       {runBrief ? (
-        <Callout tone={runBrief.waiting_for_human ? "rose" : "amber"} title="Run Brief">
+        <Callout tone={runBrief.waiting_for_human ? "rose" : "amber"} title="处理建议">
           <strong>{localizeUiText(runBrief.headline)}</strong>
           <br />
           {localizeUiText(runBrief.summary)}
@@ -423,7 +497,7 @@ export function RunOverviewPanel({
               `执行器：${selectedRunAttemptDetail ? workerLabel(selectedRunAttemptDetail.attempt.worker) : "暂无"}`,
               `创建时间：${formatDateTime(selectedRunAttemptDetail?.attempt.created_at)}`,
               `契约回放命令：${String(selectedRunAttemptDetail?.contract?.verification_plan?.commands.length ?? 0)}`,
-              `working context：${runDetail.working_context_ref ?? "未落盘"}`,
+              `现场记录：${runDetail.working_context_ref ?? "未落盘"}`,
               `现场更新时间：${formatDateTime(workingContext?.updated_at)}`,
               `policy ref：${runDetail.policy_runtime_ref ?? "未落盘"}`
             ]}
@@ -432,7 +506,7 @@ export function RunOverviewPanel({
             title="运行中现场"
             items={[
               `现场版本：${workingContext ? `v${String(workingContext.version)}` : "未落盘"}`,
-              `run brief：${localizeUiText(runBriefHeadlineText)}`,
+              `处理建议：${localizeUiText(runBriefHeadlineText)}`,
               `run brief ref：${runBriefRefText}`,
               `维护平面：${runDetail.maintenance_plane_ref ?? "未落盘"}`,
               `当前焦点：${localizeUiText(workingContextSurface.current_focus ?? "暂无")}`,
@@ -562,29 +636,31 @@ export function RunOverviewPanel({
           <SectionList title="避免重复" items={governance?.context_summary.avoid_summary ?? []} />
         </SubPanel>
 
-        <SubPanel title="当前判断" accent="amber">
+        <SubPanel title="当前建议" accent="amber">
           <p className="body-copy">
             {localizeUiText(
-              workingContextSurface.next_operator_attention ??
+              handoffSummary.summary ??
+                preflightSummary.failure_reason ??
+                preflightSummary.summary ??
+                workingContextSurface.next_operator_attention ??
                 runBriefSurface.summary ??
-                "还没有当前判断。"
+                "还没有当前建议。"
             )}
           </p>
-          <SectionList title="Operator Checklist" items={operatorChecklist} />
+          <SectionList title="处理清单" items={operatorChecklist} />
           <SectionList
-            title="当前状态"
+            title="交接说明与发车结果"
             items={[
-              `运行状态：${statusLabel(policyRuntimeSurface.status)}`,
-              `建议的尝试类型：${runBriefSurface.recommended_attempt_type ? attemptTypeLabel(runBriefSurface.recommended_attempt_type) : "暂无"}`,
-              `等待人工：${runBriefSurface.waiting_for_human ? "是" : "否"}`,
-              `最新尝试：${workingContextSurface.active_attempt_id ?? "暂无"}`,
-              `实时阶段：${runtimePhaseLabel(selectedRunRuntimeState?.phase)}`,
-              `最近事件：${selectedRunRuntimeState?.last_event_at ? formatRelativeTime(selectedRunRuntimeState.last_event_at, nowTs) : "暂无"}`,
-              `事件总数：${String(selectedRunRuntimeState?.event_count ?? 0)}`,
-              `介入等级：${selectedRunOperatorState?.label ?? "暂无"}`,
-              `治理状态：${governanceStatus}`,
-              `运行健康：${healthStatus}`,
-              `现场状态：${workingContextDegradedReasonLabel(workingContextDegraded.reason_code)}`
+              `交接说明：${localizeUiText(latestHandoff?.summary ?? "暂无")}`,
+              `交接建议：${nextActionLabel(latestHandoff?.recommended_next_action)}`,
+              `建议尝试类型：${
+                latestHandoff?.recommended_attempt_type
+                  ? attemptTypeLabel(latestHandoff.recommended_attempt_type)
+                  : "暂无"
+              }`,
+              `发车前结果：${latestPreflight ? statusLabel(latestPreflight.status) : "暂无"}`,
+              `发车前失败码：${latestPreflight?.failure_code ?? "暂无"}`,
+              `发车前原因：${localizeUiText(latestPreflight?.failure_reason ?? "暂无")}`
             ]}
           />
           <SectionList
@@ -598,18 +674,34 @@ export function RunOverviewPanel({
             ]}
           />
           <SectionList
-            title="交接与发车摘要"
+            title="当前状态"
             items={[
-              `handoff 摘要：${localizeUiText(latestHandoff?.summary ?? "暂无")}`,
-              `handoff 下一动作：${nextActionLabel(latestHandoff?.recommended_next_action)}`,
-              `handoff 下一类型：${
-                latestHandoff?.recommended_attempt_type
-                  ? attemptTypeLabel(latestHandoff.recommended_attempt_type)
-                  : "暂无"
-              }`,
-              `preflight 结果：${latestPreflight ? statusLabel(latestPreflight.status) : "暂无"}`,
-              `preflight 失败码：${latestPreflight?.failure_code ?? "暂无"}`,
-              `preflight 原因：${localizeUiText(latestPreflight?.failure_reason ?? "暂无")}`
+              `运行状态：${statusLabel(policyRuntimeSurface.status)}`,
+              `建议的尝试类型：${runBriefSurface.recommended_attempt_type ? attemptTypeLabel(runBriefSurface.recommended_attempt_type) : "暂无"}`,
+              `需要处理：${runBriefSurface.waiting_for_human ? "是" : "否"}`,
+              `最新尝试：${workingContextSurface.active_attempt_id ?? "暂无"}`,
+              `实时阶段：${runtimePhaseLabel(selectedRunRuntimeState?.phase)}`,
+              `最近事件：${selectedRunRuntimeState?.last_event_at ? formatRelativeTime(selectedRunRuntimeState.last_event_at, nowTs) : "暂无"}`,
+              `事件总数：${String(selectedRunRuntimeState?.event_count ?? 0)}`,
+              `介入等级：${selectedRunOperatorState?.label ?? "暂无"}`,
+              `治理状态：${governanceStatus}`,
+              `运行健康：${healthStatus}`,
+              `现场状态：${workingContextDegradedReasonLabel(workingContextDegraded.reason_code)}`
+            ]}
+          />
+          <SectionList
+            title="现场记录与降级"
+            items={[
+              `现场记录 ref：${workingContextSignal.artifact_ref ?? "未落盘"}`,
+              `当前快照：${workingContextSignal.current_snapshot_ref ?? "暂无"}`,
+              `自动化快照：${workingContextSignal.automation_snapshot_ref ?? "暂无"}`,
+              `治理快照：${workingContextSignal.governance_snapshot_ref ?? "暂无"}`,
+              `计划锚点：${workingContextSignal.plan_ref ?? "暂无"}`,
+              `活跃任务数：${String(workingContextSignal.active_task_count)}`,
+              `证据引用数：${String(workingContextSignal.recent_evidence_count)}`,
+              `降级状态：${workingContextSignal.is_degraded ? "是" : "否"}`,
+              `降级原因：${workingContextDegradedReasonLabel(workingContextSignal.degraded_reason_code)}`,
+              `现场说明：${localizeUiText(workingContextSignal.summary ?? "暂无")}`
             ]}
           />
           <SectionList
@@ -1254,7 +1346,7 @@ export function RunVerificationPanel({
           <SectionList title="缺失证据" items={evaluation?.missing_evidence ?? []} />
           <SectionList title="改动文件" items={verification?.changed_files ?? []} />
           <CodeBlock
-            title="当前判断依据"
+            title="当前建议依据"
             value={
               evaluation
                 ? [

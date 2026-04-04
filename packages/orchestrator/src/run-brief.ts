@@ -5,9 +5,13 @@ import {
   createRunBrief,
   createRunGovernanceState,
   type Attempt,
+  type AttemptAdversarialVerification,
+  type AttemptPreflightEvaluation,
   type CurrentDecision,
+  type Run,
   type RunAutomationControl,
   type RunBrief,
+  type RunFailureSignal,
   type RunGovernanceState
 } from "@autoresearch/domain";
 import {
@@ -29,6 +33,8 @@ import {
   type WorkspacePaths
 } from "@autoresearch/state-store";
 import { readRunWorkingContextView } from "./working-context.js";
+import { describeRunEffectivePolicyBundle } from "./effective-policy-bundle.js";
+import { describeRunHarnessGates } from "./gate-registry.js";
 import {
   deriveRunSurfaceFailureSignal
 } from "./failure-policy.js";
@@ -416,6 +422,106 @@ function buildHeadline(input: {
   );
 }
 
+function buildTakeoverSummary(input: {
+  automation: RunAutomationControl;
+  current: CurrentDecision;
+}): string {
+  if (input.automation.mode === "manual_only" || input.current.waiting_for_human) {
+    return "接球：需要人工";
+  }
+
+  return "接球：自动推进";
+}
+
+function buildUnifiedFailureSummary(failureSignal: RunFailureSignal | null): string {
+  if (!failureSignal) {
+    return "统一失败：无";
+  }
+
+  return `统一失败：${failureSignal.failure_class}${
+    failureSignal.failure_code ? ` (${failureSignal.failure_code})` : ""
+  }`;
+}
+
+function buildAdversarialGateSummary(input: {
+  run: Run;
+  latestAttempt: Attempt | null;
+  latestPreflight: AttemptPreflightEvaluation | null;
+  latestAdversarialVerification: AttemptAdversarialVerification | null;
+}): { summary: string; ref: string } {
+  const gateSourceRef = "run.harness_profile.gates.postflight_adversarial.mode";
+  const postflightGate = describeRunHarnessGates(input.run).postflight_adversarial;
+
+  if (!postflightGate.enforced) {
+    return {
+      summary: "对抗门：disabled",
+      ref: gateSourceRef
+    };
+  }
+
+  if (input.latestAdversarialVerification?.status === "passed") {
+    return {
+      summary: "对抗门：已通过",
+      ref:
+        input.latestAdversarialVerification.source_artifact_path ??
+        gateSourceRef
+    };
+  }
+
+  if (input.latestAdversarialVerification?.status === "failed") {
+    return {
+      summary: "对抗门：失败",
+      ref:
+        input.latestAdversarialVerification.source_artifact_path ??
+        gateSourceRef
+    };
+  }
+
+  if (input.latestPreflight?.status === "failed") {
+    return {
+      summary: "对抗门：required，未进入",
+      ref: gateSourceRef
+    };
+  }
+
+  if (input.latestAttempt?.attempt_type !== "execution") {
+    return {
+      summary: "对抗门：不适用",
+      ref: gateSourceRef
+    };
+  }
+
+  return {
+    summary: "对抗门：required，待验证",
+    ref: gateSourceRef
+  };
+}
+
+function buildOperatorBriefSummary(input: {
+  style: "headline_only" | "headline_plus_focus" | "headline_focus_and_next_action";
+  takeoverSummary: string;
+  failureSummary: string;
+  adversarialGateSummary: string;
+  primaryFocus: string | null;
+  nextAction: string | null;
+}): string {
+  const parts = [
+    input.takeoverSummary,
+    input.failureSummary,
+    input.adversarialGateSummary
+  ];
+
+  if (input.style !== "headline_only" && input.primaryFocus) {
+    parts.push(`焦点：${input.primaryFocus}`);
+  }
+
+  if (input.style === "headline_focus_and_next_action" && input.nextAction) {
+    parts.push(`下一步：${input.nextAction}`);
+  }
+
+  return parts.join(" | ");
+}
+
 export async function buildRunBrief(
   paths: WorkspacePaths,
   runId: string
@@ -566,6 +672,41 @@ export async function buildRunBrief(
     workingContextDegraded: workingContextView.working_context_degraded,
     workingContextRef: workingContextView.working_context_ref
   });
+  const effectivePolicyBundle = describeRunEffectivePolicyBundle(run);
+  const adversarialGateSummary = buildAdversarialGateSummary({
+    run,
+    latestAttempt,
+    latestPreflight,
+    latestAdversarialVerification
+  });
+  const recommendedNextAction =
+    current.recommended_next_action ??
+    latestHandoff?.recommended_next_action ??
+    null;
+  const primaryFocus =
+    workingContext?.current_focus ??
+    latestHandoff?.approved_attempt_contract?.objective ??
+    latestAttempt?.objective ??
+    run.description;
+
+  if (failureSignal?.source_ref) {
+    evidenceRefs.unshift({
+      kind: "failure_signal",
+      ref: failureSignal.source_ref,
+      label: "统一失败信号",
+      summary: buildUnifiedFailureSummary(failureSignal)
+    });
+  }
+  evidenceRefs.unshift({
+    kind: "adversarial_gate",
+    ref: adversarialGateSummary.ref,
+    label: "Postflight Gate",
+    summary: adversarialGateSummary.summary
+  });
+  const briefEvidenceRefs = evidenceRefs.slice(
+    0,
+    effectivePolicyBundle.operator_brief.evidence_ref_budget
+  );
 
   const headline = buildHeadline({
     automation,
@@ -576,12 +717,17 @@ export async function buildRunBrief(
     workingContextAttention: workingContext?.next_operator_attention ?? null,
     runDescription: run.description
   });
-  const summary =
-    current.summary ??
-    latestHandoff?.summary ??
-    latestPreflight?.failure_reason ??
-    workingContext?.next_operator_attention ??
-    headline;
+  const summary = buildOperatorBriefSummary({
+    style: effectivePolicyBundle.operator_brief.summary_style,
+    takeoverSummary: buildTakeoverSummary({
+      automation,
+      current
+    }),
+    failureSummary: buildUnifiedFailureSummary(failureSignal),
+    adversarialGateSummary: adversarialGateSummary.summary,
+    primaryFocus,
+    nextAction: recommendedNextAction
+  });
 
   return createRunBrief({
     run_id: runId,
@@ -594,10 +740,7 @@ export async function buildRunBrief(
       current.blocking_reason ??
       governance.context_summary.blocker_summary ??
       automation.reason,
-    recommended_next_action:
-      current.recommended_next_action ??
-      latestHandoff?.recommended_next_action ??
-      null,
+    recommended_next_action: recommendedNextAction,
     recommended_attempt_type:
       current.recommended_attempt_type ??
       latestHandoff?.recommended_attempt_type ??
@@ -605,12 +748,8 @@ export async function buildRunBrief(
     waiting_for_human: current.waiting_for_human,
     automation_mode: automation.mode,
     latest_attempt_id: latestAttempt?.id ?? null,
-    primary_focus:
-      workingContext?.current_focus ??
-      latestHandoff?.approved_attempt_contract?.objective ??
-      latestAttempt?.objective ??
-      run.description,
-    evidence_refs: evidenceRefs
+    primary_focus: primaryFocus,
+    evidence_refs: briefEvidenceRefs
   });
 }
 

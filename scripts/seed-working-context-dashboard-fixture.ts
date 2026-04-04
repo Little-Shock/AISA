@@ -17,6 +17,7 @@ import {
 import {
   appendRunJournal,
   ensureWorkspace,
+  readRunBriefStrict,
   resolveWorkspacePaths,
   saveAttemptAdversarialVerification,
   saveAttempt,
@@ -309,6 +310,7 @@ export async function seedWorkingContextDashboardFixture(input: {
     })
   );
   await refreshRunOperatorSurface(workspacePaths, run.id);
+  const generatedRunBrief = await readRunBriefStrict(workspacePaths, run.id);
   await saveCurrentDecision(
     workspacePaths,
     createCurrentDecision({
@@ -344,8 +346,8 @@ export async function seedWorkingContextDashboardFixture(input: {
     expected_failure_class: "preflight_blocked",
     expected_failure_code: "blocked_pnpm_verification_plan",
     expected_failure_policy_mode: "fail_closed",
-    expected_run_brief_headline: automationReason,
-    expected_run_brief_summary: initialCurrent.summary,
+    expected_run_brief_headline: generatedRunBrief.headline,
+    expected_run_brief_summary: generatedRunBrief.summary,
     expected_run_brief_degraded_reason: "run_brief_stale",
     expected_preflight_failure_reason: preflightFailureReason,
     expected_handoff_summary: preflightFailureReason,

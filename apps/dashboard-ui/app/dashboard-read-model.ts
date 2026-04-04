@@ -20,6 +20,46 @@ type PolicyRuntimeReadModel = {
   updated_at: string | null;
 };
 
+type PreflightReadModel = {
+  status: string | null;
+  summary: string | null;
+  failure_reason: string | null;
+  failure_code: string | null;
+  verifier_kit: string | null;
+  verification_command_count: number | null;
+  source_ref: string | null;
+  updated_at: string | null;
+};
+
+type HandoffReadModel = {
+  summary: string | null;
+  recommended_next_action: string | null;
+  recommended_attempt_type: string | null;
+  failure_code: string | null;
+  adversarial_failure_code: string | null;
+  source_ref: string | null;
+  updated_at: string | null;
+};
+
+type WorkingContextSignalReadModel = {
+  artifact_ref: string | null;
+  plan_ref: string | null;
+  summary: string | null;
+  degraded_summary: string | null;
+  degraded_reason_code: string | null;
+  is_degraded: boolean;
+  current_blocker_summary: string | null;
+  current_blocker_ref: string | null;
+  active_task_count: number;
+  recent_evidence_count: number;
+  current_snapshot_ref: string | null;
+  automation_snapshot_ref: string | null;
+  governance_snapshot_ref: string | null;
+  latest_attempt_snapshot_ref: string | null;
+  latest_steer_snapshot_ref: string | null;
+  updated_at: string | null;
+};
+
 type WorkingContextReadModel = {
   active_attempt_id: string | null;
   active_phase: string | null;
@@ -53,12 +93,18 @@ type SurfaceCarrier = Pick<
   | "current"
   | "policy_runtime"
   | "failure_signal"
+  | "latest_preflight_evaluation"
+  | "latest_preflight_evaluation_ref"
+  | "preflight_evaluation_summary"
   | "run_brief"
   | "maintenance_plane"
   | "working_context"
+  | "working_context_ref"
   | "working_context_degraded"
   | "run_health"
   | "latest_handoff_bundle"
+  | "latest_handoff_bundle_ref"
+  | "handoff_summary"
 >;
 
 type LatestAttemptCarrier = Partial<
@@ -120,6 +166,60 @@ export function readPolicyRuntime(item: SummaryLike): PolicyRuntimeReadModel {
   };
 }
 
+export function readPreflightSummary(item: SummaryLike): PreflightReadModel {
+  return {
+    status:
+      item.preflight_evaluation_summary?.status ??
+      item.latest_preflight_evaluation?.status ??
+      null,
+    summary:
+      item.preflight_evaluation_summary?.summary ??
+      item.latest_preflight_evaluation?.failure_reason ??
+      null,
+    failure_reason:
+      item.preflight_evaluation_summary?.failure_reason ??
+      item.latest_preflight_evaluation?.failure_reason ??
+      null,
+    failure_code:
+      item.preflight_evaluation_summary?.failure_code ??
+      item.latest_preflight_evaluation?.failure_code ??
+      null,
+    verifier_kit: item.preflight_evaluation_summary?.verifier_kit ?? null,
+    verification_command_count:
+      item.preflight_evaluation_summary?.verification_command_count ?? null,
+    source_ref:
+      item.preflight_evaluation_summary?.source_ref ??
+      item.latest_preflight_evaluation_ref ??
+      null,
+    updated_at: item.latest_preflight_evaluation?.created_at ?? null
+  };
+}
+
+export function readHandoffSummary(item: SummaryLike): HandoffReadModel {
+  return {
+    summary: item.handoff_summary?.summary ?? item.latest_handoff_bundle?.summary ?? null,
+    recommended_next_action:
+      item.handoff_summary?.recommended_next_action ??
+      item.latest_handoff_bundle?.recommended_next_action ??
+      null,
+    recommended_attempt_type:
+      item.handoff_summary?.recommended_attempt_type ??
+      item.latest_handoff_bundle?.recommended_attempt_type ??
+      null,
+    failure_code:
+      item.handoff_summary?.failure_code ?? item.latest_handoff_bundle?.failure_code ?? null,
+    adversarial_failure_code:
+      item.handoff_summary?.adversarial_failure_code ??
+      item.latest_handoff_bundle?.adversarial_failure_code ??
+      null,
+    source_ref:
+      item.handoff_summary?.source_ref ??
+      item.latest_handoff_bundle_ref ??
+      null,
+    updated_at: item.latest_handoff_bundle?.generated_at ?? null
+  };
+}
+
 export function readWorkingContext(item: SummaryLike): WorkingContextReadModel {
   return {
     active_attempt_id:
@@ -144,6 +244,35 @@ export function readWorkingContext(item: SummaryLike): WorkingContextReadModel {
       item.latest_attempt_runtime_state?.updated_at ??
       item.current?.updated_at ??
       item.run.created_at
+  };
+}
+
+export function readWorkingContextSignal(
+  item: SummaryLike
+): WorkingContextSignalReadModel {
+  return {
+    artifact_ref: item.working_context_ref ?? null,
+    plan_ref: item.working_context?.plan_ref ?? null,
+    summary:
+      item.working_context_degraded?.summary ??
+      item.working_context?.next_operator_attention ??
+      item.working_context?.current_focus ??
+      null,
+    degraded_summary: item.working_context_degraded?.summary ?? null,
+    degraded_reason_code: item.working_context_degraded?.reason_code ?? null,
+    is_degraded: item.working_context_degraded?.is_degraded ?? false,
+    current_blocker_summary: item.working_context?.current_blocker?.summary ?? null,
+    current_blocker_ref: item.working_context?.current_blocker?.ref ?? null,
+    active_task_count: item.working_context?.active_task_refs.length ?? 0,
+    recent_evidence_count: item.working_context?.recent_evidence_refs.length ?? 0,
+    current_snapshot_ref: item.working_context?.source_snapshot.current.ref ?? null,
+    automation_snapshot_ref: item.working_context?.source_snapshot.automation.ref ?? null,
+    governance_snapshot_ref: item.working_context?.source_snapshot.governance.ref ?? null,
+    latest_attempt_snapshot_ref:
+      item.working_context?.source_snapshot.latest_attempt.ref ?? null,
+    latest_steer_snapshot_ref:
+      item.working_context?.source_snapshot.latest_steer.ref ?? null,
+    updated_at: item.working_context?.updated_at ?? null
   };
 }
 
