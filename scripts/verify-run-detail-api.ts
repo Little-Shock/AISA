@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import assert from "node:assert/strict";
 import { mkdir, realpath, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -56,7 +57,8 @@ import {
   Orchestrator,
   refreshRunOperatorSurface,
   SELF_BOOTSTRAP_NEXT_TASK_ACTIVE_ENTRY_RELATIVE_PATH,
-  SELF_BOOTSTRAP_NEXT_TASK_ACTIVE_ENTRY_SNAPSHOT_FILE_NAME
+  SELF_BOOTSTRAP_NEXT_TASK_ACTIVE_ENTRY_SNAPSHOT_FILE_NAME,
+  SELF_BOOTSTRAP_NEXT_TASK_SOURCE_ASSET_SNAPSHOT_FILE_NAME
 } from "../packages/orchestrator/src/index.ts";
 import {
   CODEX_CLI_EXECUTION_EFFORT_APPLIED_DETAIL,
@@ -221,30 +223,34 @@ async function main(): Promise<void> {
   const resolvedRootDir = await realpath(rootDir);
   const workspacePaths = resolveWorkspacePaths(rootDir);
   await ensureWorkspace(workspacePaths);
+  const selfBootstrapSourceAssetContent = `${JSON.stringify(
+    {
+      recommended_next_attempt: {
+        attempt_type: "execution",
+        objective: "Fixture self-bootstrap execution contract.",
+        success_criteria: ["Persist a runnable self-bootstrap execution contract."],
+        required_evidence: ["Leave replayable validation evidence."],
+        expected_artifacts: ["scripts/verify-run-detail-api.ts"],
+        verification_plan: {
+          commands: [
+            {
+              purpose: "prove fixture self-bootstrap contract is replayable",
+              command: "pnpm verify:run-api"
+            }
+          ]
+        }
+      }
+    },
+    null,
+    2
+  )}\n`;
+  const selfBootstrapSourcePayloadSha256 = createHash("sha256")
+    .update(selfBootstrapSourceAssetContent)
+    .digest("hex");
   await Promise.all([
     writeFile(
       selfBootstrapSourceAssetPath,
-      `${JSON.stringify(
-        {
-          recommended_next_attempt: {
-            attempt_type: "execution",
-            objective: "Fixture self-bootstrap execution contract.",
-            success_criteria: ["Persist a runnable self-bootstrap execution contract."],
-            required_evidence: ["Leave replayable validation evidence."],
-            expected_artifacts: ["scripts/verify-run-detail-api.ts"],
-            verification_plan: {
-              commands: [
-                {
-                  purpose: "prove fixture self-bootstrap contract is replayable",
-                  command: "pnpm verify:run-api"
-                }
-              ]
-            }
-          }
-        },
-        null,
-        2
-      )}\n`,
+      selfBootstrapSourceAssetContent,
       "utf8"
     ),
     writeFile(
@@ -256,7 +262,7 @@ async function main(): Promise<void> {
           source_anchor: {
             asset_path: "Codex/fixture-self-bootstrap-next-task.json",
             source_attempt_id: "fixture_attempt",
-            payload_sha256: "fixture_payload_sha256",
+            payload_sha256: selfBootstrapSourcePayloadSha256,
             promoted_at: "2026-04-01T00:00:00.000Z"
           },
           title: "Fixture self-bootstrap next task",
@@ -1039,6 +1045,7 @@ async function main(): Promise<void> {
       };
       active_next_task: string;
       active_next_task_snapshot: string;
+      active_next_task_source_snapshot: string;
       runtime_health_snapshot: string;
     };
     assert.equal(selfBootstrap.run.workspace_root, resolvedRootDir);
@@ -1066,6 +1073,11 @@ async function main(): Promise<void> {
     assert.ok(
       selfBootstrap.active_next_task_snapshot.endsWith(
         SELF_BOOTSTRAP_NEXT_TASK_ACTIVE_ENTRY_SNAPSHOT_FILE_NAME
+      )
+    );
+    assert.ok(
+      selfBootstrap.active_next_task_source_snapshot.endsWith(
+        SELF_BOOTSTRAP_NEXT_TASK_SOURCE_ASSET_SNAPSHOT_FILE_NAME
       )
     );
     assert.ok(

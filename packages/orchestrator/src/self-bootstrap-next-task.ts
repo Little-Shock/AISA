@@ -1,5 +1,6 @@
-import { readFile } from "node:fs/promises";
-import { join } from "node:path";
+import { createHash } from "node:crypto";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { join, relative } from "node:path";
 import {
   AttemptContractDraftSchema,
   type AttemptContractDraft
@@ -13,6 +14,15 @@ export const SELF_BOOTSTRAP_NEXT_TASK_ACTIVE_ENTRY_SNAPSHOT_FILE_NAME =
   "self-bootstrap-next-task-active-entry.snapshot.json";
 export const SELF_BOOTSTRAP_NEXT_TASK_ACTIVE_ENTRY_RELATIVE_PATH =
   "Codex/self-bootstrap-next-runtime-task-active.json";
+
+export interface SelfBootstrapNextTaskSourceAsset {
+  path: string;
+  absolutePath: string;
+  content: string;
+  payload_sha256: string;
+  asset: Record<string, unknown>;
+  draft: AttemptContractDraft;
+}
 
 export interface SelfBootstrapNextTaskSourceAnchor {
   asset_path: string;
@@ -74,39 +84,104 @@ export async function loadSelfBootstrapNextTaskRecommendedAttemptDraft(input: {
   absolutePath: string;
   draft: AttemptContractDraft;
 }> {
-  const absolutePath = join(input.workspaceRoot, input.sourceAssetPath);
-  let content: string;
+  const sourceAsset = await loadSelfBootstrapNextTaskSourceAsset(input);
+  return {
+    path: sourceAsset.path,
+    absolutePath: sourceAsset.absolutePath,
+    draft: sourceAsset.draft
+  };
+}
 
-  try {
-    content = await readFile(absolutePath, "utf8");
-  } catch (error) {
-    const reason = error instanceof Error ? error.message : String(error);
-    throw new Error(`self-bootstrap source asset ${input.sourceAssetPath} is unreadable: ${reason}`);
-  }
+export async function loadSelfBootstrapNextTaskSourceAsset(input: {
+  workspaceRoot: string;
+  sourceAssetPath: string;
+}): Promise<SelfBootstrapNextTaskSourceAsset> {
+  return loadSelfBootstrapNextTaskSourceAssetFromAbsolutePath({
+    path: input.sourceAssetPath,
+    absolutePath: join(input.workspaceRoot, input.sourceAssetPath),
+    label: `self-bootstrap source asset ${input.sourceAssetPath}`
+  });
+}
 
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(content);
-  } catch (error) {
-    const reason = error instanceof Error ? error.message : String(error);
-    throw new Error(`self-bootstrap source asset ${input.sourceAssetPath} is invalid JSON: ${reason}`);
-  }
+export async function loadSelfBootstrapNextTaskSourceAssetSnapshot(input: {
+  absolutePath: string;
+  path: string;
+}): Promise<SelfBootstrapNextTaskSourceAsset> {
+  return loadSelfBootstrapNextTaskSourceAssetFromAbsolutePath({
+    path: input.path,
+    absolutePath: input.absolutePath,
+    label: `self-bootstrap source asset snapshot ${input.path}`
+  });
+}
 
-  const sourceAsset = expectObject(parsed, input.sourceAssetPath);
-  let draft: AttemptContractDraft;
-  try {
-    draft = AttemptContractDraftSchema.parse(sourceAsset.recommended_next_attempt);
-  } catch (error) {
-    const reason = error instanceof Error ? error.message : String(error);
+export function assertSelfBootstrapNextTaskSourceAnchorMatchesPayload(input: {
+  sourceAnchor: SelfBootstrapNextTaskSourceAnchor;
+  observedPath: string;
+  observedPayloadSha256: string;
+  subjectLabel: string;
+}): void {
+  const expectedPayloadSha256 = input.sourceAnchor.payload_sha256;
+  if (
+    expectedPayloadSha256 &&
+    expectedPayloadSha256 !== input.observedPayloadSha256
+  ) {
     throw new Error(
-      `self-bootstrap source asset ${input.sourceAssetPath}.recommended_next_attempt is invalid: ${reason}`
+      `${input.subjectLabel} ${input.observedPath} payload_sha256 mismatch: expected ${expectedPayloadSha256} but observed ${input.observedPayloadSha256}`
     );
   }
+}
+
+export async function captureSelfBootstrapNextTaskArtifacts(input: {
+  workspaceRoot: string;
+  workspaceDataRoot: string;
+  runArtifactsDir: string;
+  activeEntry: SelfBootstrapNextTaskActiveEntry;
+}): Promise<{
+  activeEntrySnapshotPath: string;
+  activeEntrySnapshotRef: string;
+  sourceAssetSnapshotPath: string;
+  sourceAssetSnapshotRef: string;
+  sourceAssetPayloadSha256: string;
+}> {
+  const sourceAsset = await loadSelfBootstrapNextTaskSourceAsset({
+    workspaceRoot: input.workspaceRoot,
+    sourceAssetPath: input.activeEntry.source_anchor.asset_path
+  });
+  assertSelfBootstrapNextTaskSourceAnchorMatchesPayload({
+    sourceAnchor: input.activeEntry.source_anchor,
+    observedPath: sourceAsset.path,
+    observedPayloadSha256: sourceAsset.payload_sha256,
+    subjectLabel: "self-bootstrap source asset"
+  });
+
+  const activeEntrySnapshotPath = join(
+    input.runArtifactsDir,
+    SELF_BOOTSTRAP_NEXT_TASK_ACTIVE_ENTRY_SNAPSHOT_FILE_NAME
+  );
+  const sourceAssetSnapshotPath = join(
+    input.runArtifactsDir,
+    SELF_BOOTSTRAP_NEXT_TASK_SOURCE_ASSET_SNAPSHOT_FILE_NAME
+  );
+  await mkdir(input.runArtifactsDir, { recursive: true });
+  await writeFile(
+    activeEntrySnapshotPath,
+    `${JSON.stringify(input.activeEntry, null, 2)}\n`,
+    "utf8"
+  );
+  await writeFile(sourceAssetSnapshotPath, sourceAsset.content, "utf8");
 
   return {
-    path: input.sourceAssetPath,
-    absolutePath,
-    draft
+    activeEntrySnapshotPath,
+    activeEntrySnapshotRef: relative(
+      input.workspaceDataRoot,
+      activeEntrySnapshotPath
+    ),
+    sourceAssetSnapshotPath,
+    sourceAssetSnapshotRef: relative(
+      input.workspaceDataRoot,
+      sourceAssetSnapshotPath
+    ),
+    sourceAssetPayloadSha256: sourceAsset.payload_sha256
   };
 }
 
@@ -194,4 +269,47 @@ function expectOptionalStringOrNull(value: unknown, label: string): string | nul
   }
 
   return value;
+}
+
+async function loadSelfBootstrapNextTaskSourceAssetFromAbsolutePath(input: {
+  path: string;
+  absolutePath: string;
+  label: string;
+}): Promise<SelfBootstrapNextTaskSourceAsset> {
+  let content: string;
+
+  try {
+    content = await readFile(input.absolutePath, "utf8");
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    throw new Error(`${input.label} is unreadable: ${reason}`);
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(content);
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    throw new Error(`${input.label} is invalid JSON: ${reason}`);
+  }
+
+  const sourceAsset = expectObject(parsed, input.path);
+  let draft: AttemptContractDraft;
+  try {
+    draft = AttemptContractDraftSchema.parse(sourceAsset.recommended_next_attempt);
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    throw new Error(
+      `${input.label}.recommended_next_attempt is invalid: ${reason}`
+    );
+  }
+
+  return {
+    path: input.path,
+    absolutePath: input.absolutePath,
+    content,
+    payload_sha256: createHash("sha256").update(content).digest("hex"),
+    asset: sourceAsset,
+    draft
+  };
 }

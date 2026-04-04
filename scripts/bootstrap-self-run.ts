@@ -1,5 +1,4 @@
-import { mkdir, writeFile } from "node:fs/promises";
-import { dirname, join, relative } from "node:path";
+import { dirname, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   createCurrentDecision,
@@ -10,8 +9,8 @@ import {
 } from "../packages/domain/src/index.ts";
 import { buildSelfBootstrapRunTemplate } from "../packages/planner/src/index.ts";
 import {
+  captureSelfBootstrapNextTaskArtifacts,
   captureSelfBootstrapRuntimeHealthSnapshot,
-  SELF_BOOTSTRAP_NEXT_TASK_ACTIVE_ENTRY_SNAPSHOT_FILE_NAME,
   loadSelfBootstrapNextTaskActiveEntry,
   resolveRuntimeLayout,
   syncRuntimeLayoutHint
@@ -96,6 +95,19 @@ async function main(): Promise<void> {
     }
   });
   const run = createRun(baseTemplate.runInput);
+  let current = createCurrentDecision({
+    run_id: run.id,
+    run_status: "draft",
+    summary: "Self-bootstrap run created. Waiting to launch."
+  });
+
+  const runPaths = resolveRunPaths(workspacePaths, run.id);
+  const selfBootstrapArtifacts = await captureSelfBootstrapNextTaskArtifacts({
+    workspaceRoot: runtimeLayout.devRepoRoot,
+    workspaceDataRoot: workspacePaths.rootDir,
+    runArtifactsDir: runPaths.artifactsDir,
+    activeEntry: activeNextTask.entry
+  });
   const runtimeHealthSnapshotRef = relative(
     workspacePaths.rootDir,
     resolveRunPaths(workspacePaths, run.id).runtimeHealthSnapshotFile
@@ -118,11 +130,6 @@ async function main(): Promise<void> {
       snapshot: runtimeHealthSnapshot
     }
   });
-  let current = createCurrentDecision({
-    run_id: run.id,
-    run_status: "draft",
-    summary: "Self-bootstrap run created. Waiting to launch."
-  });
 
   await saveRun(workspacePaths, run);
   await saveRunRuntimeHealthSnapshot(workspacePaths, runtimeHealthSnapshot);
@@ -139,21 +146,6 @@ async function main(): Promise<void> {
       }
     })
   );
-  const runPaths = resolveRunPaths(workspacePaths, run.id);
-  const activeNextTaskSnapshotPath = join(
-    runPaths.artifactsDir,
-    SELF_BOOTSTRAP_NEXT_TASK_ACTIVE_ENTRY_SNAPSHOT_FILE_NAME
-  );
-  await mkdir(runPaths.artifactsDir, { recursive: true });
-  await writeFile(
-    activeNextTaskSnapshotPath,
-    JSON.stringify(activeNextTask.entry, null, 2) + "\n",
-    "utf8"
-  );
-  const activeNextTaskSnapshotRef = relative(
-    workspacePaths.rootDir,
-    activeNextTaskSnapshotPath
-  );
   await appendRunJournal(
     workspacePaths,
     createRunJournalEntry({
@@ -161,9 +153,13 @@ async function main(): Promise<void> {
       type: "run.self_bootstrap.active_next_task.captured",
       payload: {
         published_path: activeNextTask.path,
-        snapshot_path: activeNextTaskSnapshotRef,
+        snapshot_path: selfBootstrapArtifacts.activeEntrySnapshotRef,
+        source_asset_snapshot_path:
+          selfBootstrapArtifacts.sourceAssetSnapshotRef,
         title: activeNextTask.entry.title,
-        source_anchor: activeNextTask.entry.source_anchor
+        source_anchor: activeNextTask.entry.source_anchor,
+        captured_payload_sha256:
+          selfBootstrapArtifacts.sourceAssetPayloadSha256
       }
     })
   );
@@ -236,7 +232,9 @@ async function main(): Promise<void> {
         launched: options.launch,
         template: "self-bootstrap",
         active_next_task: activeNextTask.path,
-        active_next_task_snapshot: activeNextTaskSnapshotRef,
+        active_next_task_snapshot: selfBootstrapArtifacts.activeEntrySnapshotRef,
+        active_next_task_source_snapshot:
+          selfBootstrapArtifacts.sourceAssetSnapshotRef,
         runtime_health_snapshot: runtimeHealthSnapshotRef
       },
       null,

@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import {
@@ -801,31 +802,35 @@ async function createSeedRepo(rootDir: string): Promise<void> {
     'export const runtimeLaneMarker = "seed";\n',
     "utf8"
   );
+  const runtimeLaneSourceAssetContent = `${JSON.stringify(
+    {
+      recommended_next_attempt: {
+        attempt_type: "execution",
+        objective: "Keep runtime lane self-bootstrap fixtures aligned with the live control-api contract.",
+        success_criteria: [
+          "Persist a runnable self-bootstrap execution contract in the runtime lane fixture."
+        ],
+        required_evidence: ["Leave replayable runtime-lane verification evidence."],
+        expected_artifacts: [RUNTIME_MARKER_FILE],
+        verification_plan: {
+          commands: [
+            {
+              purpose: "prove runtime-lane self-bootstrap fixtures stay runnable",
+              command: "pnpm verify:runtime-lanes"
+            }
+          ]
+        }
+      }
+    },
+    null,
+    2
+  )}\n`;
+  const runtimeLaneSourcePayloadSha256 = createHash("sha256")
+    .update(runtimeLaneSourceAssetContent)
+    .digest("hex");
   await writeFile(
     join(rootDir, "Codex", "fixture-self-bootstrap-next-task.json"),
-    `${JSON.stringify(
-      {
-        recommended_next_attempt: {
-          attempt_type: "execution",
-          objective: "Keep runtime lane self-bootstrap fixtures aligned with the live control-api contract.",
-          success_criteria: [
-            "Persist a runnable self-bootstrap execution contract in the runtime lane fixture."
-          ],
-          required_evidence: ["Leave replayable runtime-lane verification evidence."],
-          expected_artifacts: [RUNTIME_MARKER_FILE],
-          verification_plan: {
-            commands: [
-              {
-                purpose: "prove runtime-lane self-bootstrap fixtures stay runnable",
-                command: "pnpm verify:runtime-lanes"
-              }
-            ]
-          }
-        }
-      },
-      null,
-      2
-    )}\n`,
+    runtimeLaneSourceAssetContent,
     "utf8"
   );
   await writeFile(
@@ -837,7 +842,7 @@ async function createSeedRepo(rootDir: string): Promise<void> {
         source_anchor: {
           asset_path: "Codex/fixture-self-bootstrap-next-task.json",
           source_attempt_id: "fixture_runtime_lane_attempt",
-          payload_sha256: "fixture_runtime_lane_payload_sha256",
+          payload_sha256: runtimeLaneSourcePayloadSha256,
           promoted_at: "2026-04-01T00:00:00.000Z"
         },
         title: "Runtime lane fixture self-bootstrap task",

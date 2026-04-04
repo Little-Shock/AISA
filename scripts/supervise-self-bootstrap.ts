@@ -780,7 +780,9 @@ function hasGovernanceDeadEndBlocker(snapshot: RunSnapshot): boolean {
 
 function hasSelfBootstrapSnapshotBlocker(snapshot: RunSnapshot): boolean {
   const blockingReason = snapshot.current?.blocking_reason ?? "";
-  return /active next task snapshot is missing or invalid/i.test(blockingReason);
+  return /active next task (snapshot is missing or invalid|source snapshot is missing or invalid|source drifted after run start)/i.test(
+    blockingReason
+  );
 }
 
 function hasSupervisorPauseBoundary(snapshot: RunSnapshot): boolean {

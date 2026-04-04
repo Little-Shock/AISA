@@ -1,4 +1,3 @@
-import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import cors from "@fastify/cors";
@@ -29,6 +28,7 @@ import {
   buildRuntimeWorkspaceScopeRoots,
   captureSelfBootstrapRuntimeHealthSnapshot,
   createRunWorkspaceScopePolicy,
+  captureSelfBootstrapNextTaskArtifacts,
   deriveRunSurfaceFailureSignal,
   lockRunWorkspaceRoot,
   loadSelfBootstrapNextTaskActiveEntry,
@@ -43,7 +43,6 @@ import {
   ensureRunManagedWorkspace,
   refreshRunOperatorSurface,
   resolveRuntimeLayout,
-  SELF_BOOTSTRAP_NEXT_TASK_ACTIVE_ENTRY_SNAPSHOT_FILE_NAME,
   syncRuntimeLayoutHint,
   RunWorkspaceScopeError
 } from "@autoresearch/orchestrator";
@@ -1230,6 +1229,22 @@ export async function buildServer(
       run_status: "draft",
       summary: "Self-bootstrap run created. Waiting to launch."
     });
+    const runPaths = resolveRunPaths(workspacePaths, run.id);
+    let selfBootstrapArtifacts: Awaited<
+      ReturnType<typeof captureSelfBootstrapNextTaskArtifacts>
+    >;
+    try {
+      selfBootstrapArtifacts =
+        await captureSelfBootstrapNextTaskArtifacts({
+          workspaceRoot: runtimeLayout.devRepoRoot,
+          workspaceDataRoot: workspacePaths.rootDir,
+          runArtifactsDir: runPaths.artifactsDir,
+          activeEntry: activeNextTask.entry
+        });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return reply.code(400).send({ message });
+    }
     const runtimeHealthSnapshotRef = relative(
       workspacePaths.rootDir,
       resolveRunPaths(workspacePaths, run.id).runtimeHealthSnapshotFile
@@ -1258,7 +1273,6 @@ export async function buildServer(
         snapshot: runtimeHealthSnapshot
       }
     });
-
     await saveRun(workspacePaths, run);
     await saveRunRuntimeHealthSnapshot(workspacePaths, runtimeHealthSnapshot);
     await saveCurrentDecision(workspacePaths, current);
@@ -1274,21 +1288,6 @@ export async function buildServer(
         }
       })
     );
-    const runPaths = resolveRunPaths(workspacePaths, run.id);
-    const activeNextTaskSnapshotPath = join(
-      runPaths.artifactsDir,
-      SELF_BOOTSTRAP_NEXT_TASK_ACTIVE_ENTRY_SNAPSHOT_FILE_NAME
-    );
-    await mkdir(runPaths.artifactsDir, { recursive: true });
-    await writeFile(
-      activeNextTaskSnapshotPath,
-      `${JSON.stringify(activeNextTask.entry, null, 2)}\n`,
-      "utf8"
-    );
-    const activeNextTaskSnapshotRef = relative(
-      workspacePaths.rootDir,
-      activeNextTaskSnapshotPath
-    );
     await appendRunJournal(
       workspacePaths,
       createRunJournalEntry({
@@ -1296,9 +1295,13 @@ export async function buildServer(
         type: "run.self_bootstrap.active_next_task.captured",
         payload: {
           published_path: activeNextTask.path,
-          snapshot_path: activeNextTaskSnapshotRef,
+          snapshot_path: selfBootstrapArtifacts.activeEntrySnapshotRef,
+          source_asset_snapshot_path:
+            selfBootstrapArtifacts.sourceAssetSnapshotRef,
           title: activeNextTask.entry.title,
-          source_anchor: activeNextTask.entry.source_anchor
+          source_anchor: activeNextTask.entry.source_anchor,
+          captured_payload_sha256:
+            selfBootstrapArtifacts.sourceAssetPayloadSha256
         }
       })
     );
@@ -1368,7 +1371,9 @@ export async function buildServer(
       steer: runSteer,
       template: "self-bootstrap",
       active_next_task: activeNextTask.path,
-      active_next_task_snapshot: activeNextTaskSnapshotRef,
+      active_next_task_snapshot: selfBootstrapArtifacts.activeEntrySnapshotRef,
+      active_next_task_source_snapshot:
+        selfBootstrapArtifacts.sourceAssetSnapshotRef,
       runtime_health_snapshot: runtimeHealthSnapshotRef
     });
   });

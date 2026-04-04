@@ -19,7 +19,8 @@ import {
   createDefaultRunWorkspaceScopePolicy,
   Orchestrator,
   SELF_BOOTSTRAP_NEXT_TASK_ACTIVE_ENTRY_RELATIVE_PATH,
-  SELF_BOOTSTRAP_NEXT_TASK_ACTIVE_ENTRY_SNAPSHOT_FILE_NAME
+  SELF_BOOTSTRAP_NEXT_TASK_ACTIVE_ENTRY_SNAPSHOT_FILE_NAME,
+  SELF_BOOTSTRAP_NEXT_TASK_SOURCE_ASSET_SNAPSHOT_FILE_NAME
 } from "../packages/orchestrator/src/index.ts";
 import { buildServer } from "../apps/control-api/src/index.ts";
 import {
@@ -38,6 +39,7 @@ import {
   listRunJournal,
   listRunSteers,
   resolveAttemptPaths,
+  resolveRunPaths,
   resolveWorkspacePaths,
   saveAttempt,
   saveAttemptHeartbeat,
@@ -127,8 +129,22 @@ type BootstrapOutput = {
   template: string;
   active_next_task: string;
   active_next_task_snapshot: string;
+  active_next_task_source_snapshot: string;
   runtime_health_snapshot: string;
 };
+
+type VerifySelfBootstrapScope = "full" | "source_snapshot_hardening";
+
+function readVerifySelfBootstrapScope(): VerifySelfBootstrapScope {
+  const rawScope = (process.env.AISA_VERIFY_SELF_BOOTSTRAP_SCOPE ?? "full").trim();
+  if (rawScope === "full" || rawScope === "source_snapshot_hardening") {
+    return rawScope;
+  }
+
+  throw new Error(
+    `Unsupported AISA_VERIFY_SELF_BOOTSTRAP_SCOPE: ${rawScope}`
+  );
+}
 
 function resolveSourceRoot(): string {
   return dirname(dirname(fileURLToPath(import.meta.url)));
@@ -267,8 +283,30 @@ async function seedSelfBootstrapActiveTask(
   await writeFile(publishedPath, content, "utf8");
 }
 
+async function seedSelfBootstrapSourceAsset(
+  workspaceRoot: string,
+  sourceAssetPath: string,
+  content: string
+): Promise<void> {
+  const absolutePath = join(workspaceRoot, sourceAssetPath);
+  await mkdir(dirname(absolutePath), { recursive: true });
+  await writeFile(absolutePath, content, "utf8");
+}
+
 async function loadPublishedActiveTaskFixture(sourceRoot: string): Promise<{
   content: string;
+  entry: {
+    entry_type: "self_bootstrap_next_runtime_task_active";
+    updated_at: string;
+    source_anchor: {
+      asset_path: string;
+      source_attempt_id?: string | null;
+      payload_sha256?: string | null;
+      promoted_at?: string | null;
+    };
+    title: string;
+    summary: string;
+  };
   updatedAt: string;
   title: string;
   summary: string;
@@ -279,6 +317,7 @@ async function loadPublishedActiveTaskFixture(sourceRoot: string): Promise<{
     promoted_at?: string | null;
   };
   sourceAnchorAssetPath: string;
+  sourceAssetContent: string;
 }> {
   const content = await readFile(
     join(sourceRoot, SELF_BOOTSTRAP_NEXT_TASK_ACTIVE_ENTRY_RELATIVE_PATH),
@@ -295,15 +334,41 @@ async function loadPublishedActiveTaskFixture(sourceRoot: string): Promise<{
       promoted_at?: string | null;
     };
   };
+  const sourceAssetContent = await readFile(
+    join(sourceRoot, parsed.source_anchor.asset_path),
+    "utf8"
+  );
 
   return {
     content,
+    entry: {
+      entry_type: "self_bootstrap_next_runtime_task_active",
+      updated_at: parsed.updated_at,
+      source_anchor: parsed.source_anchor,
+      title: parsed.title,
+      summary: parsed.summary
+    },
     updatedAt: parsed.updated_at,
     title: parsed.title,
     summary: parsed.summary,
     sourceAnchor: parsed.source_anchor,
-    sourceAnchorAssetPath: parsed.source_anchor.asset_path
+    sourceAnchorAssetPath: parsed.source_anchor.asset_path,
+    sourceAssetContent
   };
+}
+
+async function seedPublishedSelfBootstrapTaskFixture(
+  workspaceRoot: string,
+  fixture: Awaited<ReturnType<typeof loadPublishedActiveTaskFixture>>
+): Promise<void> {
+  await Promise.all([
+    seedSelfBootstrapActiveTask(workspaceRoot, fixture.content),
+    seedSelfBootstrapSourceAsset(
+      workspaceRoot,
+      fixture.sourceAnchorAssetPath,
+      fixture.sourceAssetContent
+    )
+  ]);
 }
 
 async function waitForFirstAttemptContext(input: {
@@ -446,6 +511,169 @@ async function assertMissingActiveSnapshotBlocksRunInsteadOfCrashing(): Promise<
         entry.payload.message === blockedCurrent?.blocking_reason
     ),
     "planning failure should be recorded on the run instead of crashing the orchestrator"
+  );
+
+  return {
+    blocked_message: blockedCurrent?.blocking_reason ?? null
+  };
+}
+
+async function assertLiveSourceDriftBlocksRunInsteadOfUsingMutatedPublication(
+  sourceRoot: string
+): Promise<{
+  blocked_message: string | null;
+}> {
+  const baseDir = await createTrackedVerifyTempDir(
+    "aisa-self-bootstrap-source-drift-"
+  );
+  const repoRoot = join(baseDir, "repo");
+  const runtimeDataRoot = join(baseDir, "runtime-data");
+  const managedWorkspaceRoot = join(baseDir, ".aisa-run-worktrees");
+  await createGitWorkspace(repoRoot);
+  await mkdir(managedWorkspaceRoot, { recursive: true });
+
+  const publishedActiveTask = await loadPublishedActiveTaskFixture(sourceRoot);
+  await seedPublishedSelfBootstrapTaskFixture(repoRoot, publishedActiveTask);
+
+  const workspacePaths = resolveWorkspacePaths(runtimeDataRoot);
+  await ensureWorkspace(workspacePaths);
+  const run = createRun({
+    title: "AISA 自举下一步规划",
+    description: "Block source drift after the active next task has been captured.",
+    success_criteria: ["Pause instead of consuming a mutated self-bootstrap source asset."],
+    constraints: [],
+    owner_id: "test-owner",
+    workspace_root: repoRoot
+  });
+  const previousAttempt = updateAttempt(
+    createAttempt({
+      run_id: run.id,
+      attempt_type: "execution",
+      worker: "fake-codex",
+      objective: "Previous self-bootstrap execution step.",
+      success_criteria: ["Leave replayable evidence."],
+      workspace_root: repoRoot
+    }),
+    {
+      status: "completed",
+      ended_at: new Date().toISOString()
+    }
+  );
+  const current = createCurrentDecision({
+    run_id: run.id,
+    run_status: "running",
+    best_attempt_id: previousAttempt.id,
+    latest_attempt_id: previousAttempt.id,
+    recommended_next_action: "continue_execution",
+    recommended_attempt_type: "execution",
+    summary: "Continue the published self-bootstrap execution task."
+  });
+  await saveRun(workspacePaths, run);
+  await saveAttempt(workspacePaths, previousAttempt);
+  await saveCurrentDecision(workspacePaths, current);
+
+  const runPaths = resolveRunPaths(workspacePaths, run.id);
+  await mkdir(runPaths.artifactsDir, { recursive: true });
+  await writeFile(
+    join(runPaths.artifactsDir, SELF_BOOTSTRAP_NEXT_TASK_ACTIVE_ENTRY_SNAPSHOT_FILE_NAME),
+    `${JSON.stringify(publishedActiveTask.entry, null, 2)}\n`,
+    "utf8"
+  );
+  await writeFile(
+    join(runPaths.artifactsDir, SELF_BOOTSTRAP_NEXT_TASK_SOURCE_ASSET_SNAPSHOT_FILE_NAME),
+    publishedActiveTask.sourceAssetContent,
+    "utf8"
+  );
+
+  const liveSourceAsset = JSON.parse(
+    publishedActiveTask.sourceAssetContent
+  ) as {
+    recommended_next_attempt?: {
+      expected_artifacts?: string[];
+      verification_plan?: {
+        commands?: Array<{ purpose?: string; command?: string }>;
+      };
+    };
+  };
+  if (!liveSourceAsset.recommended_next_attempt) {
+    throw new Error("published self-bootstrap source fixture is missing recommended_next_attempt");
+  }
+  liveSourceAsset.recommended_next_attempt.expected_artifacts = [
+    "packages/orchestrator/src/self-bootstrap-next-task.ts",
+    "scripts/verify-self-bootstrap.ts"
+  ];
+  liveSourceAsset.recommended_next_attempt.verification_plan = {
+    commands: [
+      {
+        purpose: "prove the mutated publication is now different",
+        command: "pnpm verify:self-bootstrap"
+      }
+    ]
+  };
+  await writeFile(
+    join(repoRoot, publishedActiveTask.sourceAnchorAssetPath),
+    `${JSON.stringify(liveSourceAsset, null, 2)}\n`,
+    "utf8"
+  );
+
+  const orchestrator = new Orchestrator(
+    workspacePaths,
+    new NoopAdapter() as never,
+    undefined,
+    60_000,
+    {
+      runWorkspaceScopePolicy: createDefaultRunWorkspaceScopePolicy(
+        repoRoot,
+        managedWorkspaceRoot
+      )
+    }
+  );
+  await orchestrator.tick();
+  await sleep(50);
+  await orchestrator.tick();
+
+  const [blockedCurrent, attempts, journal] = await Promise.all([
+    getCurrentDecision(workspacePaths, run.id),
+    listAttempts(workspacePaths, run.id),
+    listRunJournal(workspacePaths, run.id)
+  ]);
+
+  assert.equal(
+    attempts.length,
+    1,
+    "source drift should block planning before any new execution attempt is created"
+  );
+  assert.equal(
+    attempts[0]?.id,
+    previousAttempt.id,
+    "source drift should leave the previous completed execution attempt untouched"
+  );
+  assert.equal(attempts[0]?.status, "completed");
+  assert.equal(blockedCurrent?.run_status, "waiting_steer");
+  assert.equal(blockedCurrent?.waiting_for_human, true);
+  assert.match(
+    blockedCurrent?.blocking_reason ?? "",
+    /self-bootstrap blocked because active next task source drifted after run start while building execution contract/,
+    "live source drift should stop the run with an explicit planning error"
+  );
+  assert.match(
+    blockedCurrent?.blocking_reason ?? "",
+    /payload_sha256 changed/,
+    "source drift failure should name the payload hash mismatch"
+  );
+  assert.ok(
+    blockedCurrent?.blocking_reason?.includes(
+      publishedActiveTask.sourceAnchorAssetPath
+    ),
+    "source drift failure should name the mutated live source asset"
+  );
+  assert.ok(
+    journal.some(
+      (entry) =>
+        entry.type === "run.planning.blocked" &&
+        entry.payload.message === blockedCurrent?.blocking_reason
+    ),
+    "source drift planning failure should be recorded on the run instead of crashing the orchestrator"
   );
 
   return {
@@ -667,7 +895,7 @@ async function assertSupervisorDoesNotKeepRotatingPinnedRun(sourceRoot: string):
   await mkdir(managedWorkspaceRoot, { recursive: true });
 
   const publishedActiveTask = await loadPublishedActiveTaskFixture(sourceRoot);
-  await seedSelfBootstrapActiveTask(repoRoot, publishedActiveTask.content);
+  await seedPublishedSelfBootstrapTaskFixture(repoRoot, publishedActiveTask);
 
   const workspacePaths = resolveWorkspacePaths(runtimeDataRoot);
   await ensureWorkspace(workspacePaths);
@@ -815,7 +1043,7 @@ async function assertSupervisorLeavesFailClosedWaitingRunPaused(sourceRoot: stri
   await mkdir(managedWorkspaceRoot, { recursive: true });
 
   const publishedActiveTask = await loadPublishedActiveTaskFixture(sourceRoot);
-  await seedSelfBootstrapActiveTask(repoRoot, publishedActiveTask.content);
+  await seedPublishedSelfBootstrapTaskFixture(repoRoot, publishedActiveTask);
 
   const workspacePaths = resolveWorkspacePaths(runtimeDataRoot);
   await ensureWorkspace(workspacePaths);
@@ -827,8 +1055,10 @@ async function assertSupervisorLeavesFailClosedWaitingRunPaused(sourceRoot: stri
     owner_id: "test-owner",
     workspace_root: repoRoot
   });
-  const blockingReason =
-    "self-bootstrap blocked because active next task snapshot is missing or invalid while building execution contract: missing title";
+  const blockingReason = [
+    "self-bootstrap blocked because active next task source drifted after run start while building execution contract:",
+    `${publishedActiveTask.sourceAnchorAssetPath} payload_sha256 changed from ${publishedActiveTask.sourceAnchor.payload_sha256 ?? "expected_payload_sha256"} to mutated_payload_sha256`
+  ].join(" ");
   await saveRun(workspacePaths, blockedRun);
   await saveCurrentDecision(
     workspacePaths,
@@ -952,7 +1182,7 @@ async function assertSupervisorSuspendsSupersededSelfBootstrapRuns(sourceRoot: s
   await mkdir(managedWorkspaceRoot, { recursive: true });
 
   const publishedActiveTask = await loadPublishedActiveTaskFixture(sourceRoot);
-  await seedSelfBootstrapActiveTask(repoRoot, publishedActiveTask.content);
+  await seedPublishedSelfBootstrapTaskFixture(repoRoot, publishedActiveTask);
 
   const workspacePaths = resolveWorkspacePaths(runtimeDataRoot);
   await ensureWorkspace(workspacePaths);
@@ -1161,6 +1391,8 @@ async function main(): Promise<void> {
   try {
     await assertRootEntrypointsUseNodeImportTsx();
 
+    const verifyScope = readVerifySelfBootstrapScope();
+    const runFullSuite = verifyScope === "full";
     const sourceRoot = resolveSourceRoot();
     const publishedActiveTask = await loadPublishedActiveTaskFixture(sourceRoot);
     const rootDir = await createTrackedVerifyTempDir("aisa-self-bootstrap-", {
@@ -1168,7 +1400,7 @@ async function main(): Promise<void> {
     });
     const workspacePaths = resolveWorkspacePaths(rootDir);
     await ensureWorkspace(workspacePaths);
-    await seedSelfBootstrapActiveTask(rootDir, publishedActiveTask.content);
+    await seedPublishedSelfBootstrapTaskFixture(rootDir, publishedActiveTask);
     const bootstrapResult = await runTsxScript({
       cwd: rootDir,
       sourceRoot,
@@ -1247,8 +1479,22 @@ async function main(): Promise<void> {
     "bootstrap output should expose the active next task snapshot path"
   );
   assert.ok(
+    bootstrapOutput.active_next_task_source_snapshot.endsWith(
+      SELF_BOOTSTRAP_NEXT_TASK_SOURCE_ASSET_SNAPSHOT_FILE_NAME
+    ),
+    "bootstrap output should expose the active next task source snapshot path"
+  );
+  assert.ok(
     bootstrapOutput.runtime_health_snapshot.endsWith("runtime-health-snapshot.json"),
     "bootstrap output should expose the runtime health snapshot path"
+  );
+  assert.equal(
+    await readFile(
+      join(rootDir, bootstrapOutput.active_next_task_source_snapshot),
+      "utf8"
+    ),
+    publishedActiveTask.sourceAssetContent,
+    "bootstrap should freeze the published active next task source asset at run start"
   );
   assert.equal(persistedCurrent?.run_status, "running");
   assert.equal(steers.length, 1);
@@ -1359,6 +1605,12 @@ async function main(): Promise<void> {
         "artifacts",
         SELF_BOOTSTRAP_NEXT_TASK_ACTIVE_ENTRY_SNAPSHOT_FILE_NAME
       ),
+      source_snapshot_path: join(
+        "runs",
+        run.id,
+        "artifacts",
+        SELF_BOOTSTRAP_NEXT_TASK_SOURCE_ASSET_SNAPSHOT_FILE_NAME
+      ),
       updated_at: publishedActiveTask.updatedAt,
       title: publishedActiveTask.title,
       summary: publishedActiveTask.summary,
@@ -1388,9 +1640,13 @@ async function main(): Promise<void> {
         entry.type === "run.self_bootstrap.active_next_task.captured" &&
         entry.payload.published_path ===
           SELF_BOOTSTRAP_NEXT_TASK_ACTIVE_ENTRY_RELATIVE_PATH &&
-        entry.payload.snapshot_path === bootstrapOutput.active_next_task_snapshot
+        entry.payload.snapshot_path === bootstrapOutput.active_next_task_snapshot &&
+        entry.payload.source_asset_snapshot_path ===
+          bootstrapOutput.active_next_task_source_snapshot &&
+        entry.payload.captured_payload_sha256 ===
+          publishedActiveTask.sourceAnchor.payload_sha256
     ),
-    "journal should record the captured active next task artifact"
+    "journal should record the captured active next task artifacts"
   );
   assert.ok(
     journal.some(
@@ -1429,6 +1685,88 @@ async function main(): Promise<void> {
       missingActiveTaskResult.stderr,
       /self-bootstrap-next-runtime-task-active\.json/,
       "missing active next task failure should mention the published asset"
+    );
+
+    const missingSourceAssetRoot = await createTrackedVerifyTempDir(
+      "aisa-self-bootstrap-missing-source-"
+    );
+    await seedSelfBootstrapActiveTask(
+      missingSourceAssetRoot,
+      publishedActiveTask.content
+    );
+    const missingSourceAssetResult = await runTsxScript({
+      cwd: missingSourceAssetRoot,
+      sourceRoot,
+      scriptPath: join(sourceRoot, "scripts", "bootstrap-self-run.ts"),
+      args: [
+        "--owner",
+        "test-owner",
+        "--focus",
+        "Use runtime evidence to choose the next backend step."
+      ],
+      extraEnv: {
+        AISA_DEV_REPO_ROOT: missingSourceAssetRoot,
+        AISA_RUNTIME_DATA_ROOT: missingSourceAssetRoot,
+        AISA_RUNTIME_REPO_ROOT: sourceRoot
+      }
+    });
+    assert.notEqual(
+      missingSourceAssetResult.exitCode,
+      0,
+      "bootstrap:self should fail closed when the active next task source asset is missing"
+    );
+    assert.match(
+      missingSourceAssetResult.stderr,
+      new RegExp(publishedActiveTask.sourceAnchorAssetPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
+      "missing source asset failure should mention the published source asset"
+    );
+
+    const invalidSourcePayloadRoot = await createTrackedVerifyTempDir(
+      "aisa-self-bootstrap-invalid-source-payload-"
+    );
+    const invalidSourcePayloadEntry = JSON.parse(
+      publishedActiveTask.content
+    ) as {
+      source_anchor: {
+        payload_sha256?: string | null;
+      };
+    };
+    invalidSourcePayloadEntry.source_anchor.payload_sha256 =
+      "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
+    await seedSelfBootstrapActiveTask(
+      invalidSourcePayloadRoot,
+      `${JSON.stringify(invalidSourcePayloadEntry, null, 2)}\n`
+    );
+    await seedSelfBootstrapSourceAsset(
+      invalidSourcePayloadRoot,
+      publishedActiveTask.sourceAnchorAssetPath,
+      publishedActiveTask.sourceAssetContent
+    );
+    const invalidSourcePayloadResult = await runTsxScript({
+      cwd: invalidSourcePayloadRoot,
+      sourceRoot,
+      scriptPath: join(sourceRoot, "scripts", "bootstrap-self-run.ts"),
+      args: [
+        "--owner",
+        "test-owner",
+        "--focus",
+        "Use runtime evidence to choose the next backend step."
+      ],
+      extraEnv: {
+        AISA_DEV_REPO_ROOT: invalidSourcePayloadRoot,
+        AISA_RUNTIME_DATA_ROOT: invalidSourcePayloadRoot,
+        AISA_RUNTIME_REPO_ROOT: sourceRoot
+      }
+    });
+    assert.notEqual(
+      invalidSourcePayloadResult.exitCode,
+      0,
+      "bootstrap:self should fail closed when the source anchor payload hash does not match"
+    );
+    assert.match(
+      invalidSourcePayloadResult.stderr,
+      /payload_sha256 mismatch/,
+      "source anchor payload mismatch should be explicit"
     );
 
     const invalidActiveTaskRoot = await createTrackedVerifyTempDir(
@@ -1478,29 +1816,55 @@ async function main(): Promise<void> {
 
     const missingExecutionSnapshotBlock =
       await assertMissingActiveSnapshotBlocksRunInsteadOfCrashing();
-    const supervisorSchemaRepair =
-      await assertSupervisorRepairsWorkerOutputSchemaBlocker(sourceRoot);
-    const pinnedRunRotation =
-      await assertSupervisorDoesNotKeepRotatingPinnedRun(sourceRoot);
-    const supersededRunCleanup =
-      await assertSupervisorSuspendsSupersededSelfBootstrapRuns(sourceRoot);
+    const liveSourceDriftBlock =
+      await assertLiveSourceDriftBlocksRunInsteadOfUsingMutatedPublication(
+        sourceRoot
+      );
     const blockedWaitingRun =
       await assertSupervisorLeavesFailClosedWaitingRunPaused(sourceRoot);
+    const supervisorSchemaRepair = runFullSuite
+      ? await assertSupervisorRepairsWorkerOutputSchemaBlocker(sourceRoot)
+      : {
+          repair_steer_id: null,
+          repair_state_action: null
+        };
+    const pinnedRunRotation = runFullSuite
+      ? await assertSupervisorDoesNotKeepRotatingPinnedRun(sourceRoot)
+      : {
+          first_rotated_run_id: null,
+          second_cycle_active_run_id: null,
+          rotated_runtime_health_snapshot: null
+        };
+    const supersededRunCleanup = runFullSuite
+      ? await assertSupervisorSuspendsSupersededSelfBootstrapRuns(sourceRoot)
+      : {
+          suspended_run_id: null,
+          active_run_id: null,
+          stopped_attempt_id: null
+        };
 
     console.log(
       JSON.stringify(
         {
+          scope: verifyScope,
           run_id: run.id,
           attempt_id: attempts[0]?.id ?? null,
           objective: attempts[0]?.objective ?? null,
           active_next_task: bootstrapOutput.active_next_task,
           active_next_task_snapshot: bootstrapOutput.active_next_task_snapshot,
+          active_next_task_source_snapshot:
+            bootstrapOutput.active_next_task_source_snapshot,
           runtime_health_snapshot: bootstrapOutput.runtime_health_snapshot,
           drift_count: runtimeHealthSnapshot?.history_contract_drift.drift_count ?? null,
           missing_active_next_task_exit_code: missingActiveTaskResult.exitCode,
+          missing_source_asset_exit_code: missingSourceAssetResult.exitCode,
+          invalid_source_anchor_payload_exit_code:
+            invalidSourcePayloadResult.exitCode,
           invalid_active_next_task_exit_code: invalidActiveTaskResult.exitCode,
           missing_execution_snapshot_blocked_message:
             missingExecutionSnapshotBlock.blocked_message,
+          live_source_drift_blocked_message:
+            liveSourceDriftBlock.blocked_message,
           repair_steer_id: supervisorSchemaRepair.repair_steer_id,
           repair_state_action: supervisorSchemaRepair.repair_state_action,
           first_rotated_run_id: pinnedRunRotation.first_rotated_run_id,

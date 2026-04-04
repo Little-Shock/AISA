@@ -189,7 +189,10 @@ import { type RuntimeLayout } from "./runtime-layout.js";
 import {
   SELF_BOOTSTRAP_NEXT_TASK_ACTIVE_ENTRY_RELATIVE_PATH,
   SELF_BOOTSTRAP_NEXT_TASK_ACTIVE_ENTRY_SNAPSHOT_FILE_NAME,
-  loadSelfBootstrapNextTaskRecommendedAttemptDraft,
+  SELF_BOOTSTRAP_NEXT_TASK_SOURCE_ASSET_SNAPSHOT_FILE_NAME,
+  assertSelfBootstrapNextTaskSourceAnchorMatchesPayload,
+  loadSelfBootstrapNextTaskSourceAsset,
+  loadSelfBootstrapNextTaskSourceAssetSnapshot,
   parseSelfBootstrapNextTaskActiveEntry,
   type SelfBootstrapNextTaskActiveEntry
 } from "./self-bootstrap-next-task.js";
@@ -4780,6 +4783,7 @@ export class Orchestrator {
   ): Promise<{
     path: string;
     snapshot_path: string;
+    source_snapshot_path: string;
     updated_at: string;
     title: string;
     summary: string;
@@ -4812,6 +4816,13 @@ export class Orchestrator {
     return {
       path: SELF_BOOTSTRAP_NEXT_TASK_ACTIVE_ENTRY_RELATIVE_PATH,
       snapshot_path: relative(this.workspacePaths.rootDir, snapshotPath),
+      source_snapshot_path: relative(
+        this.workspacePaths.rootDir,
+        join(
+          resolveRunPaths(this.workspacePaths, runId).artifactsDir,
+          SELF_BOOTSTRAP_NEXT_TASK_SOURCE_ASSET_SNAPSHOT_FILE_NAME
+        )
+      ),
       updated_at: snapshot.updated_at,
       title: snapshot.title,
       summary: snapshot.summary,
@@ -5137,11 +5148,55 @@ export class Orchestrator {
       );
     }
 
-    const sourceAsset = await loadSelfBootstrapNextTaskRecommendedAttemptDraft({
-      workspaceRoot: run.workspace_root,
-      sourceAssetPath: snapshot.source_anchor.asset_path
-    });
-    return sourceAsset.draft.attempt_type === "execution" ? sourceAsset.draft : null;
+    const sourceSnapshotPath = join(
+      resolveRunPaths(this.workspacePaths, runId).artifactsDir,
+      SELF_BOOTSTRAP_NEXT_TASK_SOURCE_ASSET_SNAPSHOT_FILE_NAME
+    );
+    let sourceSnapshot;
+
+    try {
+      sourceSnapshot = await loadSelfBootstrapNextTaskSourceAssetSnapshot({
+        absolutePath: sourceSnapshotPath,
+        path: relative(this.workspacePaths.rootDir, sourceSnapshotPath)
+      });
+      assertSelfBootstrapNextTaskSourceAnchorMatchesPayload({
+        sourceAnchor: snapshot.source_anchor,
+        observedPath: sourceSnapshot.path,
+        observedPayloadSha256: sourceSnapshot.payload_sha256,
+        subjectLabel: "run-local active next task source snapshot"
+      });
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      throw new Error(
+        `self-bootstrap blocked because active next task source snapshot is missing or invalid while building execution contract: ${reason}`
+      );
+    }
+
+    let liveSourceAsset;
+    try {
+      liveSourceAsset = await loadSelfBootstrapNextTaskSourceAsset({
+        workspaceRoot: run.workspace_root,
+        sourceAssetPath: snapshot.source_anchor.asset_path
+      });
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      throw new Error(
+        `self-bootstrap blocked because active next task source drifted after run start while building execution contract: ${reason}`
+      );
+    }
+
+    if (liveSourceAsset.payload_sha256 !== sourceSnapshot.payload_sha256) {
+      throw new Error(
+        [
+          "self-bootstrap blocked because active next task source drifted after run start while building execution contract:",
+          `${snapshot.source_anchor.asset_path} payload_sha256 changed from ${sourceSnapshot.payload_sha256} to ${liveSourceAsset.payload_sha256}`
+        ].join(" ")
+      );
+    }
+
+    return sourceSnapshot.draft.attempt_type === "execution"
+      ? sourceSnapshot.draft
+      : null;
   }
 
   private async resolveExecutionContractPlanningState(input: {
@@ -7253,13 +7308,18 @@ export {
 } from "./runtime-promotion.js";
 
 export {
+  assertSelfBootstrapNextTaskSourceAnchorMatchesPayload,
+  captureSelfBootstrapNextTaskArtifacts,
   SELF_BOOTSTRAP_NEXT_TASK_ACTIVE_ENTRY_RELATIVE_PATH,
   SELF_BOOTSTRAP_NEXT_TASK_ACTIVE_ENTRY_SNAPSHOT_FILE_NAME,
   SELF_BOOTSTRAP_NEXT_TASK_PROMOTION_ARTIFACT_FILE_NAME,
   SELF_BOOTSTRAP_NEXT_TASK_SOURCE_ASSET_SNAPSHOT_FILE_NAME,
+  loadSelfBootstrapNextTaskSourceAsset,
+  loadSelfBootstrapNextTaskSourceAssetSnapshot,
   loadSelfBootstrapNextTaskActiveEntry,
   parseSelfBootstrapNextTaskActiveEntry,
   type SelfBootstrapNextTaskActiveEntry,
+  type SelfBootstrapNextTaskSourceAsset,
   type SelfBootstrapNextTaskSourceAnchor
 } from "./self-bootstrap-next-task.js";
 
