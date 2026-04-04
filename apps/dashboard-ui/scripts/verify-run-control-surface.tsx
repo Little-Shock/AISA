@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
+import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -487,11 +489,125 @@ async function main(): Promise<void> {
       new RegExp(escapeRegExp(fixture.expected_preflight_failure_reason))
     );
 
+    const attachedProjectRoot = join(workspaceRoot, "attached-node-project");
+    await writeNodeProjectFixture(attachedProjectRoot);
+    await initializeGitRepo(attachedProjectRoot);
+    const attachProjectResponse = await app.inject({
+      method: "POST",
+      url: "/projects/attach",
+      payload: {
+        workspace_root: attachedProjectRoot,
+        owner_id: "dashboard-project-owner"
+      }
+    });
+    assert.equal(attachProjectResponse.statusCode, 201);
+    const attachedProjectPayload = attachProjectResponse.json() as {
+      project: {
+        id: string;
+        title: string;
+      };
+      recommended_stack_pack: {
+        title: string;
+      };
+      capability_snapshot: {
+        overall_status: string;
+      };
+    };
+    assert.equal(attachedProjectPayload.capability_snapshot.overall_status, "degraded");
+    const attachedRunCreateResponse = await app.inject({
+      method: "POST",
+      url: `/projects/${attachedProjectPayload.project.id}/runs`,
+      payload: {
+        owner_id: "dashboard-project-owner"
+      }
+    });
+    assert.equal(attachedRunCreateResponse.statusCode, 201);
+    const attachedRunCreatePayload = attachedRunCreateResponse.json() as {
+      run: {
+        id: string;
+        attached_project_id: string | null;
+        attached_project_stack_pack_id: string | null;
+        attached_project_task_preset_id: string | null;
+      };
+    };
+    assert.equal(
+      attachedRunCreatePayload.run.attached_project_id,
+      attachedProjectPayload.project.id
+    );
+    assert.equal(attachedRunCreatePayload.run.attached_project_stack_pack_id, "node_backend");
+    assert.equal(attachedRunCreatePayload.run.attached_project_task_preset_id, "bugfix");
+    const attachedDetailResponse = await app.inject({
+      method: "GET",
+      url: `/runs/${attachedRunCreatePayload.run.id}`
+    });
+    assert.equal(attachedDetailResponse.statusCode, 200);
+    const attachedRunDetail = attachedDetailResponse.json() as RunDetail;
+    assert.equal(
+      attachedRunDetail.attached_project?.project.id,
+      attachedProjectPayload.project.id
+    );
+    assert.equal(
+      attachedRunDetail.attached_project?.recommended_stack_pack.id,
+      "node_backend"
+    );
+    assert.equal(attachedRunDetail.recovery_guidance?.path, "first_attempt");
+    const attachedRunsResponse = await app.inject({
+      method: "GET",
+      url: "/runs"
+    });
+    assert.equal(attachedRunsResponse.statusCode, 200);
+    const attachedRunsPayload = attachedRunsResponse.json() as {
+      runs: RunSummaryItem[];
+    };
+    const attachedSelectedRun =
+      attachedRunsPayload.runs.find(
+        (item) => item.run.id === attachedRunCreatePayload.run.id
+      ) ?? null;
+    assert.ok(attachedSelectedRun, "attached project run should appear in summary payload");
+    const attachedOverviewMarkup = renderToStaticMarkup(
+      <RunOverviewPanel
+        runDetail={attachedRunDetail}
+        selectedRun={attachedSelectedRun}
+        selectedRunOperatorState={deriveRunOperatorState(attachedSelectedRun, nowTs)}
+        selectedRunRuntimeState={null}
+        selectedRunHeartbeat={null}
+        selectedRunAttemptDetail={null}
+        selectedRunCurrentUpdatedAt={attachedRunDetail.current?.updated_at ?? null}
+        nowTs={nowTs}
+        dataState="live"
+        liveStatusText="自动刷新正常"
+        liveAttemptText="当前没有进行中的尝试"
+        refreshLabel="刷新"
+        onRefresh={() => {}}
+        lastSuccessAtLabel="刚刚"
+      />
+    );
+    assert.match(attachedOverviewMarkup, /先看项目上下文/);
+    assert.match(
+      attachedOverviewMarkup,
+      new RegExp(escapeRegExp(attachedProjectPayload.project.title))
+    );
+    assert.match(
+      attachedOverviewMarkup,
+      new RegExp(escapeRegExp(attachedProjectPayload.recommended_stack_pack.title))
+    );
+    assert.match(attachedOverviewMarkup, /Bugfix/);
+    assert.match(attachedOverviewMarkup, /接入项目/);
+    assert.match(attachedOverviewMarkup, /项目接入事实/);
+    assert.match(attachedOverviewMarkup, /项目能力与恢复/);
+    assert.match(attachedOverviewMarkup, /项目基线引用/);
+    assert.match(attachedOverviewMarkup, /关键文件引用/);
+    assert.match(attachedOverviewMarkup, /恢复路径：首次发车/);
+    assert.match(attachedOverviewMarkup, /能力状态：降级/);
+    assert.match(attachedOverviewMarkup, /package\.json/);
+    assert.match(attachedOverviewMarkup, /capability-snapshot\.json/);
+
     console.log(
       JSON.stringify(
         {
           status: "passed",
           run_id: fixture.run_id,
+          attached_project_run_id: attachedRunCreatePayload.run.id,
           attempt_id: fixture.attempt_id,
           working_context_reason: runDetail.working_context_degraded.reason_code,
           run_brief_headline: runDetail.run_brief?.headline ?? null,
@@ -514,3 +630,75 @@ main().catch((error) => {
   console.error(error);
   process.exitCode = 1;
 });
+
+async function initializeGitRepo(rootDir: string): Promise<void> {
+  await mkdir(rootDir, { recursive: true });
+  await writeFile(
+    join(rootDir, ".gitignore"),
+    ["runs/", "state/", "events/", "artifacts/", "reports/", "plans/"].join("\n") + "\n",
+    "utf8"
+  );
+  await writeFile(join(rootDir, "README.md"), "# attached project fixture\n", "utf8");
+  await runCommand(rootDir, ["git", "-C", rootDir, "init"]);
+  await runCommand(rootDir, ["git", "-C", rootDir, "config", "user.name", "AISA Verify"]);
+  await runCommand(
+    rootDir,
+    ["git", "-C", rootDir, "config", "user.email", "aisa-verify@example.com"]
+  );
+  await runCommand(rootDir, ["git", "-C", rootDir, "add", "."]);
+  await runCommand(rootDir, ["git", "-C", rootDir, "commit", "-m", "test: seed attached project"]);
+}
+
+async function writeNodeProjectFixture(rootDir: string): Promise<void> {
+  await mkdir(rootDir, { recursive: true });
+  await writeFile(
+    join(rootDir, "package.json"),
+    JSON.stringify(
+      {
+        name: "attached-node-project",
+        private: true,
+        packageManager: "pnpm@10.27.0",
+        scripts: {
+          build: "pnpm build",
+          test: "pnpm test",
+          dev: "pnpm dev"
+        },
+        devDependencies: {
+          typescript: "^5.8.0"
+        }
+      },
+      null,
+      2
+    ) + "\n",
+    "utf8"
+  );
+  await writeFile(join(rootDir, "tsconfig.json"), "{\n  \"compilerOptions\": {}\n}\n", "utf8");
+  await writeFile(join(rootDir, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\n", "utf8");
+}
+
+async function runCommand(rootDir: string, args: string[]): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    const [command, ...commandArgs] = args;
+    const child = spawn(command!, commandArgs, {
+      cwd: rootDir,
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+    let stderr = "";
+    child.stderr.on("data", (chunk) => {
+      stderr += String(chunk);
+    });
+    child.on("error", reject);
+    child.on("close", (exitCode) => {
+      if (exitCode === 0) {
+        resolve();
+        return;
+      }
+
+      reject(
+        new Error(
+          `${args.join(" ")} failed in ${rootDir} with exit code ${exitCode ?? "null"}.\n${stderr}`
+        )
+      );
+    });
+  });
+}

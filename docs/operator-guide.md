@@ -68,6 +68,13 @@
 4. 确认 recommended next action。
 5. 只有在需要追因时，再往下翻 attempt timeline、report、journal 和 artifacts。
 
+如果这条 run 来自外部项目，再多加一步：
+
+- 先看 `先看项目上下文`
+- 再看 `项目能力与恢复`
+
+这两块会先告诉你这是什么项目、当前默认 pack / preset 是什么、现在还能不能发车、恢复该走哪条路。先把这层看清，再去读 handoff 和 journal，效率会高很多。
+
 ## 常见信号的人话翻译
 
 - `preflight required`
@@ -88,6 +95,10 @@
 - failure class 已经明确，但 next action 仍不清楚
 - 你需要改 run 目标、边界、优先级或验收标准
 
+如果是外部项目，再补一条：
+
+- `项目能力与恢复` 已经显示 `阻塞` 或 `降级重建`
+
 ## 介入前最好先确认的 5 件事
 
 1. 这次失败是发生在 preflight、runtime 还是 postflight。
@@ -95,6 +106,14 @@
 3. handoff 里推荐的 next action 是什么。
 4. brief 里的 `焦点` 是否仍然和你要解决的问题一致。
 5. 这条 run 是该继续 execution、改成 research，还是先停下来等人。
+
+如果 run 来自外部项目，把这 5 件事替换成更短的项目版顺序也行：
+
+1. 这是什么项目，选中的 stack pack 和 task preset 是什么。
+2. capability snapshot 对 `research` 和 `execution` 分别怎么判。
+3. recovery path 是 `first_attempt`、`handoff_first` 还是 `degraded_rebuild`。
+4. baseline ref、关键文件 ref、latest settled evidence ref 是否都还在。
+5. 当前是缺环境、缺基线、缺 handoff，还是单纯需要人工改目标。
 
 ## 下一步看哪里
 

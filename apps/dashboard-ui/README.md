@@ -14,6 +14,7 @@
 - run detail 已按 operator 视角拆成 overview / attempt timeline / report / journal 等面板，避免主页面继续膨胀
 - run detail 现在支持直接提交 `run steer`，把人工干预落到单条 run，而不是只能停留在 goal 级别
 - run detail 也把 verification lane 抬到前面，直接显示 replay readiness、运行时回放结果和证据缺口
+- run detail 现在会把 attached project 的项目画像、默认 pack / preset、capability 和 recovery path 提到首屏，外部项目不需要先翻 JSON 才知道下一步
 - run inbox 现在支持两阶段筛选：先按运行状态分组，再按 waiting human / replay gap / runtime fault / unstarted 等 operator lens 缩小范围
 - run inbox 还补了一层 operator presets，把常见 triage 组合做成一键入口，减少频繁切换 filter / lens
 - run inbox 会显式展示当前 preset / slice 在看什么，并在每条 run 卡片上标出命中当前视角的原因，减少 operator 来回切换详情确认

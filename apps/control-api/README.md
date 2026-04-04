@@ -26,3 +26,5 @@
 当前 run detail 读面还会额外暴露一份 `recovery_guidance`。
 
 它把 recovery path、reason、latest settled evidence refs、project profile / baseline / capability refs 收成一处，避免外部项目恢复时只能自己拼判断。
+
+如果这条 run 来自 attached project，run detail 现在还会直接带上 `attached_project`，把 project profile、默认 stack pack、task preset 和 capability snapshot 一起带给 dashboard。

@@ -19,6 +19,9 @@ const fixtureRunDetail: RunDetail = {
     description: "Ensure next pickup steer stays selectable without crashing the UI.",
     workspace_root: "/tmp/aisa-fixture",
     owner_id: "fixture-owner",
+    attached_project_id: null,
+    attached_project_stack_pack_id: null,
+    attached_project_task_preset_id: null,
     harness_profile: {
       version: 3,
       execution: {
@@ -65,6 +68,7 @@ const fixtureRunDetail: RunDetail = {
     created_at: fixtureNow,
     updated_at: fixtureNow
   },
+  attached_project: null,
   current: {
     run_status: "waiting_steer",
     best_attempt_id: "att_fixture",
@@ -265,6 +269,7 @@ const fixtureRunDetail: RunDetail = {
       detail: "Fixture reviewer effort allows settled handoff recovery."
     }
   },
+  recovery_guidance: null,
   attempts: [
     {
       id: "att_fixture",

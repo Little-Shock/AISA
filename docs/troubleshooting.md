@@ -46,6 +46,12 @@ pnpm --filter @autoresearch/dashboard-ui dev
    - `scripts/verify-run-detail-api.ts`
    - 最近变更涉及的 fixture 生成脚本
 
+如果红点只出在 attached project 场景，优先确认：
+
+- `GET /runs/:id` 有没有把 `attached_project` 和 `recovery_guidance` 一起带出来
+- `project_profile_ref`、`baseline_snapshot_ref`、`capability_snapshot_ref` 是不是还对得上
+- dashboard 类型有没有漏接 `attached_project_id`、stack pack、task preset、recovery path
+
 ## `verify:run-loop` 或 gate 相关验证打红
 
 这类问题通常不是前端问题，先看：
@@ -111,6 +117,23 @@ pnpm verify:self-bootstrap
 - 依赖是否安装完整
 
 如果问题只发生在 managed worktree，不要先改业务逻辑，先确认环境和路径策略。
+
+## 外部项目 attach 失败
+
+先区分 attach 失败发生在哪一层：
+
+- 仓库本身不符合 attach 预期
+- scope / 路径不允许
+- baseline 或 capability 生成失败
+
+最小检查顺序：
+
+1. 先看 `/projects/attach` 返回的是 `400` 还是 `422`
+2. 再看错误码是不是 `workspace_not_git_repo` 或 `invalid_project_manifest`
+3. 再确认仓库根目录下的 manifest 是否真的存在，比如 `package.json`、`pyproject.toml`、`go.mod`
+4. 如果 attach 过了但 run detail 还是没有项目面，去看 `GET /runs/:id` 里有没有 `attached_project`
+
+如果 attach 已过，但 run detail 显示 `降级重建`，不要先怪 dashboard。通常是 baseline snapshot 或 capability snapshot 丢了，先看 `recovery_guidance` 里的 ref 和 reason。
 
 ## 类型检查过了，但 surface verify 还在红
 

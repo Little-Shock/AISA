@@ -61,6 +61,7 @@ pnpm verify:dashboard-control-surface
 适用场景：
 
 - 改了 dashboard 首页、run detail 首屏、operator brief 展示
+- 改了 project-first run detail，比如 attached project、stack pack、task preset、capability、recovery path 这些首屏信息
 - 改了 UI 对 run summary / run detail 的关键读取顺序
 
 ### Dashboard steer surface
@@ -119,7 +120,8 @@ pnpm verify:judge-evals
 
 1. `pnpm --filter @autoresearch/dashboard-ui typecheck`
 2. `pnpm verify:dashboard-control-surface`
-3. 如果改了 steer，再补 `pnpm verify:dashboard-run-steer`
+3. 如果同时改了 project-first detail 的 API 字段，再补 `pnpm verify:run-api`
+4. 如果改了 steer，再补 `pnpm verify:dashboard-run-steer`
 
 ### 改了 self-bootstrap / 监督逻辑
 

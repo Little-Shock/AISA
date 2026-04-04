@@ -399,6 +399,8 @@ export type RunWorkingContext = {
   run_id: string;
   plan_ref: string | null;
   active_task_refs: RunWorkingContextTaskRef[];
+  baseline_refs: RunWorkingContextEvidenceRef[];
+  key_file_refs: RunWorkingContextEvidenceRef[];
   recent_evidence_refs: RunWorkingContextEvidenceRef[];
   current_focus: string | null;
   current_blocker: RunWorkingContextBlocker;
@@ -581,12 +583,166 @@ export type RunHandoffSummary = {
   source_ref: string | null;
 } | null;
 
+export type RunRecoveryEvidenceRef = {
+  kind: string;
+  ref: string;
+  label: string;
+  summary: string | null;
+};
+
+export type RunRecoveryGuidance = {
+  path: string;
+  recommended_next_action: string | null;
+  recommended_attempt_type: string | null;
+  summary: string | null;
+  blocking_reason: string | null;
+  handoff_bundle_ref: string | null;
+  reason_code: string;
+  reason: string;
+  project_status: string;
+  project_profile_ref: string | null;
+  baseline_snapshot_ref: string | null;
+  capability_snapshot_ref: string | null;
+  baseline_refs: RunRecoveryEvidenceRef[];
+  key_file_refs: RunRecoveryEvidenceRef[];
+  latest_settled_evidence_refs: RunRecoveryEvidenceRef[];
+} | null;
+
+export type RunAttachedProjectView = {
+  project: {
+    id: string;
+    slug: string;
+    title: string;
+    workspace_root: string;
+    repo_root: string;
+    repo_name: string;
+    project_type: string;
+    primary_language: string;
+    package_manager: string | null;
+    manifest_files: string[];
+    detection_reasons: string[];
+    default_commands: {
+      install: string | null;
+      build: string | null;
+      test: string | null;
+      lint: string | null;
+      start: string | null;
+    };
+    supported: boolean;
+    unsupported_reason: string | null;
+    created_at: string;
+    updated_at: string;
+  };
+  project_profile_ref: string;
+  baseline_snapshot: {
+    project_id: string;
+    workspace_root: string;
+    captured_at: string;
+    git: {
+      branch: string | null;
+      head_sha: string | null;
+      dirty: boolean;
+    };
+    repo_health: {
+      has_tests: boolean;
+      has_build_command: boolean;
+      default_verifier_hint: string | null;
+      supported: boolean;
+      unsupported_reason: string | null;
+    };
+  } | null;
+  baseline_snapshot_ref: string | null;
+  capability_snapshot: {
+    project_id: string;
+    workspace_root: string;
+    captured_at: string;
+    overall_status: string;
+    blocking_reasons: Array<{
+      code: string;
+      message: string;
+    }>;
+    workspace_scope: {
+      within_allowed_scope: boolean;
+      matched_scope_root: string | null;
+      summary: string;
+    };
+    worker_adapter: {
+      type: string;
+      command: string;
+      model: string | null;
+      available: boolean;
+      summary: string;
+      blocking_reasons: Array<{
+        code: string;
+        message: string;
+      }>;
+    };
+    verification_commands: Array<{
+      label: string;
+      command: string | null;
+      entrypoint: string | null;
+      status: string;
+      summary: string;
+      reason_code: string | null;
+    }>;
+    launch_readiness: {
+      research: {
+        attempt_type: string;
+        status: string;
+        summary: string;
+      };
+      execution: {
+        attempt_type: string;
+        status: string;
+        summary: string;
+      };
+    };
+  } | null;
+  capability_snapshot_ref: string | null;
+  recommended_stack_pack: {
+    id: string;
+    title: string;
+    summary: string;
+    default_task_preset_id: string;
+    default_verifier_kit: string;
+  };
+  task_preset_recommendations: Array<{
+    id: string;
+    title: string;
+    summary: string;
+  }>;
+  default_task_preset_id: string;
+  execution_contract_preview: {
+    attempt_type: string;
+    stack_pack_id: string | null;
+    task_preset_id: string | null;
+    verifier_kit: string | null;
+    verification_plan?: {
+      commands: Array<{
+        purpose: string;
+        command: string;
+      }>;
+    };
+  };
+  run_template: {
+    title: string;
+    description: string;
+    workspace_root: string;
+    owner_id: string;
+    success_criteria: string[];
+    constraints: string[];
+  };
+} | null;
+
 export type RunSummaryItem = {
   run: {
     id: string;
     title: string;
     description: string;
     workspace_root: string;
+    attached_project_id: string | null;
+    attached_project_stack_pack_id: string | null;
+    attached_project_task_preset_id: string | null;
     harness_profile: RunHarnessProfileView;
     created_at: string;
   };
@@ -654,12 +810,16 @@ export type RunDetail = {
     description: string;
     workspace_root: string;
     owner_id: string;
+    attached_project_id: string | null;
+    attached_project_stack_pack_id: string | null;
+    attached_project_task_preset_id: string | null;
     harness_profile: RunHarnessProfileView;
     success_criteria: string[];
     constraints: string[];
     created_at: string;
     updated_at: string;
   };
+  attached_project: RunAttachedProjectView;
   current: {
     run_status: string;
     best_attempt_id: string | null;
@@ -703,6 +863,7 @@ export type RunDetail = {
   harness_slots: RunHarnessSlotsView;
   default_verifier_kit_profile: ExecutionVerifierKitView;
   effective_policy_bundle: RunEffectivePolicyBundleView;
+  recovery_guidance: RunRecoveryGuidance;
   attempts: Array<{
     id: string;
     attempt_type: string;

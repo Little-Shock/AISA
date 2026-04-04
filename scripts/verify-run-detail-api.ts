@@ -1495,6 +1495,78 @@ async function main(): Promise<void> {
       attachedResearchRun.attached_project.execution_contract_preview.task_preset_id,
       "bugfix"
     );
+    const attachedResearchRunDetailResponse = await app.inject({
+      method: "GET",
+      url: `/runs/${attachedResearchRun.run.id}`
+    });
+    assert.equal(attachedResearchRunDetailResponse.statusCode, 200);
+    const attachedResearchRunDetail = attachedResearchRunDetailResponse.json() as {
+      run: {
+        attached_project_id: string | null;
+        attached_project_stack_pack_id: string | null;
+        attached_project_task_preset_id: string | null;
+      };
+      attached_project: {
+        project: {
+          id: string;
+          title: string;
+        };
+        recommended_stack_pack: {
+          id: string;
+          title: string;
+        };
+        capability_snapshot: {
+          overall_status: string;
+          launch_readiness: {
+            research: {
+              status: string;
+            };
+            execution: {
+              status: string;
+            };
+          };
+        } | null;
+      } | null;
+      recovery_guidance: {
+        path: string;
+        project_status: string;
+      };
+    };
+    assert.equal(
+      attachedResearchRunDetail.run.attached_project_id,
+      attachedNodeProject.project.id
+    );
+    assert.equal(
+      attachedResearchRunDetail.run.attached_project_stack_pack_id,
+      "node_backend"
+    );
+    assert.equal(
+      attachedResearchRunDetail.run.attached_project_task_preset_id,
+      "bugfix"
+    );
+    assert.equal(
+      attachedResearchRunDetail.attached_project?.project.id,
+      attachedNodeProject.project.id
+    );
+    assert.equal(
+      attachedResearchRunDetail.attached_project?.recommended_stack_pack.id,
+      "node_backend"
+    );
+    assert.equal(
+      attachedResearchRunDetail.attached_project?.recommended_stack_pack.title,
+      "Node Backend Pack"
+    );
+    assert.equal(
+      attachedResearchRunDetail.attached_project?.capability_snapshot?.overall_status,
+      attachedNodeProject.capability_snapshot.overall_status
+    );
+    assert.equal(
+      attachedResearchRunDetail.attached_project?.capability_snapshot?.launch_readiness
+        .research.status,
+      attachedNodeProject.capability_snapshot.launch_readiness.research.status
+    );
+    assert.equal(attachedResearchRunDetail.recovery_guidance.path, "first_attempt");
+    assert.equal(attachedResearchRunDetail.recovery_guidance.project_status, "degraded");
 
     const attachedExecutionRunResponse = await app.inject({
       method: "POST",

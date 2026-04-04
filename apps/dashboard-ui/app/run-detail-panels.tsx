@@ -116,6 +116,70 @@ function harnessGateModeLabel(mode: string | null | undefined): string {
   }
 }
 
+function projectTypeLabel(value: string | null | undefined): string {
+  switch (value) {
+    case "node_repo":
+      return "Node 仓库";
+    case "python_repo":
+      return "Python 仓库";
+    case "go_repo":
+      return "Go 仓库";
+    case "generic_git_repo":
+      return "通用 Git 仓库";
+    default:
+      return value ? localizeUiText(value) : "未知";
+  }
+}
+
+function projectLanguageLabel(value: string | null | undefined): string {
+  switch (value) {
+    case "typescript":
+      return "TypeScript";
+    case "javascript":
+      return "JavaScript";
+    case "python":
+      return "Python";
+    case "go":
+      return "Go";
+    case "generic":
+      return "通用";
+    default:
+      return value ? localizeUiText(value) : "未知";
+  }
+}
+
+function projectStatusLabel(value: string | null | undefined): string {
+  switch (value) {
+    case "ready":
+      return "可用";
+    case "degraded":
+      return "降级";
+    case "blocked":
+      return "阻塞";
+    case "not_applicable":
+      return "不适用";
+    case "warning":
+      return "警告";
+    default:
+      return value ? localizeUiText(value) : "未知";
+  }
+}
+
+function recoveryPathLabel(value: string | null | undefined): string {
+  switch (value) {
+    case "first_attempt":
+      return "首次发车";
+    case "latest_decision":
+      return "沿用最新决策";
+    case "handoff_first":
+      return "先读交接包";
+    case "degraded_rebuild":
+      return "降级重建";
+    default:
+      return value ? localizeUiText(value) : "未知";
+  }
+}
+
 function formatWorkingContextSource(input: {
   label: string;
   ref: string | null | undefined;
@@ -182,6 +246,8 @@ export function RunOverviewPanel({
   const latestHandoff = runDetail.latest_handoff_bundle;
   const workingContext = runDetail.working_context;
   const workingContextDegraded = runDetail.working_context_degraded;
+  const attachedProject = runDetail.attached_project;
+  const recoveryGuidance = runDetail.recovery_guidance;
   const runBriefDegraded = runDetail.run_brief_degraded;
   const runBriefHeadlineText =
     runBriefDegraded.is_degraded
@@ -207,6 +273,72 @@ export function RunOverviewPanel({
   const heartbeatLabel = heartbeatAt
     ? formatRelativeTime(heartbeatAt, nowTs)
     : "暂无";
+  const selectedTaskPreset =
+    attachedProject?.task_preset_recommendations.find(
+      (preset) => preset.id === runDetail.run.attached_project_task_preset_id
+    ) ??
+    attachedProject?.task_preset_recommendations.find(
+      (preset) => preset.id === attachedProject.default_task_preset_id
+    ) ??
+    null;
+  const selectedProjectAttemptType =
+    recoveryGuidance?.recommended_attempt_type ??
+    runDetail.current?.recommended_attempt_type ??
+    "execution";
+  const selectedLaunchGate =
+    selectedProjectAttemptType === "research"
+      ? attachedProject?.capability_snapshot?.launch_readiness.research ?? null
+      : attachedProject?.capability_snapshot?.launch_readiness.execution ?? null;
+  const projectCapabilityStatus =
+    attachedProject?.capability_snapshot?.overall_status ??
+    recoveryGuidance?.project_status ??
+    null;
+  const projectCalloutTone =
+    recoveryGuidance?.project_status === "blocked" || selectedLaunchGate?.status === "blocked"
+      ? "rose"
+      : "amber";
+  const projectSummaryText = [
+    attachedProject?.project.repo_name ? `仓库 ${attachedProject.project.repo_name}` : null,
+    attachedProject?.recommended_stack_pack.title
+      ? `Pack ${attachedProject.recommended_stack_pack.title}`
+      : runDetail.run.attached_project_stack_pack_id
+        ? `Pack ${runDetail.run.attached_project_stack_pack_id}`
+        : null,
+    selectedTaskPreset?.title
+      ? `预设 ${selectedTaskPreset.title}`
+      : runDetail.run.attached_project_task_preset_id
+        ? `预设 ${runDetail.run.attached_project_task_preset_id}`
+        : null,
+    projectCapabilityStatus
+      ? `能力 ${projectStatusLabel(projectCapabilityStatus)}`
+      : null,
+    recoveryGuidance?.path
+      ? `恢复 ${recoveryPathLabel(recoveryGuidance.path)}`
+      : null
+  ]
+    .filter(Boolean)
+    .join(" · ");
+  const projectBaselineRefs =
+    workingContext?.baseline_refs.length
+      ? workingContext.baseline_refs.map(
+          (item) =>
+            `${item.kind} · ${item.ref}${item.note ? ` · ${localizeUiText(item.note)}` : ""}`
+        )
+      : (recoveryGuidance?.baseline_refs ?? []).map(
+          (item) =>
+            `${item.label} · ${item.ref}${item.summary ? ` · ${localizeUiText(item.summary)}` : ""}`
+        );
+  const projectKeyFileRefs =
+    workingContext?.key_file_refs.length
+      ? workingContext.key_file_refs.map(
+          (item) =>
+            `${item.kind} · ${item.ref}${item.note ? ` · ${localizeUiText(item.note)}` : ""}`
+        )
+      : (recoveryGuidance?.key_file_refs ?? []).map(
+          (item) =>
+            `${item.label} · ${item.ref}${item.summary ? ` · ${localizeUiText(item.summary)}` : ""}`
+        );
+  const latestSettledEvidenceRefs = recoveryGuidance?.latest_settled_evidence_refs ?? [];
 
   return (
     <Panel
@@ -278,6 +410,34 @@ export function RunOverviewPanel({
         <InfoCard label="状态更新时间" value={formatDateTime(selectedRunCurrentUpdatedAt)} />
         <InfoCard label="负责人" value={runDetail.run.owner_id} />
         <InfoCard label="工作区" value={runDetail.run.workspace_root} />
+        {runDetail.run.attached_project_id ? (
+          <>
+            <InfoCard
+              label="接入项目"
+              value={attachedProject?.project.repo_name ?? runDetail.run.attached_project_id}
+            />
+            <InfoCard
+              label="Stack Pack"
+              value={
+                attachedProject?.recommended_stack_pack.title ??
+                runDetail.run.attached_project_stack_pack_id ??
+                "暂无"
+              }
+            />
+            <InfoCard
+              label="任务预设"
+              value={
+                selectedTaskPreset?.title ??
+                runDetail.run.attached_project_task_preset_id ??
+                "暂无"
+              }
+            />
+            <InfoCard
+              label="恢复路径"
+              value={recoveryGuidance ? recoveryPathLabel(recoveryGuidance.path) : "暂无"}
+            />
+          </>
+        ) : null}
         <InfoCard
           label="实时阶段"
           value={runtimePhaseLabel(selectedRunRuntimeState?.phase)}
@@ -372,6 +532,31 @@ export function RunOverviewPanel({
               runDetail.run_brief_invalid_reason ??
               "处理建议已退化，先修控制面摘要。"
           )}
+        </Callout>
+      ) : null}
+
+      {runDetail.run.attached_project_id ? (
+        <Callout tone={projectCalloutTone} title="先看项目上下文">
+          <strong>
+            {localizeUiText(
+              attachedProject
+                ? `${attachedProject.project.title} · ${projectTypeLabel(attachedProject.project.project_type)} · ${projectLanguageLabel(attachedProject.project.primary_language)}`
+                : `Attached project ${runDetail.run.attached_project_id}`
+            )}
+          </strong>
+          <br />
+          {localizeUiText(
+            projectSummaryText ||
+              selectedLaunchGate?.summary ||
+              recoveryGuidance?.reason ||
+              "这条 run 来自外部项目接入，先确认项目事实、默认 pack 和恢复路径。"
+          )}
+          {(selectedLaunchGate?.summary || recoveryGuidance?.reason) && projectSummaryText ? (
+            <>
+              <br />
+              {localizeUiText(selectedLaunchGate?.summary ?? recoveryGuidance?.reason ?? "")}
+            </>
+          ) : null}
         </Callout>
       ) : null}
 
@@ -564,6 +749,18 @@ export function RunOverviewPanel({
               ) ?? []
             }
           />
+          {runDetail.run.attached_project_id || projectBaselineRefs.length ? (
+            <SectionList
+              title="项目基线引用"
+              items={projectBaselineRefs}
+            />
+          ) : null}
+          {runDetail.run.attached_project_id || projectKeyFileRefs.length ? (
+            <SectionList
+              title="关键文件引用"
+              items={projectKeyFileRefs}
+            />
+          ) : null}
           <SectionList
             title="控制面真相"
             items={[
@@ -689,6 +886,51 @@ export function RunOverviewPanel({
               `现场状态：${workingContextDegradedReasonLabel(workingContextDegraded.reason_code)}`
             ]}
           />
+          {runDetail.run.attached_project_id ? (
+            <>
+              <SectionList
+                title="项目接入事实"
+                items={[
+                  `项目 ID：${runDetail.run.attached_project_id ?? "暂无"}`,
+                  `项目标题：${localizeUiText(attachedProject?.project.title ?? "暂无")}`,
+                  `项目类型：${projectTypeLabel(attachedProject?.project.project_type)}`,
+                  `主语言：${projectLanguageLabel(attachedProject?.project.primary_language)}`,
+                  `包管理器：${attachedProject?.project.package_manager ?? "暂无"}`,
+                  `Stack Pack：${attachedProject?.recommended_stack_pack.title ?? runDetail.run.attached_project_stack_pack_id ?? "暂无"}`,
+                  `任务预设：${selectedTaskPreset?.title ?? runDetail.run.attached_project_task_preset_id ?? "暂无"}`,
+                  `默认验证套件：${attachedProject?.recommended_stack_pack.default_verifier_kit ?? "暂无"}`,
+                  `项目画像 ref：${attachedProject?.project_profile_ref ?? recoveryGuidance?.project_profile_ref ?? "暂无"}`
+                ]}
+              />
+              <SectionList
+                title="项目能力与恢复"
+                items={[
+                  `能力状态：${projectStatusLabel(projectCapabilityStatus)}`,
+                  `项目恢复状态：${projectStatusLabel(recoveryGuidance?.project_status)}`,
+                  `恢复路径：${recoveryGuidance ? recoveryPathLabel(recoveryGuidance.path) : "暂无"}`,
+                  `恢复建议动作：${nextActionLabel(recoveryGuidance?.recommended_next_action ?? null)}`,
+                  `恢复建议类型：${recoveryGuidance?.recommended_attempt_type ? attemptTypeLabel(recoveryGuidance.recommended_attempt_type) : "暂无"}`,
+                  `当前发车门：${selectedLaunchGate ? `${attemptTypeLabel(selectedProjectAttemptType)} · ${projectStatusLabel(selectedLaunchGate.status)}` : "暂无"}`,
+                  `发车门摘要：${localizeUiText(selectedLaunchGate?.summary ?? "暂无")}`,
+                  `能力快照 ref：${attachedProject?.capability_snapshot_ref ?? recoveryGuidance?.capability_snapshot_ref ?? "暂无"}`,
+                  `baseline ref：${attachedProject?.baseline_snapshot_ref ?? recoveryGuidance?.baseline_snapshot_ref ?? "暂无"}`
+                ]}
+              />
+              <SectionList
+                title="恢复理由与证据"
+                items={[
+                  `恢复原因码：${recoveryGuidance?.reason_code ?? "暂无"}`,
+                  `恢复理由：${localizeUiText(recoveryGuidance?.reason ?? recoveryGuidance?.summary ?? "暂无")}`,
+                  `阻塞原因：${localizeUiText(recoveryGuidance?.blocking_reason ?? "暂无")}`,
+                  `稳定证据数：${String(latestSettledEvidenceRefs.length)}`,
+                  ...latestSettledEvidenceRefs.map(
+                    (item) =>
+                      `${item.label} · ${item.ref}${item.summary ? ` · ${localizeUiText(item.summary)}` : ""}`
+                  )
+                ]}
+              />
+            </>
+          ) : null}
           <SectionList
             title="现场记录与降级"
             items={[

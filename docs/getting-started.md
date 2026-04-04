@@ -87,6 +87,50 @@ pnpm verify:run-loop
 
 如果你更关心 operator 视角，先看 [`operator-guide.md`](./operator-guide.md)。
 
+## 外部项目最短路径
+
+如果目标不是让 AISA 开发自己，而是先接一个陌生仓库，最短路径直接走 project-first。
+
+### 1. 先 attach 项目
+
+```bash
+curl -X POST http://127.0.0.1:8787/projects/attach \
+  -H 'content-type: application/json' \
+  -d '{
+    "workspace_root": "/abs/path/to/your-repo",
+    "owner_id": "you"
+  }'
+```
+
+这一步会先生成 project profile、baseline snapshot、capability snapshot，还有默认 stack pack 和 task preset 推荐。
+
+### 2. 从 attached project 直接建第一条 run
+
+```bash
+curl -X POST http://127.0.0.1:8787/projects/<project_id>/runs \
+  -H 'content-type: application/json' \
+  -d '{
+    "owner_id": "you"
+  }'
+```
+
+如果你已经知道要走哪条任务预设，也可以在这里显式传 `stack_pack_id` 和 `task_preset_id`。
+
+### 3. 发车
+
+```bash
+curl -X POST http://127.0.0.1:8787/runs/<run_id>/launch
+```
+
+### 4. 在 dashboard 上按这个顺序看
+
+- 先看 `先看项目上下文`
+- 再看 `先看发车前结果`
+- 再看 `先看交接说明`
+- 中断后先看 `恢复路径` 和 `项目能力与恢复`
+
+如果这条 run 来自外部项目，run detail 现在会先把项目画像、默认 pack、能力状态和恢复路径抬到首屏，不需要先翻 artifacts 才知道该不该继续。
+
 ## 推荐阅读顺序
 
 1. 根 [`README.md`](../README.md)

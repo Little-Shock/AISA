@@ -1274,9 +1274,23 @@ export async function buildServer(
       workingContextDegraded: workingContextView.working_context_degraded,
       workingContextRef: workingContextView.working_context_ref
     });
+    const attachedProjectPayload =
+      run.attached_project_id === null
+        ? null
+        : await buildAttachedProjectPayload(run.attached_project_id, run.owner_id, {
+            stack_pack_id: run.attached_project_stack_pack_id,
+            task_preset_id: run.attached_project_task_preset_id
+          }).catch((error) => {
+            const err = error as NodeJS.ErrnoException;
+            if (err?.code === "ENOENT") {
+              return null;
+            }
+            throw error;
+          });
 
     return {
       run,
+      attached_project: attachedProjectPayload,
       current,
       automation: automationView,
       governance,
