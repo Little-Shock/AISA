@@ -14,6 +14,7 @@
     "verify:evaluator-calibration": "node --experimental-transform-types --loader ./scripts/ts-runtime-loader.mjs scripts/verify-evaluator-calibration.ts",
     "verify:drive-run": "node --experimental-transform-types --loader ./scripts/ts-runtime-loader.mjs scripts/verify-drive-run.ts",
     "verify:run-api": "node --experimental-transform-types --loader ./scripts/ts-runtime-loader.mjs scripts/verify-run-detail-api.ts",
+    "verify:external-repo-matrix": "node --experimental-transform-types --loader ./scripts/ts-runtime-loader.mjs scripts/verify-external-repo-matrix.ts",
     "verify:run-stream": "node --experimental-transform-types --loader ./scripts/ts-runtime-loader.mjs scripts/verify-run-stream.ts",
     "verify:run-loop": "node --experimental-transform-types --loader ./scripts/ts-runtime-loader.mjs scripts/verify-run-loop.ts",
     "verify:runtime-lanes": "node --experimental-transform-types --loader ./scripts/ts-runtime-loader.mjs scripts/verify-runtime-lanes.ts",

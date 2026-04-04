@@ -35,6 +35,24 @@ type RunAutonomyReport = {
   }>;
 };
 
+type ExternalRepoMatrixReport = {
+  suite: string;
+  passed: number;
+  failed: number;
+  results: Array<{
+    id: string;
+    status: "pass" | "fail";
+    project_type?: string;
+    stack_pack_id?: string;
+    task_preset_id?: string;
+    capability_status?: string;
+    recovery_path?: string;
+    failure_mode?: string;
+    notes?: string;
+    error?: string;
+  }>;
+};
+
 type WorkerAdapterReport = {
   research_shell_reentry: string;
   blocked_command_exit_code: number;
@@ -351,6 +369,69 @@ async function assertRunDetailApiReplay(): Promise<void> {
     0,
     formatScriptFailure("scripts/verify-run-detail-api.ts", result)
   );
+}
+
+async function assertExternalRepoMatrixReplay(): Promise<ExternalRepoMatrixReport> {
+  const result = await runTsxScript("scripts/verify-external-repo-matrix.ts");
+  assert.equal(
+    result.exitCode,
+    0,
+    formatScriptFailure("scripts/verify-external-repo-matrix.ts", result)
+  );
+
+  const report = parseScriptJsonReport<ExternalRepoMatrixReport>(
+    "scripts/verify-external-repo-matrix.ts",
+    result.stdout
+  );
+  assert.equal(report.failed, 0, "external repo matrix 回放不应该出现失败 case。");
+
+  const expectedCases = [
+    {
+      id: "node_backend_attach_defaults",
+      project_type: "node_repo",
+      stack_pack_id: "node_backend",
+      task_preset_id: "bugfix",
+      recovery_path: "first_attempt",
+      failure_mode: "missing_local_verifier_toolchain"
+    },
+    {
+      id: "python_service_attach_defaults",
+      project_type: "python_repo",
+      stack_pack_id: "python_service",
+      task_preset_id: "bugfix",
+      recovery_path: "first_attempt",
+      failure_mode: "bugfix_regression_unchecked"
+    },
+    {
+      id: "go_service_attach_defaults",
+      project_type: "go_repo",
+      stack_pack_id: "go_service_cli",
+      task_preset_id: "bugfix",
+      recovery_path: "first_attempt",
+      failure_mode: "bugfix_regression_unchecked"
+    },
+    {
+      id: "repo_maintenance_attach_defaults",
+      project_type: "generic_git_repo",
+      stack_pack_id: "repo_maintenance",
+      task_preset_id: "release_hardening",
+      recovery_path: "first_attempt",
+      failure_mode: "missing_replayable_verification_plan"
+    }
+  ] as const;
+
+  for (const expectedCase of expectedCases) {
+    const resultCase = report.results.find((entry) => entry.id === expectedCase.id);
+    assert.ok(resultCase, `external repo matrix 必须包含 ${expectedCase.id}。`);
+    assert.equal(resultCase.status, "pass", `${expectedCase.id} 必须通过。`);
+    assert.equal(resultCase.project_type, expectedCase.project_type);
+    assert.equal(resultCase.stack_pack_id, expectedCase.stack_pack_id);
+    assert.equal(resultCase.task_preset_id, expectedCase.task_preset_id);
+    assert.equal(resultCase.recovery_path, expectedCase.recovery_path);
+    assert.equal(resultCase.failure_mode, expectedCase.failure_mode);
+  }
+
+  return report;
 }
 
 async function assertWorkingContextReplay(): Promise<void> {
@@ -711,6 +792,7 @@ async function main(): Promise<void> {
   await assertControlApiSupervisorReplay();
   await assertRuntimeLaneReplay();
   await assertRunDetailApiReplay();
+  const externalRepoMatrix = await assertExternalRepoMatrixReplay();
   await assertWorkingContextReplay();
   await assertMaintenancePlaneReplay();
   await assertDashboardControlSurfaceReplay();
@@ -734,8 +816,8 @@ async function main(): Promise<void> {
     JSON.stringify(
       {
         summary: skipSelfBootstrapReplay
-          ? "runtime 回放通过，主链、maintenance plane、working context、dashboard control surface 都通过，嵌套 self-bootstrap 回放已按防递归保护跳过，历史 contract 漂移修复与体检都通过了。"
-          : "runtime 回放通过，主链、maintenance plane、working context、dashboard control surface、self-bootstrap 和历史 contract 漂移修复都通过了。",
+          ? "runtime 回放通过，主链、外部仓库矩阵、maintenance plane、working context、dashboard control surface 都通过，嵌套 self-bootstrap 回放已按防递归保护跳过，历史 contract 漂移修复与体检都通过了。"
+          : "runtime 回放通过，主链、外部仓库矩阵、maintenance plane、working context、dashboard control surface、self-bootstrap 和历史 contract 漂移修复都通过了。",
         run_loop: {
           status: "passed"
         },
@@ -752,6 +834,11 @@ async function main(): Promise<void> {
         },
         run_detail_api: {
           status: "passed"
+        },
+        external_repo_matrix: {
+          status: "passed",
+          passed: externalRepoMatrix.passed,
+          failed: externalRepoMatrix.failed
         },
         run_stream: {
           status: "passed"

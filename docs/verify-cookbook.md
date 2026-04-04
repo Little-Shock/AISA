@@ -40,6 +40,18 @@ pnpm verify:run-api
 - 改了 run detail payload、summary surface、brief / handoff / preflight 返回结构
 - 改了 project attach / baseline / capability snapshot / project-first run create / attached launch gate / stack pack / task preset / project-aware recovery guidance 这类外部项目接入 surface
 
+### External repo matrix
+
+```bash
+pnpm verify:external-repo-matrix
+```
+
+适用场景：
+
+- 改了外部项目 attach、project-first run create、默认 pack / preset 继承
+- 改了 Node backend、Python service、Go service / CLI、repo maintenance 这四类参考仓库的识别或恢复语义
+- 想确认外部可用性不是只对 AISA 自己成立
+
 ### Run loop / dispatch / gate
 
 ```bash
@@ -104,7 +116,8 @@ pnpm verify:judge-evals
 
 1. `pnpm --filter @autoresearch/control-api typecheck`
 2. `pnpm verify:run-api`
-3. 如果改动影响 run 推进，再补 `pnpm verify:run-loop`
+3. 如果改动影响外部项目接入，再补 `pnpm verify:external-repo-matrix`
+4. 如果改动影响 run 推进，再补 `pnpm verify:run-loop`
 
 ### 改了 orchestrator / runtime gate
 
