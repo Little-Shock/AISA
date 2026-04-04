@@ -6,6 +6,7 @@ import { join, resolve } from "node:path";
 import {
   createAttemptContract,
   createAttempt,
+  createAttachedProjectProfile,
   createDefaultRunHarnessProfile,
   createRunSteer,
   createCurrentDecision,
@@ -58,6 +59,7 @@ import {
   resolveWorkspacePaths,
   saveAttempt,
   saveAttemptContract,
+  saveAttachedProjectProfile,
   saveAttemptEvaluation,
   saveAttemptResult,
   saveAttemptRuntimeVerification,
@@ -137,6 +139,7 @@ type ScenarioDriver =
   | "running_attempt_owned_elsewhere"
   | "research_stall"
   | "research_command_failure"
+  | "attached_project_pack_default_contract"
   | "execution_verified_next_step_continues"
   | "execution_runtime_source_drift_requires_restart"
   | "execution_checkpoint_blocked_dirty_workspace"
@@ -239,6 +242,9 @@ type ScenarioObservation = {
     runtime_verification_preexisting_git_status: string[];
     runtime_verification_new_git_status: string[];
     runtime_verification_changed_files: string[];
+    attempt_contract_stack_pack_id: string | null;
+    attempt_contract_task_preset_id: string | null;
+    attempt_contract_verifier_kit: string | null;
     attempt_contract_done_rubric_codes: string[];
     attempt_contract_failure_mode_codes: string[];
     attempt_contract_adversarial_verification_required: boolean;
@@ -666,6 +672,7 @@ class ScenarioAdapter {
     if (
       [
         "happy_path",
+        "attached_project_pack_default_contract",
         "execution_verified_next_step_continues",
         "execution_runtime_source_drift_requires_restart",
         "execution_checkpoint_blocked_dirty_workspace",
@@ -695,6 +702,7 @@ class ScenarioAdapter {
 
     const writeback =
       this.driver === "happy_path" ||
+      this.driver === "attached_project_pack_default_contract" ||
       this.driver === "running_attempt_owned_elsewhere" ||
       this.driver === "execution_verified_next_step_continues" ||
       this.driver === "execution_runtime_source_drift_requires_restart" ||
@@ -767,6 +775,24 @@ class ScenarioAdapter {
                 }
               ]
             };
+      if (this.driver === "attached_project_pack_default_contract") {
+        return {
+          summary: "Attached project defaults are enough to start execution.",
+          findings: [
+            {
+              type: "fact",
+              content: "The attached project profile already provides replayable repo commands.",
+              evidence: ["package.json", "scripts/test-ok.mjs", "scripts/build-ok.mjs"]
+            }
+          ],
+          questions: [],
+          recommended_next_steps: [
+            "Use the attached project bugfix defaults instead of inventing a fresh execution contract."
+          ],
+          confidence: 0.84,
+          artifacts: []
+        };
+      }
       return {
         summary: "Repository understanding is strong enough to start execution.",
         findings: [
@@ -1150,6 +1176,7 @@ async function settle(input: {
 function shouldAutoApprovePendingExecution(driver: ScenarioDriver): boolean {
   return [
     "happy_path",
+    "attached_project_pack_default_contract",
     "execution_verified_next_step_continues",
     "execution_runtime_source_drift_requires_restart",
     "execution_checkpoint_blocked_dirty_workspace",
@@ -4667,7 +4694,9 @@ async function loadSmokeCases(): Promise<ScenarioCase[]> {
 
 async function runCase(scenario: ScenarioCase): Promise<ScenarioObservation> {
   const rootDir = await createVerifyTempDir(`aisa-${scenario.id}-`);
-  const { run, workspacePaths } = await bootstrapRun(rootDir, scenario.id);
+  const bootstrapped = await bootstrapRun(rootDir, scenario.id);
+  const { workspacePaths } = bootstrapped;
+  let run = bootstrapped.run;
 
   if (scenario.driver === "running_attempt_owned_elsewhere") {
     return runConcurrentOwnerCase({ run, workspacePaths });
@@ -4695,6 +4724,14 @@ async function runCase(scenario: ScenarioCase): Promise<ScenarioObservation> {
       await seedLiveRuntimeSourceFixture(rootDir);
     }
     await initializeGitRepo(rootDir, false);
+  }
+
+  if (scenario.driver === "attached_project_pack_default_contract") {
+    run = await seedAttachedProjectPackDefaultContractCase({
+      rootDir,
+      run,
+      workspacePaths
+    });
   }
 
   if (scenario.driver === "execution_missing_local_toolchain_blocks_dispatch") {
@@ -5106,6 +5143,77 @@ async function seedPackageJsonScriptsWithoutNodeModules(rootDir: string): Promis
   );
 }
 
+async function seedAttachedProjectPackDefaultContractCase(input: {
+  rootDir: string;
+  run: Run;
+  workspacePaths: ReturnType<typeof resolveWorkspacePaths>;
+}): Promise<Run> {
+  await mkdir(join(input.rootDir, "scripts"), { recursive: true });
+  await mkdir(join(input.rootDir, "node_modules"), { recursive: true });
+  await writeFile(
+    join(input.rootDir, "package.json"),
+    JSON.stringify(
+      {
+        name: "attached-project-pack-default-contract",
+        private: true,
+        packageManager: "pnpm@10.27.0",
+        scripts: {
+          test: "node ./scripts/test-ok.mjs",
+          build: "node ./scripts/build-ok.mjs"
+        }
+      },
+      null,
+      2
+    ) + "\n",
+    "utf8"
+  );
+  await writeFile(join(input.rootDir, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\n", "utf8");
+  await writeFile(
+    join(input.rootDir, "scripts", "test-ok.mjs"),
+    'console.log("test ok");\n',
+    "utf8"
+  );
+  await writeFile(
+    join(input.rootDir, "scripts", "build-ok.mjs"),
+    'console.log("build ok");\n',
+    "utf8"
+  );
+  await initializeGitRepo(input.rootDir, false);
+
+  const project = createAttachedProjectProfile({
+    id: "project_attached_pack_defaults",
+    slug: "attached-project-pack-default-contract",
+    title: "Attached project pack defaults",
+    workspace_root: input.rootDir,
+    repo_root: input.rootDir,
+    repo_name: "attached-project-pack-default-contract",
+    project_type: "node_repo",
+    primary_language: "typescript",
+    package_manager: "pnpm",
+    manifest_files: ["package.json", "pnpm-lock.yaml"],
+    detection_reasons: ["verify-run-loop fixture"],
+    default_commands: {
+      build: "pnpm build",
+      test: "pnpm test"
+    }
+  });
+  await saveAttachedProjectProfile(input.workspacePaths, project);
+
+  const run = updateRun(input.run, {
+    attached_project_id: project.id,
+    attached_project_stack_pack_id: "node_backend",
+    attached_project_task_preset_id: "bugfix",
+    harness_profile: {
+      execution: {
+        default_verifier_kit: "api"
+      }
+    }
+  });
+  await saveRun(input.workspacePaths, run);
+
+  return run;
+}
+
 async function seedLiveRuntimeSourceFixture(rootDir: string): Promise<void> {
   const runtimeDir = join(rootDir, "packages", "orchestrator", "src");
   await mkdir(runtimeDir, { recursive: true });
@@ -5340,6 +5448,12 @@ async function collectObservation(
             reviewPacket?.runtime_verification?.new_git_status ?? [],
           runtime_verification_changed_files:
             reviewPacket?.runtime_verification?.changed_files ?? [],
+          attempt_contract_stack_pack_id:
+            reviewPacket?.attempt_contract?.stack_pack_id ?? null,
+          attempt_contract_task_preset_id:
+            reviewPacket?.attempt_contract?.task_preset_id ?? null,
+          attempt_contract_verifier_kit:
+            reviewPacket?.attempt_contract?.verifier_kit ?? null,
           attempt_contract_done_rubric_codes:
             reviewPacket?.attempt_contract?.done_rubric.map((item) => item.code) ?? [],
           attempt_contract_failure_mode_codes:
@@ -5742,6 +5856,57 @@ function assertCase(scenario: ScenarioCase, observation: ScenarioObservation): v
     blockerReasonCapturedInPacket,
     `${scenario.id}: review packet should capture the blocking reason`
   );
+
+  if (scenario.driver === "attached_project_pack_default_contract") {
+    const executionPacket = observation.review_packets.find(
+      (packet) =>
+        packet.attempt_type === "execution" &&
+        packet.attempt_status === "completed" &&
+        packet.runtime_verification_status === "passed"
+    );
+    assert.ok(
+      executionPacket,
+      `${scenario.id}: expected a completed execution review packet`
+    );
+    assert.equal(
+      executionPacket.attempt_contract_stack_pack_id,
+      "node_backend",
+      `${scenario.id}: execution contract should freeze the selected stack pack`
+    );
+    assert.equal(
+      executionPacket.attempt_contract_task_preset_id,
+      "bugfix",
+      `${scenario.id}: execution contract should freeze the selected task preset`
+    );
+    assert.equal(
+      executionPacket.attempt_contract_verifier_kit,
+      "repo",
+      `${scenario.id}: attached project defaults should override the run-level verifier fallback`
+    );
+    assert.deepEqual(
+      executionPacket.attempt_contract_verification_commands,
+      ["pnpm test", "pnpm build"],
+      `${scenario.id}: execution contract should replay the attached project bugfix commands`
+    );
+    assert.ok(
+      !executionPacket.attempt_contract_verification_commands.some((command) =>
+        command.includes("execution-change.md")
+      ),
+      `${scenario.id}: execution contract should come from attached project defaults, not an inline research draft`
+    );
+    assert.ok(
+      executionPacket.attempt_contract_done_rubric_codes.includes(
+        "bugfix_boundary_replayed"
+      ),
+      `${scenario.id}: execution contract should include the bugfix-specific done rubric`
+    );
+    assert.ok(
+      executionPacket.attempt_contract_failure_mode_codes.includes(
+        "bugfix_regression_unchecked"
+      ),
+      `${scenario.id}: execution contract should include the bugfix-specific failure mode`
+    );
+  }
 
   if (scenario.driver === "execution_checkpoint_blocked_dirty_workspace") {
     const executionPacket = observation.review_packets.find(

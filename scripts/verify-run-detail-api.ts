@@ -1094,6 +1094,32 @@ async function main(): Promise<void> {
         };
       };
       capability_snapshot_ref: string | null;
+      recommended_stack_pack: {
+        id: string;
+        default_task_preset_id: string;
+        default_verifier_kit: string;
+      };
+      task_preset_recommendations: Array<{
+        id: string;
+        recommended: boolean;
+      }>;
+      default_task_preset_id: string;
+      execution_contract_preview: {
+        stack_pack_id: string | null;
+        task_preset_id: string | null;
+        verifier_kit: string | null;
+        verification_plan?: {
+          commands: Array<{
+            command: string;
+          }>;
+        };
+        done_rubric: Array<{
+          code: string;
+        }>;
+        failure_modes: Array<{
+          code: string;
+        }>;
+      };
     };
     assert.equal(attachedNodeProject.project.project_type, "node_repo");
     assert.equal(attachedNodeProject.project.primary_language, "typescript");
@@ -1153,6 +1179,54 @@ async function main(): Promise<void> {
       /artifacts\/projects\/project_[a-f0-9]{10}\/capability-snapshot\.json$/u
     );
     assert.equal(attachedNodeProject.capability_snapshot.overall_status, "degraded");
+    assert.equal(attachedNodeProject.recommended_stack_pack.id, "node_backend");
+    assert.equal(
+      attachedNodeProject.recommended_stack_pack.default_task_preset_id,
+      "bugfix"
+    );
+    assert.equal(
+      attachedNodeProject.recommended_stack_pack.default_verifier_kit,
+      "repo"
+    );
+    assert.deepEqual(
+      attachedNodeProject.task_preset_recommendations.map((preset) => preset.id),
+      [
+        "bugfix",
+        "feature",
+        "refactor",
+        "api_change",
+        "flaky_test",
+        "release_hardening"
+      ]
+    );
+    assert.deepEqual(
+      attachedNodeProject.task_preset_recommendations
+        .filter((preset) => preset.recommended)
+        .map((preset) => preset.id),
+      ["bugfix"]
+    );
+    assert.equal(attachedNodeProject.default_task_preset_id, "bugfix");
+    assert.equal(attachedNodeProject.execution_contract_preview.stack_pack_id, "node_backend");
+    assert.equal(attachedNodeProject.execution_contract_preview.task_preset_id, "bugfix");
+    assert.equal(attachedNodeProject.execution_contract_preview.verifier_kit, "repo");
+    assert.deepEqual(
+      attachedNodeProject.execution_contract_preview.verification_plan?.commands.map(
+        (command) => command.command
+      ) ?? [],
+      ["pnpm test", "pnpm build"]
+    );
+    assert.ok(
+      attachedNodeProject.execution_contract_preview.done_rubric.some(
+        (item) => item.code === "bugfix_boundary_replayed"
+      ),
+      "attached node project should preview bugfix-specific done rubric"
+    );
+    assert.ok(
+      attachedNodeProject.execution_contract_preview.failure_modes.some(
+        (item) => item.code === "bugfix_regression_unchecked"
+      ),
+      "attached node project should preview bugfix-specific failure modes"
+    );
     assert.equal(
       attachedNodeProject.capability_snapshot.launch_readiness.research.status,
       "ready"
@@ -1230,6 +1304,8 @@ async function main(): Promise<void> {
         baseline_snapshot_ref: string | null;
         capability_snapshot_ref: string | null;
         capability_overall_status: string | null;
+        recommended_stack_pack_id: string;
+        default_task_preset_id: string;
       }>;
     };
     assert.ok(
@@ -1239,7 +1315,9 @@ async function main(): Promise<void> {
           item.project.project_type === "node_repo" &&
           item.baseline_snapshot_ref !== null &&
           item.capability_snapshot_ref !== null &&
-          item.capability_overall_status === "degraded"
+          item.capability_overall_status === "degraded" &&
+          item.recommended_stack_pack_id === "node_backend" &&
+          item.default_task_preset_id === "bugfix"
       ),
       "attached node project should appear in project list with baseline and capability refs"
     );
@@ -1266,6 +1344,19 @@ async function main(): Promise<void> {
         id: string;
       };
       baseline_snapshot_ref: string | null;
+      recommended_stack_pack: {
+        id: string;
+      };
+      default_task_preset_id: string;
+      execution_contract_preview: {
+        stack_pack_id: string | null;
+        task_preset_id: string | null;
+        verification_plan?: {
+          commands: Array<{
+            command: string;
+          }>;
+        };
+      };
       capability_snapshot: {
         launch_readiness: {
           research: {
@@ -1298,6 +1389,30 @@ async function main(): Promise<void> {
       attachedNodeProjectDetail.capability_snapshot.launch_readiness.execution.status,
       attachedNodeProject.capability_snapshot.launch_readiness.execution.status
     );
+    assert.equal(
+      attachedNodeProjectDetail.recommended_stack_pack.id,
+      attachedNodeProject.recommended_stack_pack.id
+    );
+    assert.equal(
+      attachedNodeProjectDetail.default_task_preset_id,
+      attachedNodeProject.default_task_preset_id
+    );
+    assert.equal(
+      attachedNodeProjectDetail.execution_contract_preview.stack_pack_id,
+      attachedNodeProject.execution_contract_preview.stack_pack_id
+    );
+    assert.equal(
+      attachedNodeProjectDetail.execution_contract_preview.task_preset_id,
+      attachedNodeProject.execution_contract_preview.task_preset_id
+    );
+    assert.deepEqual(
+      attachedNodeProjectDetail.execution_contract_preview.verification_plan?.commands.map(
+        (command) => command.command
+      ) ?? [],
+      attachedNodeProject.execution_contract_preview.verification_plan?.commands.map(
+        (command) => command.command
+      ) ?? []
+    );
 
     const attachedResearchRunResponse = await app.inject({
       method: "POST",
@@ -1314,7 +1429,14 @@ async function main(): Promise<void> {
         owner_id: string;
         workspace_root: string;
         attached_project_id: string | null;
+        attached_project_stack_pack_id: string | null;
+        attached_project_task_preset_id: string | null;
         constraints: string[];
+        harness_profile: {
+          execution: {
+            default_verifier_kit: string;
+          };
+        };
       };
       current: {
         run_status: string;
@@ -1324,13 +1446,29 @@ async function main(): Promise<void> {
         project: {
           id: string;
         };
+        execution_contract_preview: {
+          stack_pack_id: string | null;
+          task_preset_id: string | null;
+        };
       };
     };
     assert.equal(
       attachedResearchRun.run.attached_project_id,
       attachedNodeProject.project.id
     );
+    assert.equal(
+      attachedResearchRun.run.attached_project_stack_pack_id,
+      "node_backend"
+    );
+    assert.equal(
+      attachedResearchRun.run.attached_project_task_preset_id,
+      "bugfix"
+    );
     assert.equal(attachedResearchRun.run.owner_id, "project-research-owner");
+    assert.equal(
+      attachedResearchRun.run.harness_profile.execution.default_verifier_kit,
+      "repo"
+    );
     assert.equal(
       attachedResearchRun.run.workspace_root,
       attachedNodeProject.run_template.workspace_root
@@ -1348,12 +1486,22 @@ async function main(): Promise<void> {
       attachedResearchRun.attached_project.project.id,
       attachedNodeProject.project.id
     );
+    assert.equal(
+      attachedResearchRun.attached_project.execution_contract_preview.stack_pack_id,
+      "node_backend"
+    );
+    assert.equal(
+      attachedResearchRun.attached_project.execution_contract_preview.task_preset_id,
+      "bugfix"
+    );
 
     const attachedExecutionRunResponse = await app.inject({
       method: "POST",
       url: `/projects/${attachedNodeProject.project.id}/runs`,
       payload: {
-        owner_id: "project-execution-owner"
+        owner_id: "project-execution-owner",
+        stack_pack_id: "node_backend",
+        task_preset_id: "api_change"
       }
     });
     assert.equal(attachedExecutionRunResponse.statusCode, 201);
@@ -1361,11 +1509,69 @@ async function main(): Promise<void> {
       run: {
         id: string;
         attached_project_id: string | null;
+        attached_project_stack_pack_id: string | null;
+        attached_project_task_preset_id: string | null;
+        harness_profile: {
+          execution: {
+            default_verifier_kit: string;
+          };
+        };
+      };
+      attached_project: {
+        execution_contract_preview: {
+          stack_pack_id: string | null;
+          task_preset_id: string | null;
+          verification_plan?: {
+            commands: Array<{
+              command: string;
+            }>;
+          };
+        };
       };
     };
     assert.equal(
       attachedExecutionRun.run.attached_project_id,
       attachedNodeProject.project.id
+    );
+    assert.equal(
+      attachedExecutionRun.run.attached_project_stack_pack_id,
+      "node_backend"
+    );
+    assert.equal(
+      attachedExecutionRun.run.attached_project_task_preset_id,
+      "api_change"
+    );
+    assert.equal(
+      attachedExecutionRun.run.harness_profile.execution.default_verifier_kit,
+      "repo"
+    );
+    assert.equal(
+      attachedExecutionRun.attached_project.execution_contract_preview.stack_pack_id,
+      "node_backend"
+    );
+    assert.equal(
+      attachedExecutionRun.attached_project.execution_contract_preview.task_preset_id,
+      "api_change"
+    );
+    assert.deepEqual(
+      attachedExecutionRun.attached_project.execution_contract_preview.verification_plan?.commands.map(
+        (command) => command.command
+      ) ?? [],
+      ["pnpm test", "pnpm build", "pnpm dev"]
+    );
+
+    const invalidPresetRunResponse = await app.inject({
+      method: "POST",
+      url: `/projects/${attachedNodeProject.project.id}/runs`,
+      payload: {
+        stack_pack_id: "repo_maintenance",
+        task_preset_id: "api_change"
+      }
+    });
+    assert.equal(invalidPresetRunResponse.statusCode, 400);
+    assert.match(
+      invalidPresetRunResponse.body,
+      /not supported by attached project stack pack/u
     );
 
     const nonGitProjectRoot = join(projectScopeDir, "non-git-project");

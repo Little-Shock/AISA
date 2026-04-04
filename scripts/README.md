@@ -10,9 +10,9 @@
 - `verify-history-contract-drift.ts`: 只读扫描历史 execution attempt 的 contract 漂移，发现后以非零退出
 - `repair-history-contract-drift.ts`: 显式修复历史 execution attempt 的 contract 和 review packet 漂移
 - `verify-history-contract-drift-repair.ts`: 在临时工作区里验证历史漂移修复脚本会先报错、再修复、再归零
-- `verify-run-loop.ts`: 运行 run-centered runtime smoke cases，验证 loop、恢复和失败暴露语义
+- `verify-run-loop.ts`: 运行 run-centered runtime smoke cases，验证 loop、恢复和失败暴露语义，也覆盖 attached project pack/preset 默认 execution contract fallback
 - `verify-drive-run.ts`: 验证本地 run driver 可以推进 run，并覆盖 execution sandbox 选择
-- `verify-run-detail-api.ts`: 验证 `/runs/:runId` 会返回 attempt 的 context、failure_context、结果、判断和 runtime 验证证据，也覆盖 project attach、baseline、capability snapshot、project-first run create 和 attached launch gate
+- `verify-run-detail-api.ts`: 验证 `/runs/:runId` 会返回 attempt 的 context、failure_context、结果、判断和 runtime 验证证据，也覆盖 project attach、baseline、capability snapshot、project-first run create、attached launch gate，以及 stack pack / task preset 推荐与预览
 - `verify-worker-adapter.ts`: 验证 worker 非零退出时会把 stderr 里的根因带回阻塞信息
 - `export-evaluator-calibration.ts`: 从 runtime workspace 导出 evaluator calibration sample 到 `evals/runtime-run-loop/datasets/calibration/online-samples/`，并刷新 manifest
 - `bootstrap-self-run.ts`: 生成并可直接启动一个面向当前仓库的 self-bootstrap run

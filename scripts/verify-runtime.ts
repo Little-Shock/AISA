@@ -319,6 +319,19 @@ async function assertRunLoopReplay(filterOverride?: string | null): Promise<RunL
     "shadow dispatch smoke 必须在 dispatch 前拦住坏的 verifier 命令。"
   );
 
+  const attachedProjectDefaultsCase = report.results.find(
+    (entry) => entry.id === "attached-project-pack-default-contract"
+  );
+  assert.ok(
+    attachedProjectDefaultsCase,
+    "run-loop 回归必须包含 attached-project-pack-default-contract。"
+  );
+  assert.equal(
+    attachedProjectDefaultsCase.status,
+    "pass",
+    "attached project pack/preset 默认合同 smoke 必须通过。"
+  );
+
   return report;
 }
 

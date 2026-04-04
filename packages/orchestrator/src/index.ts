@@ -78,6 +78,7 @@ import {
   getAttemptContract,
   getAttemptContext,
   getAttemptAdversarialVerification,
+  getAttachedProjectProfile,
   getAttemptHandoffBundle,
   getAttemptHeartbeat,
   getAttemptEvaluation,
@@ -151,6 +152,10 @@ import {
   resolveExecutionWorkerEffort,
   type ExecutionWorkerEffortSetting
 } from "@autoresearch/worker-adapters";
+import {
+  buildAttachedProjectExecutionDefaults,
+  type AttachedProjectExecutionDefaults
+} from "./attached-project-pack-registry.js";
 import {
   captureAttemptCheckpointPreflight,
   maybeCreateVerifiedExecutionCheckpoint,
@@ -733,6 +738,24 @@ function normalizeExecutionExpectedArtifacts(
     : normalized;
 }
 
+function mergeExecutionStringValues(
+  baseValues: string[],
+  overrideValues?: string[] | null
+): string[] {
+  const merged = [...baseValues];
+  const seen = new Set(baseValues);
+
+  for (const value of overrideValues ?? []) {
+    if (seen.has(value)) {
+      continue;
+    }
+    merged.push(value);
+    seen.add(value);
+  }
+
+  return merged;
+}
+
 function buildDefaultExecutionDoneRubric(
   postflightAdversarialGateRequired = true
 ): AttemptContract["done_rubric"] {
@@ -838,6 +861,28 @@ function normalizeExecutionFailureModes(
     (item: AttemptContract["failure_modes"][number]) => adversarialCodes.has(item.code)
   );
   return [...normalized, ...adversarialFailureModes];
+}
+
+function mergeExecutionCodeItems<T extends { code: string }>(
+  baseItems: T[],
+  overrideItems?: T[] | null
+): T[] {
+  const merged = [...baseItems];
+  const indexByCode = new Map(baseItems.map((item, index) => [item.code, index]));
+
+  for (const item of overrideItems ?? []) {
+    const existingIndex = indexByCode.get(item.code);
+
+    if (existingIndex === undefined) {
+      indexByCode.set(item.code, merged.length);
+      merged.push(item);
+      continue;
+    }
+
+    merged[existingIndex] = item;
+  }
+
+  return merged;
 }
 
 function normalizeExecutionObjective(value: string | null | undefined): string {
@@ -2989,6 +3034,12 @@ export class Orchestrator {
         opinionRefs: reviewOpinions.map((opinion) =>
           this.buildAttemptReviewOpinionRef(runId, attempt.id, opinion.opinion_id)
         )
+      });
+      synthesis.evaluation = await this.maybePromoteAttachedProjectResearchToExecution({
+        run,
+        attempt: completedAttemptForEvaluation,
+        evaluation: synthesis.evaluation,
+        result: execution.writeback
       });
       if (synthesis.synthesisRecord) {
         await saveAttemptEvaluationSynthesisRecord(
@@ -5166,6 +5217,49 @@ export class Orchestrator {
     ].join("\n");
   }
 
+  private async maybePromoteAttachedProjectResearchToExecution(input: {
+    run: Run;
+    attempt: Attempt;
+    evaluation: AttemptEvaluation;
+    result: WorkerWriteback;
+  }): Promise<AttemptEvaluation> {
+    if (
+      input.run.attached_project_id === null ||
+      input.attempt.attempt_type !== "research" ||
+      input.evaluation.recommendation !== "continue" ||
+      input.evaluation.suggested_attempt_type === "execution" ||
+      input.result.next_attempt_contract != null ||
+      input.result.recommended_next_steps.length === 0 ||
+      input.evaluation.evidence_quality < 0.45 ||
+      input.result.confidence < 0.45
+    ) {
+      return input.evaluation;
+    }
+
+    const attachedProjectExecutionDefaults =
+      await this.resolveAttachedProjectExecutionDefaults(input.run);
+    if (
+      !attachedProjectExecutionDefaults ||
+      (attachedProjectExecutionDefaults.verification_plan?.commands.length ?? 0) === 0
+    ) {
+      return input.evaluation;
+    }
+
+    return {
+      ...input.evaluation,
+      suggested_attempt_type: "execution",
+      rationale: [
+        input.evaluation.rationale,
+        `attached_project_execution_defaults=${attachedProjectExecutionDefaults.stack_pack.id}/${attachedProjectExecutionDefaults.task_preset.id}`
+      ].join("; "),
+      missing_evidence: input.evaluation.missing_evidence.filter(
+        (item: string) =>
+          item !==
+          "Need a replayable execution contract before the loop can start an execution attempt."
+      )
+    };
+  }
+
   private getContinueAction(
     attempt: Attempt,
     nextAttemptType: Attempt["attempt_type"]
@@ -5393,6 +5487,25 @@ export class Orchestrator {
     };
   }
 
+  private async resolveAttachedProjectExecutionDefaults(
+    run: Run
+  ): Promise<AttachedProjectExecutionDefaults | null> {
+    if (!run.attached_project_id) {
+      return null;
+    }
+
+    const project = await getAttachedProjectProfile(
+      this.workspacePaths,
+      run.attached_project_id
+    );
+
+    return buildAttachedProjectExecutionDefaults({
+      project,
+      stack_pack_id: run.attached_project_stack_pack_id,
+      task_preset_id: run.attached_project_task_preset_id
+    });
+  }
+
   private async buildAttemptContract(
     run: Run,
     attempt: Attempt,
@@ -5402,6 +5515,8 @@ export class Orchestrator {
     const harnessProfile = resolveRunHarnessProfile(run);
     if (attempt.attempt_type === "execution") {
       const postflightAdversarialGateRequired = isPostflightAdversarialGateRequired(run);
+      const attachedProjectExecutionDefaults =
+        await this.resolveAttachedProjectExecutionDefaults(run);
       const draft = isExecutionContractDraft(nextExecutionDraft)
         ? nextExecutionDraft
         : null;
@@ -5410,51 +5525,89 @@ export class Orchestrator {
       const verifierKit =
         draftVerifierKit ??
         resolveExecutionVerifierKit(reusableExecutionContract) ??
+        attachedProjectExecutionDefaults?.verifier_kit ??
         harnessProfile.execution.default_verifier_kit;
+      const baseRequiredEvidence =
+        attachedProjectExecutionDefaults?.required_evidence ??
+        buildDefaultExecutionRequiredEvidence(postflightAdversarialGateRequired);
+      const baseDoneRubric =
+        attachedProjectExecutionDefaults?.done_rubric ??
+        buildDefaultExecutionDoneRubric(postflightAdversarialGateRequired);
+      const baseFailureModes =
+        attachedProjectExecutionDefaults?.failure_modes ??
+        buildDefaultExecutionFailureModes(postflightAdversarialGateRequired);
+      const baseForbiddenShortcuts =
+        attachedProjectExecutionDefaults?.forbidden_shortcuts ??
+        buildDefaultExecutionForbiddenShortcuts(postflightAdversarialGateRequired);
+      const baseExpectedArtifacts =
+        attachedProjectExecutionDefaults?.expected_artifacts ??
+        buildDefaultExecutionExpectedArtifacts(postflightAdversarialGateRequired);
       const inferredVerificationPlan =
         draft?.verification_plan ??
         reusableExecutionContract?.verification_plan ??
+        attachedProjectExecutionDefaults?.verification_plan ??
         (await this.inferDefaultExecutionVerificationPlan(attempt.workspace_root, verifierKit));
       return createAttemptContract({
         attempt_id: attempt.id,
         run_id: run.id,
         attempt_type: attempt.attempt_type,
+        stack_pack_id:
+          run.attached_project_stack_pack_id ??
+          attachedProjectExecutionDefaults?.stack_pack.id ??
+          null,
+        task_preset_id:
+          run.attached_project_task_preset_id ??
+          attachedProjectExecutionDefaults?.task_preset.id ??
+          null,
         objective: attempt.objective,
         success_criteria: attempt.success_criteria,
         required_evidence: normalizeExecutionRequiredEvidence(
-          draft?.required_evidence ??
-            reusableExecutionContract?.required_evidence ??
-            buildDefaultExecutionRequiredEvidence(postflightAdversarialGateRequired),
+          mergeExecutionStringValues(
+            baseRequiredEvidence,
+            draft?.required_evidence ?? reusableExecutionContract?.required_evidence ?? null
+          ),
           postflightAdversarialGateRequired
         ),
         adversarial_verification_required: postflightAdversarialGateRequired,
         verifier_kit: verifierKit,
         done_rubric: normalizeExecutionDoneRubric(
-          draft && draft.done_rubric.length > 0
-            ? draft.done_rubric
-            : reusableExecutionContract && reusableExecutionContract.done_rubric.length > 0
-              ? reusableExecutionContract.done_rubric
-              : buildDefaultExecutionDoneRubric(postflightAdversarialGateRequired),
+          mergeExecutionCodeItems(
+            baseDoneRubric,
+            draft && draft.done_rubric.length > 0
+              ? draft.done_rubric
+              : reusableExecutionContract && reusableExecutionContract.done_rubric.length > 0
+                ? reusableExecutionContract.done_rubric
+                : null
+          ),
           postflightAdversarialGateRequired
         ),
         failure_modes: normalizeExecutionFailureModes(
-          draft && draft.failure_modes.length > 0
-            ? draft.failure_modes
-            : reusableExecutionContract && reusableExecutionContract.failure_modes.length > 0
-              ? reusableExecutionContract.failure_modes
-              : buildDefaultExecutionFailureModes(postflightAdversarialGateRequired),
+          mergeExecutionCodeItems(
+            baseFailureModes,
+            draft && draft.failure_modes.length > 0
+              ? draft.failure_modes
+              : reusableExecutionContract && reusableExecutionContract.failure_modes.length > 0
+                ? reusableExecutionContract.failure_modes
+                : null
+          ),
           postflightAdversarialGateRequired
         ),
         forbidden_shortcuts: normalizeExecutionForbiddenShortcuts(
-          draft?.forbidden_shortcuts ??
-            reusableExecutionContract?.forbidden_shortcuts ??
-            buildDefaultExecutionForbiddenShortcuts(postflightAdversarialGateRequired),
+          mergeExecutionStringValues(
+            baseForbiddenShortcuts,
+            draft?.forbidden_shortcuts ??
+              reusableExecutionContract?.forbidden_shortcuts ??
+              null
+          ),
           postflightAdversarialGateRequired
         ),
         expected_artifacts: normalizeExecutionExpectedArtifacts(
-          draft?.expected_artifacts ??
-            reusableExecutionContract?.expected_artifacts ??
-            buildDefaultExecutionExpectedArtifacts(postflightAdversarialGateRequired),
+          mergeExecutionStringValues(
+            baseExpectedArtifacts,
+            draft?.expected_artifacts ??
+              reusableExecutionContract?.expected_artifacts ??
+              null
+          ),
           postflightAdversarialGateRequired
         ),
         verification_plan: inferredVerificationPlan
@@ -7478,6 +7631,17 @@ export {
   deriveRunSurfaceFailureSignal,
   pickPrimaryFailureSignal
 } from "./failure-policy.js";
+
+export {
+  buildAttachedProjectExecutionContractPreview,
+  buildAttachedProjectExecutionDefaults,
+  getAttachedProjectTaskPresetRecommendation,
+  listAttachedProjectTaskPresetRecommendations,
+  recommendAttachedProjectStackPack,
+  type AttachedProjectExecutionDefaults,
+  type AttachedProjectStackPackRecommendation,
+  type AttachedProjectTaskPresetRecommendation
+} from "./attached-project-pack-registry.js";
 
 export {
   describeRunEffectivePolicyBundle,

@@ -232,6 +232,28 @@ export const RunHarnessProfileSchema = z.object({
   slots: RunHarnessSlotsSchema.default(DEFAULT_RUN_HARNESS_PROFILE.slots)
 });
 
+export const AttachedProjectStackPackIdValues = [
+  "node_backend",
+  "python_service",
+  "go_service_cli",
+  "repo_maintenance"
+] as const;
+export const AttachedProjectStackPackIdSchema = z.enum(
+  AttachedProjectStackPackIdValues
+);
+
+export const AttachedProjectTaskPresetIdValues = [
+  "bugfix",
+  "feature",
+  "refactor",
+  "api_change",
+  "flaky_test",
+  "release_hardening"
+] as const;
+export const AttachedProjectTaskPresetIdSchema = z.enum(
+  AttachedProjectTaskPresetIdValues
+);
+
 export const GoalSchema = z.object({
   id: z.string(),
   title: z.string().min(1),
@@ -255,6 +277,10 @@ export const RunSchema = z.object({
   owner_id: z.string(),
   workspace_root: z.string().min(1),
   attached_project_id: z.string().nullable().default(null),
+  attached_project_stack_pack_id:
+    AttachedProjectStackPackIdSchema.nullable().default(null),
+  attached_project_task_preset_id:
+    AttachedProjectTaskPresetIdSchema.nullable().default(null),
   managed_workspace_root: z.string().min(1).nullable().default(null),
   harness_profile: RunHarnessProfileSchema.default(DEFAULT_RUN_HARNESS_PROFILE),
   budget: BudgetSchema,
@@ -1049,6 +1075,8 @@ export const AttemptFailureModeSchema = z.object({
 
 export const AttemptContractDraftSchema = z.object({
   attempt_type: AttemptTypeSchema,
+  stack_pack_id: AttachedProjectStackPackIdSchema.nullable().default(null),
+  task_preset_id: AttachedProjectTaskPresetIdSchema.nullable().default(null),
   objective: z.string().min(1).optional(),
   success_criteria: z.array(z.string().min(1)).min(1).optional(),
   required_evidence: z.array(z.string().min(1)).min(1),
@@ -1065,6 +1093,8 @@ export const AttemptContractSchema = z.object({
   attempt_id: z.string(),
   run_id: z.string(),
   attempt_type: AttemptTypeSchema,
+  stack_pack_id: AttachedProjectStackPackIdSchema.nullable().default(null),
+  task_preset_id: AttachedProjectTaskPresetIdSchema.nullable().default(null),
   objective: z.string().min(1),
   success_criteria: z.array(z.string().min(1)).min(1),
   required_evidence: z.array(z.string().min(1)).min(1),
@@ -1632,6 +1662,12 @@ export type AttemptStatus = z.infer<typeof AttemptStatusSchema>;
 export type Run = z.infer<typeof RunSchema>;
 export type CreateRunInput = z.infer<typeof CreateRunInputSchema>;
 export type AttachedProjectType = z.infer<typeof AttachedProjectTypeSchema>;
+export type AttachedProjectStackPackId = z.infer<
+  typeof AttachedProjectStackPackIdSchema
+>;
+export type AttachedProjectTaskPresetId = z.infer<
+  typeof AttachedProjectTaskPresetIdSchema
+>;
 export type AttachedProjectPrimaryLanguage = z.infer<
   typeof AttachedProjectPrimaryLanguageSchema
 >;
@@ -2171,6 +2207,8 @@ export function createAttemptContract(input: {
   attempt_id: string;
   run_id: string;
   attempt_type: AttemptType;
+  stack_pack_id?: AttachedProjectStackPackId | null;
+  task_preset_id?: AttachedProjectTaskPresetId | null;
   objective: string;
   success_criteria: string[];
   required_evidence: string[];
@@ -2191,6 +2229,8 @@ export function createAttemptContract(input: {
     attempt_id: input.attempt_id,
     run_id: input.run_id,
     attempt_type: input.attempt_type,
+    stack_pack_id: input.stack_pack_id ?? null,
+    task_preset_id: input.task_preset_id ?? null,
     objective: input.objective,
     success_criteria: input.success_criteria,
     required_evidence: input.required_evidence,

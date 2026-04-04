@@ -38,7 +38,7 @@ pnpm verify:run-api
 
 - 改了 `apps/control-api`
 - 改了 run detail payload、summary surface、brief / handoff / preflight 返回结构
-- 改了 project attach / baseline / capability snapshot / project-first run create / attached launch gate 这类外部项目接入 surface
+- 改了 project attach / baseline / capability snapshot / project-first run create / attached launch gate / stack pack / task preset 这类外部项目接入 surface
 
 ### Run loop / dispatch / gate
 
@@ -50,6 +50,7 @@ pnpm verify:run-loop
 
 - 改了 preflight gate、dispatch、worker readiness、shadow dispatch
 - 改了 orchestrator 中 attempt 放行或阻断逻辑
+- 改了 attached project 默认 execution contract fallback
 
 ### Dashboard control surface
 

@@ -3,18 +3,21 @@ import { fileURLToPath } from "node:url";
 import cors from "@fastify/cors";
 import { config as loadEnv } from "dotenv";
 import Fastify from "fastify";
+import { z } from "../../../scripts/local-zod.mjs";
 import {
   AttachProjectInputSchema,
+  AttachedProjectStackPackIdSchema,
+  AttachedProjectTaskPresetIdSchema,
   CreateRunInputSchema,
   CreateGoalInputSchema,
   type AttachedProjectProfile,
   createBranch,
   createCurrentDecision,
   createEvent,
-    createGoal,
-    createRunAutomationControl,
-    createRunPolicyRuntime,
-    createRun,
+  createGoal,
+  createRunAutomationControl,
+  createRunPolicyRuntime,
+  createRun,
   createRunJournalEntry,
   createRunSteer,
   createSteer,
@@ -38,9 +41,13 @@ import {
   loadSelfBootstrapNextTaskActiveEntry,
   Orchestrator,
   appendResolvedRunMailboxEntry,
+  buildAttachedProjectExecutionContractPreview,
+  buildAttachedProjectExecutionDefaults,
   buildRunMailboxThreadId,
   readRunBriefView,
+  listAttachedProjectTaskPresetRecommendations,
   readRunMaintenancePlaneView,
+  recommendAttachedProjectStackPack,
   resolveRunMailboxThread,
   readRunWorkingContextView,
   repairRunManagedWorkspace,
@@ -80,7 +87,7 @@ import {
   getPlanArtifacts,
   getReport,
   getRun,
-    getRunGovernanceState,
+  getRunGovernanceState,
   getRunAutomationControl,
   getRunMailbox,
   getRunPolicyRuntime,
@@ -226,6 +233,12 @@ function buildPlanningPolicyRuntime(runId: string) {
   });
 }
 
+const CreateAttachedProjectRunRequestSchema = z.object({
+  owner_id: z.string().min(1).optional(),
+  stack_pack_id: AttachedProjectStackPackIdSchema.optional(),
+  task_preset_id: AttachedProjectTaskPresetIdSchema.optional()
+});
+
 type AttachedProjectRunTemplate = {
   title: string;
   description: string;
@@ -238,14 +251,19 @@ type AttachedProjectRunTemplate = {
 function buildAttachedProjectRunTemplate(input: {
   project: AttachedProjectProfile;
   ownerId?: string | null;
+  taskPresetTitle?: string | null;
 }): AttachedProjectRunTemplate {
+  const taskPresetLabel = input.taskPresetTitle?.trim().toLowerCase();
+  const stepLabel = taskPresetLabel ? `${taskPresetLabel} step` : "safe development step";
+  const changeLabel = taskPresetLabel ? `${taskPresetLabel} change` : "safe change";
+
   return {
     title: `Attach ${input.project.repo_name}`,
     description:
-      `Use the attached project profile for ${input.project.repo_name} to plan the first safe development step.`,
+      `Use the attached project profile for ${input.project.repo_name} to plan the first ${stepLabel}.`,
     success_criteria: [
       "Confirm the attached project profile and baseline snapshot are accurate.",
-      "Produce a first research attempt that identifies the next safe change.",
+      `Produce a first research attempt that identifies the next ${changeLabel}.`,
       "Keep the work inside the attached workspace scope."
     ],
     constraints: [
@@ -1140,13 +1158,24 @@ export async function buildServer(
 
   const buildAttachedProjectPayload = async (
     projectId: string,
-    ownerId?: string | null
+    ownerId?: string | null,
+    selection?: {
+      stack_pack_id?: z.infer<typeof AttachedProjectStackPackIdSchema> | null;
+      task_preset_id?: z.infer<typeof AttachedProjectTaskPresetIdSchema> | null;
+    }
   ) => {
     const [project, baselineSnapshot, capabilitySnapshot] = await Promise.all([
       getAttachedProjectProfile(workspacePaths, projectId),
       getAttachedProjectBaselineSnapshot(workspacePaths, projectId),
       getAttachedProjectCapabilitySnapshot(workspacePaths, projectId)
     ]);
+    const recommendedStackPack = recommendAttachedProjectStackPack(project);
+    const selectedExecutionDefaults = buildAttachedProjectExecutionDefaults({
+      project,
+      stack_pack_id: selection?.stack_pack_id ?? recommendedStackPack.id,
+      task_preset_id:
+        selection?.task_preset_id ?? recommendedStackPack.default_task_preset_id
+    });
 
     return {
       project,
@@ -1159,9 +1188,20 @@ export async function buildServer(
       capability_snapshot_ref: capabilitySnapshot
         ? buildProjectRef(workspacePaths, projectId, "capabilitySnapshotFile")
         : null,
+      recommended_stack_pack: recommendedStackPack,
+      task_preset_recommendations: listAttachedProjectTaskPresetRecommendations({
+        stack_pack_id: selectedExecutionDefaults.stack_pack.id
+      }),
+      default_task_preset_id: selectedExecutionDefaults.stack_pack.default_task_preset_id,
+      execution_contract_preview: buildAttachedProjectExecutionContractPreview({
+        project,
+        stack_pack_id: selectedExecutionDefaults.stack_pack.id,
+        task_preset_id: selectedExecutionDefaults.task_preset.id
+      }),
       run_template: buildAttachedProjectRunTemplate({
         project,
-        ownerId
+        ownerId,
+        taskPresetTitle: selectedExecutionDefaults.task_preset.title
       })
     };
   };
@@ -1176,6 +1216,7 @@ export async function buildServer(
             getAttachedProjectBaselineSnapshot(workspacePaths, project.id),
             getAttachedProjectCapabilitySnapshot(workspacePaths, project.id)
           ]);
+          const recommendedStackPack = recommendAttachedProjectStackPack(project);
           return {
             project,
             project_profile_ref: buildProjectRef(
@@ -1200,7 +1241,9 @@ export async function buildServer(
                 )
               : null,
             capability_captured_at: capabilitySnapshot?.captured_at ?? null,
-            capability_overall_status: capabilitySnapshot?.overall_status ?? null
+            capability_overall_status: capabilitySnapshot?.overall_status ?? null,
+            recommended_stack_pack_id: recommendedStackPack.id,
+            default_task_preset_id: recommendedStackPack.default_task_preset_id
           };
         })
       )
@@ -1280,19 +1323,29 @@ export async function buildServer(
 
   app.post("/projects/:projectId/runs", async (request, reply) => {
     const { projectId } = request.params as { projectId: string };
-    const body =
-      (request.body as
-        | {
-            owner_id?: string;
-          }
-        | undefined) ?? {};
 
     try {
+      const parsedInput = CreateAttachedProjectRunRequestSchema.safeParse(
+        request.body ?? {}
+      );
+      if (!parsedInput.success) {
+        return reply.code(400).send({
+          message: parsedInput.error.issues
+            .map((issue: { message: string }) => issue.message)
+            .join("; ")
+        });
+      }
+      const input = parsedInput.data;
       const project = await getAttachedProjectProfile(workspacePaths, projectId);
+      const executionDefaults = buildAttachedProjectExecutionDefaults({
+        project,
+        stack_pack_id: input.stack_pack_id ?? null,
+        task_preset_id: input.task_preset_id ?? null
+      });
       const template = buildAttachedProjectRunTemplate({
         project,
-        ownerId:
-          typeof body.owner_id === "string" ? body.owner_id : null
+        ownerId: input.owner_id ?? null,
+        taskPresetTitle: executionDefaults.task_preset.title
       });
       const lockedWorkspaceRoot = await lockWorkspaceRootOrThrow(
         template.workspace_root
@@ -1300,7 +1353,14 @@ export async function buildServer(
       const run = createRun({
         ...template,
         attached_project_id: project.id,
-        workspace_root: lockedWorkspaceRoot
+        attached_project_stack_pack_id: executionDefaults.stack_pack.id,
+        attached_project_task_preset_id: executionDefaults.task_preset.id,
+        workspace_root: lockedWorkspaceRoot,
+        harness_profile: {
+          execution: {
+            default_verifier_kit: executionDefaults.verifier_kit
+          }
+        }
       });
       const current = createCurrentDecision({
         run_id: run.id,
@@ -1319,7 +1379,9 @@ export async function buildServer(
             title: run.title,
             owner_id: run.owner_id,
             workspace_root: run.workspace_root,
-            attached_project_id: project.id
+            attached_project_id: project.id,
+            attached_project_stack_pack_id: run.attached_project_stack_pack_id,
+            attached_project_task_preset_id: run.attached_project_task_preset_id
           }
         })
       );
@@ -1330,7 +1392,11 @@ export async function buildServer(
         current,
         attached_project: await buildAttachedProjectPayload(
           project.id,
-          body.owner_id ?? null
+          input.owner_id ?? null,
+          {
+            stack_pack_id: executionDefaults.stack_pack.id,
+            task_preset_id: executionDefaults.task_preset.id
+          }
         )
       });
     } catch (error) {
@@ -1342,6 +1408,15 @@ export async function buildServer(
       }
 
       if (error instanceof RunWorkspaceScopeError) {
+        return reply.code(400).send({
+          message: error.message
+        });
+      }
+
+      if (
+        error instanceof Error &&
+        error.message.includes("is not supported by attached project stack pack")
+      ) {
         return reply.code(400).send({
           message: error.message
         });
