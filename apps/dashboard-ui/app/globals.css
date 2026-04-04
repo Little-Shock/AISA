@@ -7,6 +7,38 @@
   --font-sans: var(--font-body), "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
   --font-heading: var(--font-body), "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
   --font-mono: var(--font-terminal), "SFMono-Regular", "Menlo", "Consolas", monospace;
+  --font-heading-stack:
+    var(--font-body),
+    "PingFang SC",
+    "Hiragino Sans GB",
+    "Microsoft YaHei",
+    sans-serif;
+  --font-hud-stack:
+    var(--font-hud),
+    var(--font-body),
+    "PingFang SC",
+    "Hiragino Sans GB",
+    "Microsoft YaHei",
+    "Courier New",
+    monospace;
+  --font-pixel-stack:
+    var(--font-pixel),
+    var(--font-body),
+    "PingFang SC",
+    "Hiragino Sans GB",
+    "Microsoft YaHei",
+    "Courier New",
+    monospace;
+  --font-mono-stack:
+    var(--font-terminal),
+    var(--font-body),
+    "PingFang SC",
+    "Hiragino Sans GB",
+    "Microsoft YaHei",
+    "SFMono-Regular",
+    "Menlo",
+    "Consolas",
+    monospace;
   --bg: #020617;
   --paper: linear-gradient(180deg, rgba(6, 12, 24, 0.96), rgba(2, 8, 23, 0.98));
   --paper-strong: rgba(4, 10, 20, 0.98);
@@ -205,19 +237,19 @@ textarea {
 }
 
 .font-heading {
-  font-family: var(--font-body), "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  font-family: var(--font-heading-stack);
 }
 
 .font-hud {
-  font-family: var(--font-hud), "Courier New", monospace;
+  font-family: var(--font-hud-stack);
 }
 
 .font-pixel {
-  font-family: var(--font-pixel), "Courier New", monospace;
+  font-family: var(--font-pixel-stack);
 }
 
 .font-mono {
-  font-family: var(--font-terminal), "SFMono-Regular", "Menlo", "Consolas", monospace;
+  font-family: var(--font-mono-stack);
 }
 
 .hero-panel {
