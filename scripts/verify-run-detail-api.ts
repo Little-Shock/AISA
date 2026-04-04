@@ -7,6 +7,7 @@ import {
   createAttemptContract,
   createAttemptHandoffBundle,
   createAttemptPreflightEvaluation,
+  createDefaultRunHarnessProfile,
   createRunMailbox,
   createRunMailboxEntry,
   createRunAutomationControl,
@@ -57,7 +58,10 @@ import {
   SELF_BOOTSTRAP_NEXT_TASK_ACTIVE_ENTRY_RELATIVE_PATH,
   SELF_BOOTSTRAP_NEXT_TASK_ACTIVE_ENTRY_SNAPSHOT_FILE_NAME
 } from "../packages/orchestrator/src/index.ts";
-import { CODEX_CLI_EXECUTION_EFFORT_APPLIED_DETAIL } from "../packages/worker-adapters/src/index.ts";
+import {
+  CODEX_CLI_EXECUTION_EFFORT_APPLIED_DETAIL,
+  loadExecutionWorkerAdapter
+} from "../packages/worker-adapters/src/index.ts";
 import {
   cleanupTrackedVerifyTempDirs,
   createTrackedVerifyTempDir
@@ -99,6 +103,9 @@ type HarnessGatePayload = {
   detail: string;
   artifact_ref: string;
 };
+
+const DEFAULT_EXECUTION_SLOT_BINDING =
+  createDefaultRunHarnessProfile().slots.execution.binding;
 
 type HarnessGatesPayload = {
   preflight_review: HarnessGatePayload;
@@ -789,14 +796,24 @@ async function main(): Promise<void> {
       message: blockerPreflightFailureReason
     }
   });
+  const blockerAutoResumeBlockedEntry = createRunJournalEntry({
+    run_id: run.id,
+    attempt_id: blockerAttempt.id,
+    type: "run.auto_resume.blocked",
+    payload: {
+      reason: "preflight_blocked",
+      failure_class: "preflight_blocked",
+      failure_policy_mode: "fail_closed",
+      failure_code: blockerPreflight.failure_code,
+      handoff_bundle_ref: `runs/${run.id}/attempts/${blockerAttempt.id}/artifacts/handoff_bundle.json`,
+      message: blockerPreflightFailureReason
+    }
+  });
   const blockerFailureContext = {
     message: blockerPreflightFailureReason,
     journal_event_id: blockerPreflightEntry.id,
     journal_event_ts: blockerPreflightEntry.ts
   };
-  const settledHandoffRecoveryBlockedMessage =
-    "Low reviewer effort keeps settled handoff recovery in manual recovery mode, so automatic resume stays blocked.";
-
   await saveAttempt(workspacePaths, blockerAttempt);
   await saveAttemptContract(workspacePaths, blockerAttemptContract);
   await saveAttemptPreflightEvaluation(workspacePaths, blockerPreflight);
@@ -860,7 +877,23 @@ async function main(): Promise<void> {
       waiting_for_human: true
     })
   );
-  for (const entry of [blockerCreatedEntry, blockerPreflightEntry, blockerFailedEntry]) {
+  await saveRunAutomationControl(
+    workspacePaths,
+    createRunAutomationControl({
+      run_id: run.id,
+      mode: "manual_only",
+      reason_code: "automatic_resume_blocked",
+      reason: blockerPreflightFailureReason,
+      imposed_by: "orchestrator",
+      failure_code: blockerPreflight.failure_code
+    })
+  );
+  for (const entry of [
+    blockerCreatedEntry,
+    blockerPreflightEntry,
+    blockerFailedEntry,
+    blockerAutoResumeBlockedEntry
+  ]) {
     await appendRunJournal(workspacePaths, entry);
   }
   await refreshRunOperatorSurface(workspacePaths, run.id);
@@ -2229,16 +2262,19 @@ async function main(): Promise<void> {
     assert.equal(payload.run.harness_profile.gates.postflight_adversarial.mode, "required");
     assert.equal(
       payload.run.harness_profile.slots.execution.binding,
-      "codex_cli_execution_worker"
+      DEFAULT_EXECUTION_SLOT_BINDING
     );
     assert.equal(
       payload.run.harness_profile.slots.postflight_review.binding,
       "attempt_adversarial_verification"
     );
-    assert.equal(payload.harness_slots.execution.binding, "codex_cli_execution_worker");
+    assert.equal(
+      payload.harness_slots.execution.binding,
+      payload.run.harness_profile.slots.execution.binding
+    );
     assert.equal(
       payload.harness_slots.execution.expected_binding,
-      "codex_cli_execution_worker"
+      DEFAULT_EXECUTION_SLOT_BINDING
     );
     assert.equal(payload.harness_slots.execution.binding_status, "aligned");
     assert.equal(payload.harness_slots.execution.binding_matches_registry, true);
@@ -2427,7 +2463,7 @@ async function main(): Promise<void> {
     assert.equal(payload.run_brief?.latest_attempt_id, blockerAttempt.id);
     assert.equal(
       payload.run_brief?.headline,
-      settledHandoffRecoveryBlockedMessage
+      blockerFailureContext.message
     );
     assert.equal(payload.run_brief?.primary_focus, blockerAttempt.objective);
     assert.equal(payload.run_brief?.failure_signal?.failure_class, "preflight_blocked");
@@ -2489,7 +2525,7 @@ async function main(): Promise<void> {
     assert.equal(payload.working_context?.current_focus, blockerAttempt.objective);
     assert.equal(
       payload.working_context?.current_blocker?.summary,
-      settledHandoffRecoveryBlockedMessage
+      blockerFailureContext.message
     );
     assert.ok(payload.working_context?.source_snapshot.current.ref?.endsWith("current.json"));
     assert.ok(
@@ -2901,7 +2937,7 @@ async function main(): Promise<void> {
     );
     assert.equal(
       runSummary?.run.harness_profile.slots.execution.binding,
-      "codex_cli_execution_worker"
+      DEFAULT_EXECUTION_SLOT_BINDING
     );
     assert.equal(runSummary?.harness_gates.preflight_review.mode, "required");
     assert.equal(runSummary?.harness_gates.preflight_review.enforced, true);
@@ -2910,7 +2946,10 @@ async function main(): Promise<void> {
       runSummary?.harness_gates.postflight_adversarial.source,
       "run.harness_profile.gates.postflight_adversarial.mode"
     );
-    assert.equal(runSummary?.harness_slots.execution.binding, "codex_cli_execution_worker");
+    assert.equal(
+      runSummary?.harness_slots.execution.binding,
+      runSummary?.run.harness_profile.slots.execution.binding
+    );
     assert.equal(runSummary?.default_verifier_kit_profile.kit, "api");
     assert.equal(runSummary?.default_verifier_kit_profile.title, "API Task");
     assert.equal(
@@ -3019,7 +3058,7 @@ async function main(): Promise<void> {
     assert.equal(runSummary?.latest_handoff_bundle?.source_refs.adversarial_verification, null);
     assert.equal(runSummary?.latest_handoff_bundle?.adversarial_verification, null);
     assert.equal(runSummary?.run_brief?.latest_attempt_id, blockerAttempt.id);
-    assert.equal(runSummary?.run_brief?.headline, settledHandoffRecoveryBlockedMessage);
+    assert.equal(runSummary?.run_brief?.headline, blockerFailureContext.message);
     assert.equal(runSummary?.run_brief?.summary, blockerFailureContext.message);
     assert.equal(runSummary?.run_brief?.primary_focus, blockerAttempt.objective);
     assert.equal(runSummary?.run_brief?.failure_signal?.failure_class, "preflight_blocked");
@@ -3175,10 +3214,20 @@ async function main(): Promise<void> {
         status: string;
       }>;
     };
+    const expectedExecutionAdapter = loadExecutionWorkerAdapter(process.env);
     assert.equal(healthPayload.status, "degraded");
-    assert.equal(healthPayload.execution_adapter.type, "codex");
-    assert.equal(healthPayload.execution_adapter.command, "codex");
-    assert.equal(healthPayload.execution_adapter.model, null);
+    assert.equal(
+      healthPayload.execution_adapter.type,
+      expectedExecutionAdapter.adapter.type
+    );
+    assert.equal(
+      healthPayload.execution_adapter.command,
+      expectedExecutionAdapter.config.command
+    );
+    assert.equal(
+      healthPayload.execution_adapter.model,
+      expectedExecutionAdapter.config.model ?? null
+    );
     assert.equal(healthPayload.degraded_run_count, 1);
     assert.deepEqual(
       healthPayload.degraded_runs.map((runHealth) => ({

@@ -95,7 +95,19 @@ export const RunHarnessSlotValues = [
   "final_synthesis"
 ] as const;
 export const RunHarnessSlotSchema = z.enum(RunHarnessSlotValues);
+export const CanonicalRunHarnessSlotBindingValues = [
+  "research_worker",
+  "execution_worker",
+  "attempt_dispatch_preflight",
+  "attempt_adversarial_verification",
+  "attempt_evaluation_synthesizer"
+] as const;
+export const CanonicalRunHarnessSlotBindingSchema = z.enum(
+  CanonicalRunHarnessSlotBindingValues
+);
 export const RunHarnessSlotBindingValues = [
+  "research_worker",
+  "execution_worker",
   "codex_cli_research_worker",
   "codex_cli_execution_worker",
   "attempt_dispatch_preflight",
@@ -103,6 +115,15 @@ export const RunHarnessSlotBindingValues = [
   "attempt_evaluation_synthesizer"
 ] as const;
 export const RunHarnessSlotBindingSchema = z.enum(RunHarnessSlotBindingValues);
+const RUN_HARNESS_SLOT_BINDING_CANONICAL_MAP = {
+  research_worker: "research_worker",
+  codex_cli_research_worker: "research_worker",
+  execution_worker: "execution_worker",
+  codex_cli_execution_worker: "execution_worker",
+  attempt_dispatch_preflight: "attempt_dispatch_preflight",
+  attempt_adversarial_verification: "attempt_adversarial_verification",
+  attempt_evaluation_synthesizer: "attempt_evaluation_synthesizer"
+} as const;
 
 export const RunHarnessEffortPreferenceSchema = z.object({
   effort: WorkerEffortLevelSchema.default("medium")
@@ -135,10 +156,10 @@ const DEFAULT_RUN_HARNESS_GATES = {
 };
 const DEFAULT_RUN_HARNESS_SLOTS = {
   research_or_planning: {
-    binding: "codex_cli_research_worker" as const
+    binding: "research_worker" as const
   },
   execution: {
-    binding: "codex_cli_execution_worker" as const
+    binding: "execution_worker" as const
   },
   preflight_review: {
     binding: "attempt_dispatch_preflight" as const
@@ -1507,6 +1528,9 @@ export type ExecutionVerifierKitCommandPolicy = z.infer<
 export type RunHarnessGate = z.infer<typeof RunHarnessGateSchema>;
 export type RunHarnessGateMode = z.infer<typeof RunHarnessGateModeSchema>;
 export type RunHarnessSlot = z.infer<typeof RunHarnessSlotSchema>;
+export type CanonicalRunHarnessSlotBinding = z.infer<
+  typeof CanonicalRunHarnessSlotBindingSchema
+>;
 export type RunHarnessSlotBinding = z.infer<typeof RunHarnessSlotBindingSchema>;
 export type RunHarnessEffortPreference = z.infer<
   typeof RunHarnessEffortPreferenceSchema
@@ -1735,6 +1759,12 @@ export function resolveRunHarnessProfile(
     | null
 ): RunHarnessProfile {
   return RunHarnessProfileSchema.parse(input?.harness_profile ?? undefined);
+}
+
+export function canonicalizeRunHarnessSlotBinding(
+  binding: RunHarnessSlotBinding
+): CanonicalRunHarnessSlotBinding {
+  return RUN_HARNESS_SLOT_BINDING_CANONICAL_MAP[binding];
 }
 
 export function updateRun(run: Run, patch: Partial<Run>): Run {

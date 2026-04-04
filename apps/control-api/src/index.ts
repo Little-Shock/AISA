@@ -101,7 +101,7 @@ import {
   saveRunSteer,
   saveSteer
 } from "@autoresearch/state-store";
-import { CodexCliWorkerAdapter, loadCodexCliConfig } from "@autoresearch/worker-adapters";
+import { loadExecutionWorkerAdapter } from "@autoresearch/worker-adapters";
 
 const currentDir = dirname(fileURLToPath(import.meta.url));
 const repositoryRoot = join(currentDir, "..", "..", "..");
@@ -454,8 +454,7 @@ export async function buildServer(
   const workspacePaths = resolveWorkspacePaths(runtimeLayout.runtimeDataRoot);
   const defaultRunWorkspaceRoot = runtimeLayout.devRepoRoot;
   const contextManager = new ContextManager();
-  const adapterConfig = loadCodexCliConfig(process.env);
-  const adapter = new CodexCliWorkerAdapter(adapterConfig);
+  const { adapter, config: adapterConfig } = loadExecutionWorkerAdapter(process.env);
   const app = Fastify({
     logger: true
   });

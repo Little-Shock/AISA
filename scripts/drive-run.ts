@@ -26,11 +26,11 @@ import {
 } from "../packages/orchestrator/src/runtime-layout.ts";
 import { createRunWorkspaceScopePolicy } from "../packages/orchestrator/src/workspace-scope.ts";
 import {
-  CodexCliWorkerAdapter,
-  loadCodexCliConfig,
+  createExecutionWorkerAdapter,
+  loadExecutionWorkerAdapterConfig,
   resolveSandboxForAttempt,
-  type WorkerAdapter,
-  type CodexCliConfig
+  type CodexCliConfig,
+  type WorkerAdapter
 } from "../packages/worker-adapters/src/index.ts";
 
 export { resolveSandboxForAttempt } from "../packages/worker-adapters/src/index.ts";
@@ -402,7 +402,7 @@ async function main(): Promise<void> {
     throw new Error("Missing required --run-id");
   }
 
-  const adapterConfig = loadCodexCliConfig(process.env);
+  const adapterConfig = loadExecutionWorkerAdapterConfig(process.env);
   if (options.sandbox) {
     adapterConfig.sandbox = options.sandbox;
   }
@@ -410,7 +410,7 @@ async function main(): Promise<void> {
   const result = await driveRun({
     workspaceRoot: options.workspaceRoot ?? process.cwd(),
     runId: options.runId,
-    adapter: new CodexCliWorkerAdapter(adapterConfig),
+    adapter: createExecutionWorkerAdapter(adapterConfig),
     repositoryRoot: process.cwd(),
     pollIntervalMs: options.pollIntervalMs,
     maxPolls: options.maxPolls,

@@ -209,7 +209,7 @@ function chineseLabelClass(tone: "cyan" | "amber" | "rose" | "slate" = "cyan") {
 }
 
 function deriveAgentName(run: RunSummaryItem, index: number) {
-  const rawWorker = run.latest_attempt?.worker ?? "codex";
+  const rawWorker = run.latest_attempt?.worker ?? run.harness_slots.execution.binding ?? "worker";
   const normalized = rawWorker
     .replace(/[^a-z0-9]+/gi, "-")
     .replace(/^-+|-+$/g, "")
@@ -569,7 +569,11 @@ function AgentCard({
             </Badge>
           </div>
           <div className="mt-2 flex flex-wrap gap-2 font-mono text-[11px] text-slate-300">
-            <span>{workerLabel(run.latest_attempt?.worker ?? "codex")}</span>
+            <span>
+              {workerLabel(
+                run.latest_attempt?.worker ?? run.harness_slots.execution.binding ?? "worker"
+              )}
+            </span>
             <span>•</span>
             <span>{statusLabel(run.current?.run_status ?? "draft")}</span>
           </div>

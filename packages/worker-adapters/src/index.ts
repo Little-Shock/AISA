@@ -20,6 +20,7 @@ import type {
   ContextSnapshot,
   Goal,
   Run,
+  RunHarnessSlot,
   VerificationCommand,
   WorkerEffortLevel,
   WorkerWriteback
@@ -174,6 +175,35 @@ export interface WorkerAdapter {
     worker_effort?: ExecutionWorkerEffortSetting;
     workspacePaths: WorkspacePaths;
   }): Promise<WorkerTaskExecutionResult>;
+}
+
+export type ExecutionWorkerAdapterProvider = "codex_cli";
+
+export interface ExecutionWorkerAdapterConfig extends CodexCliConfig {
+  provider: ExecutionWorkerAdapterProvider;
+}
+
+const RUN_HARNESS_SLOT_SUPPORTED_WORKER_ADAPTER_TYPES: Partial<
+  Record<RunHarnessSlot, readonly string[]>
+> = {
+  research_or_planning: ["codex", "fake-codex"],
+  execution: ["codex", "fake-codex"]
+} as const;
+
+export function supportsRunHarnessSlotWorkerAdapterType(input: {
+  slot: RunHarnessSlot;
+  workerAdapterType?: string | null;
+}): boolean {
+  const supportedWorkerTypes =
+    RUN_HARNESS_SLOT_SUPPORTED_WORKER_ADAPTER_TYPES[input.slot] ?? null;
+  if (!supportedWorkerTypes) {
+    return true;
+  }
+
+  return (
+    !!input.workerAdapterType &&
+    supportedWorkerTypes.includes(input.workerAdapterType)
+  );
 }
 
 export function resolveSandboxForAttempt(
@@ -1629,24 +1659,77 @@ export class CodexCliWorkerAdapter {
 
 export function loadCodexCliConfig(env: NodeJS.ProcessEnv): CodexCliConfig {
   return {
-    command: env.CODEX_CLI_COMMAND ?? "codex",
-    model: env.CODEX_MODEL,
-    profile: env.CODEX_PROFILE,
+    command: env.AISA_EXECUTION_COMMAND ?? env.CODEX_CLI_COMMAND ?? "codex",
+    model: env.AISA_EXECUTION_MODEL ?? env.CODEX_MODEL,
+    profile: env.AISA_EXECUTION_PROFILE ?? env.CODEX_PROFILE,
     sandbox:
-      (env.CODEX_SANDBOX as CodexCliConfig["sandbox"] | undefined) ?? "read-only",
-    skipGitRepoCheck: env.CODEX_SKIP_GIT_REPO_CHECK !== "false",
+      ((env.AISA_EXECUTION_SANDBOX ?? env.CODEX_SANDBOX) as
+        | CodexCliConfig["sandbox"]
+        | undefined) ?? "read-only",
+    skipGitRepoCheck:
+      (env.AISA_EXECUTION_SKIP_GIT_REPO_CHECK ?? env.CODEX_SKIP_GIT_REPO_CHECK) !==
+      "false",
     progressStallMs: readPositiveInteger(
-      env.AISA_CODEX_PROGRESS_STALL_MS ?? env.CODEX_PROGRESS_STALL_MS,
+      env.AISA_EXECUTION_PROGRESS_STALL_MS ??
+        env.AISA_CODEX_PROGRESS_STALL_MS ??
+        env.CODEX_PROGRESS_STALL_MS,
       180_000
     ),
     stallPollMs: readPositiveInteger(
-      env.AISA_CODEX_STALL_POLL_MS ?? env.CODEX_STALL_POLL_MS,
+      env.AISA_EXECUTION_STALL_POLL_MS ??
+        env.AISA_CODEX_STALL_POLL_MS ??
+        env.CODEX_STALL_POLL_MS,
       5_000
     ),
     stallKillGraceMs: readPositiveInteger(
-      env.AISA_CODEX_STALL_KILL_GRACE_MS ?? env.CODEX_STALL_KILL_GRACE_MS,
+      env.AISA_EXECUTION_STALL_KILL_GRACE_MS ??
+        env.AISA_CODEX_STALL_KILL_GRACE_MS ??
+        env.CODEX_STALL_KILL_GRACE_MS,
       5_000
     )
+  };
+}
+
+export function loadExecutionWorkerAdapterConfig(
+  env: NodeJS.ProcessEnv
+): ExecutionWorkerAdapterConfig {
+  const provider =
+    (env.AISA_EXECUTION_ADAPTER?.trim() as ExecutionWorkerAdapterProvider | undefined) ??
+    "codex_cli";
+
+  switch (provider) {
+    case "codex_cli":
+      return {
+        provider,
+        ...loadCodexCliConfig(env)
+      };
+    default:
+      throw new Error(`Unsupported AISA execution adapter provider: ${provider}`);
+  }
+}
+
+export function createExecutionWorkerAdapter(
+  config: ExecutionWorkerAdapterConfig
+): WorkerAdapter {
+  switch (config.provider) {
+    case "codex_cli":
+      return new CodexCliWorkerAdapter(config);
+    default:
+      throw new Error(
+        `Unsupported AISA execution adapter provider: ${config.provider}`
+      );
+  }
+}
+
+export function loadExecutionWorkerAdapter(env: NodeJS.ProcessEnv): {
+  adapter: WorkerAdapter;
+  config: ExecutionWorkerAdapterConfig;
+} {
+  const config = loadExecutionWorkerAdapterConfig(env);
+
+  return {
+    adapter: createExecutionWorkerAdapter(config),
+    config
   };
 }
 

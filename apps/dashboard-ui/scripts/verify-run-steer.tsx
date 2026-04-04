@@ -44,10 +44,10 @@ const fixtureRunDetail: RunDetail = {
       },
       slots: {
         research_or_planning: {
-          binding: "codex_cli_research_worker"
+          binding: "research_worker"
         },
         execution: {
-          binding: "codex_cli_execution_worker"
+          binding: "execution_worker"
         },
         preflight_review: {
           binding: "attempt_dispatch_preflight"
@@ -150,8 +150,8 @@ const fixtureRunDetail: RunDetail = {
     research_or_planning: {
       slot: "research_or_planning",
       title: "Research Or Planning",
-      binding: "codex_cli_research_worker",
-      expected_binding: "codex_cli_research_worker",
+      binding: "research_worker",
+      expected_binding: "research_worker",
       binding_status: "aligned",
       binding_matches_registry: true,
       source: "run.harness_profile.slots.research_or_planning.binding",
@@ -164,8 +164,8 @@ const fixtureRunDetail: RunDetail = {
     execution: {
       slot: "execution",
       title: "Execution",
-      binding: "codex_cli_execution_worker",
-      expected_binding: "codex_cli_execution_worker",
+      binding: "execution_worker",
+      expected_binding: "execution_worker",
       binding_status: "aligned",
       binding_matches_registry: true,
       source: "run.harness_profile.slots.execution.binding",

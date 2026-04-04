@@ -2117,14 +2117,8 @@ async function assertRunHarnessPolicyBundleDefaults(): Promise<void> {
   assert.equal(defaultProfile.gates.preflight_review.mode, "required");
   assert.equal(defaultProfile.gates.deterministic_runtime.mode, "required");
   assert.equal(defaultProfile.gates.postflight_adversarial.mode, "required");
-  assert.equal(
-    defaultProfile.slots.research_or_planning.binding,
-    "codex_cli_research_worker"
-  );
-  assert.equal(
-    defaultProfile.slots.execution.binding,
-    "codex_cli_execution_worker"
-  );
+  assert.equal(defaultProfile.slots.research_or_planning.binding, "research_worker");
+  assert.equal(defaultProfile.slots.execution.binding, "execution_worker");
   assert.equal(
     defaultProfile.slots.preflight_review.binding,
     "attempt_dispatch_preflight"
@@ -2158,7 +2152,7 @@ async function assertRunHarnessPolicyBundleDefaults(): Promise<void> {
   const gates = orchestrator.describeRunHarnessGates(configuredRun);
   const effectivePolicy = orchestrator.describeRunEffectivePolicyBundle(configuredRun);
 
-  assert.equal(slots.research_or_planning.expected_binding, "codex_cli_research_worker");
+  assert.equal(slots.research_or_planning.expected_binding, "research_worker");
   assert.equal(slots.research_or_planning.binding_status, "aligned");
   assert.equal(slots.research_or_planning.permission_boundary, "read_only");
   assert.deepEqual(slots.research_or_planning.output_artifacts, [
@@ -2167,8 +2161,8 @@ async function assertRunHarnessPolicyBundleDefaults(): Promise<void> {
   ]);
   assert.equal(slots.research_or_planning.failure_semantics, "fail_open");
   assert.equal(slots.execution.default_verifier_kit, "web");
-  assert.equal(slots.execution.binding, "codex_cli_execution_worker");
-  assert.equal(slots.execution.expected_binding, "codex_cli_execution_worker");
+  assert.equal(slots.execution.binding, "execution_worker");
+  assert.equal(slots.execution.expected_binding, "execution_worker");
   assert.equal(slots.execution.binding_status, "aligned");
   assert.equal(slots.execution.permission_boundary, "workspace_write");
   assert.deepEqual(slots.execution.output_artifacts, [
@@ -2252,6 +2246,39 @@ async function assertRunHarnessPolicyBundleDefaults(): Promise<void> {
   );
 }
 
+async function assertRunHarnessLegacyBindingAliasRemainsAligned(): Promise<void> {
+  const rootDir = await createVerifyTempDir("aisa-harness-slot-legacy-alias-");
+  const { run } = await bootstrapRun(rootDir, "harness-slot-legacy-alias");
+  const aliasedRun = updateRun(run, {
+    harness_profile: {
+      slots: {
+        research_or_planning: {
+          binding: "codex_cli_research_worker"
+        },
+        execution: {
+          binding: "codex_cli_execution_worker"
+        }
+      }
+    }
+  });
+  const orchestrator = new Orchestrator(
+    resolveWorkspacePaths(rootDir),
+    new ContextCaptureAdapter() as never,
+    undefined,
+    60_000
+  );
+  const slots = orchestrator.describeRunHarnessSlots(aliasedRun);
+
+  assert.equal(slots.research_or_planning.binding, "codex_cli_research_worker");
+  assert.equal(slots.research_or_planning.expected_binding, "research_worker");
+  assert.equal(slots.research_or_planning.binding_status, "aligned");
+  assert.equal(slots.research_or_planning.binding_matches_registry, true);
+  assert.equal(slots.execution.binding, "codex_cli_execution_worker");
+  assert.equal(slots.execution.expected_binding, "execution_worker");
+  assert.equal(slots.execution.binding_status, "aligned");
+  assert.equal(slots.execution.binding_matches_registry, true);
+}
+
 async function assertRunHarnessSlotBindingMismatchDetection(): Promise<void> {
   const rootDir = await createVerifyTempDir("aisa-harness-slot-mismatch-");
   const { run } = await bootstrapRun(rootDir, "harness-slot-mismatch");
@@ -2277,7 +2304,7 @@ async function assertRunHarnessSlotBindingMismatchDetection(): Promise<void> {
   const slots = orchestrator.describeRunHarnessSlots(mismatchedRun);
 
   assert.equal(slots.execution.binding, "attempt_dispatch_preflight");
-  assert.equal(slots.execution.expected_binding, "codex_cli_execution_worker");
+  assert.equal(slots.execution.expected_binding, "execution_worker");
   assert.equal(slots.execution.binding_status, "binding_mismatch");
   assert.equal(slots.execution.binding_matches_registry, false);
   assert.equal(slots.execution.permission_boundary, "workspace_write");
@@ -6331,6 +6358,20 @@ async function main(): Promise<void> {
     } catch (error) {
       results.push({
         id: "run_harness_slot_binding_mismatch_detection",
+        status: "fail",
+        error: error instanceof Error ? error.message : String(error)
+      });
+    }
+
+    try {
+      await assertRunHarnessLegacyBindingAliasRemainsAligned();
+      results.push({
+        id: "run_harness_legacy_binding_alias_remains_aligned",
+        status: "pass"
+      });
+    } catch (error) {
+      results.push({
+        id: "run_harness_legacy_binding_alias_remains_aligned",
         status: "fail",
         error: error instanceof Error ? error.message : String(error)
       });

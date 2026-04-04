@@ -1,10 +1,12 @@
 import {
+  canonicalizeRunHarnessSlotBinding,
   resolveRunHarnessProfile,
   type ExecutionVerifierKit,
   type Run,
   type RunHarnessSlot,
   type RunHarnessSlotBinding
 } from "@autoresearch/domain";
+import { supportsRunHarnessSlotWorkerAdapterType } from "@autoresearch/worker-adapters";
 
 export type RunHarnessSlotBindingStatus = "aligned" | "binding_mismatch";
 export type RunHarnessSlotPermissionBoundary =
@@ -70,18 +72,11 @@ export type RunHarnessSlotBindingResolution =
       failure_reason: string;
     };
 
-const RUN_HARNESS_SLOT_WORKER_ADAPTER_TYPES: Partial<
-  Record<RunHarnessSlot, readonly string[]>
-> = {
-  research_or_planning: ["codex", "fake-codex"],
-  execution: ["codex", "fake-codex"]
-} as const;
-
 const RUN_HARNESS_SLOT_REGISTRY: Record<RunHarnessSlot, RunHarnessSlotRegistryEntry> = {
   research_or_planning: {
     slot: "research_or_planning",
     title: "Research Or Planning",
-    default_binding: "codex_cli_research_worker",
+    default_binding: "research_worker",
     detail: "Read-only repository understanding, planning, and next-contract drafting.",
     input_contract: [
       "run summary and current decision snapshot",
@@ -95,7 +90,7 @@ const RUN_HARNESS_SLOT_REGISTRY: Record<RunHarnessSlot, RunHarnessSlotRegistryEn
   execution: {
     slot: "execution",
     title: "Execution",
-    default_binding: "codex_cli_execution_worker",
+    default_binding: "execution_worker",
     detail: "Workspace-writing implementation step locked behind the attempt contract.",
     input_contract: [
       "attempt_contract.json with replayable verification commands",
@@ -161,15 +156,17 @@ function buildSlotView(
   const harnessProfile = resolveRunHarnessProfile(run);
   const registryEntry = RUN_HARNESS_SLOT_REGISTRY[slot];
   const binding = harnessProfile.slots[slot].binding;
+  const expectedBinding = registryEntry.default_binding;
+  const bindingMatchesRegistry =
+    canonicalizeRunHarnessSlotBinding(binding) === expectedBinding;
 
   return {
     slot,
     title: registryEntry.title,
     binding,
-    expected_binding: registryEntry.default_binding,
-    binding_status:
-      binding === registryEntry.default_binding ? "aligned" : "binding_mismatch",
-    binding_matches_registry: binding === registryEntry.default_binding,
+    expected_binding: expectedBinding,
+    binding_status: bindingMatchesRegistry ? "aligned" : "binding_mismatch",
+    binding_matches_registry: bindingMatchesRegistry,
     source: `run.harness_profile.slots.${slot}.binding`,
     detail: registryEntry.detail,
     input_contract: registryEntry.input_contract,
@@ -223,10 +220,11 @@ export function resolveRunHarnessSlotBinding(input: {
     };
   }
 
-  const supportedAdapterTypes = RUN_HARNESS_SLOT_WORKER_ADAPTER_TYPES[input.slot] ?? null;
   if (
-    supportedAdapterTypes &&
-    (!input.workerAdapterType || !supportedAdapterTypes.includes(input.workerAdapterType))
+    !supportsRunHarnessSlotWorkerAdapterType({
+      slot: input.slot,
+      workerAdapterType: input.workerAdapterType
+    })
   ) {
     return {
       ok: false,

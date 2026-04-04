@@ -214,8 +214,33 @@ export function attemptTypeLabel(value: string): string {
   return STATUS_LABELS[value] ?? localizeUiText(value);
 }
 
+function formatMachineLabel(value: string): string {
+  const compactValue = value.trim();
+  if (!compactValue) {
+    return "Worker";
+  }
+
+  return compactValue
+    .split(/[_\-\s]+/)
+    .filter(Boolean)
+    .map((part) => {
+      const upper = part.toUpperCase();
+      if (["API", "CLI", "UI", "JSON", "ID"].includes(upper)) {
+        return upper;
+      }
+
+      return `${part.charAt(0).toUpperCase()}${part.slice(1)}`;
+    })
+    .join(" ");
+}
+
 export function workerLabel(value: string): string {
-  return value === "codex" ? "Codex" : localizeUiText(value);
+  const localized = localizeUiText(value);
+  if (localized !== value) {
+    return localized;
+  }
+
+  return formatMachineLabel(value);
 }
 
 export function nextActionLabel(value: string | null | undefined): string {

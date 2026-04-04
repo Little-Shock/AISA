@@ -16,9 +16,12 @@ import {
 } from "../packages/state-store/src/index.ts";
 import {
   CodexCliWorkerAdapter,
+  createExecutionWorkerAdapter,
   isWorkerWritebackParseError,
+  loadExecutionWorkerAdapterConfig,
   loadCodexCliConfig,
-  prepareResearchShellGuard
+  prepareResearchShellGuard,
+  supportsRunHarnessSlotWorkerAdapterType
 } from "../packages/worker-adapters/src/index.ts";
 import {
   cleanupTrackedVerifyTempDirs,
@@ -341,6 +344,50 @@ async function main(): Promise<void> {
     stallPollMs: 7,
     stallKillGraceMs: 5
   });
+  const genericLoadedConfig = loadExecutionWorkerAdapterConfig({
+    AISA_EXECUTION_ADAPTER: "codex_cli",
+    AISA_EXECUTION_COMMAND: "aisa-exec",
+    AISA_EXECUTION_SANDBOX: "danger-full-access",
+    AISA_EXECUTION_MODEL: "gpt-5.5",
+    AISA_EXECUTION_PROFILE: "runtime-dev",
+    AISA_EXECUTION_SKIP_GIT_REPO_CHECK: "false",
+    AISA_EXECUTION_PROGRESS_STALL_MS: "11",
+    AISA_EXECUTION_STALL_POLL_MS: "13",
+    AISA_EXECUTION_STALL_KILL_GRACE_MS: "17"
+  });
+  assert.deepEqual(genericLoadedConfig, {
+    provider: "codex_cli",
+    command: "aisa-exec",
+    model: "gpt-5.5",
+    profile: "runtime-dev",
+    sandbox: "danger-full-access",
+    skipGitRepoCheck: false,
+    progressStallMs: 11,
+    stallPollMs: 13,
+    stallKillGraceMs: 17
+  });
+  assert.equal(createExecutionWorkerAdapter(genericLoadedConfig).type, "codex");
+  assert.equal(
+    supportsRunHarnessSlotWorkerAdapterType({
+      slot: "execution",
+      workerAdapterType: "fake-codex"
+    }),
+    true
+  );
+  assert.equal(
+    supportsRunHarnessSlotWorkerAdapterType({
+      slot: "execution",
+      workerAdapterType: "missing-adapter"
+    }),
+    false
+  );
+  assert.equal(
+    supportsRunHarnessSlotWorkerAdapterType({
+      slot: "postflight_review",
+      workerAdapterType: null
+    }),
+    true
+  );
 
   const runtimeFixture = createExecutionAttemptFixture({
     runId: run.id,

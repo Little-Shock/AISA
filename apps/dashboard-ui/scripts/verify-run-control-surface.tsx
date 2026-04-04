@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { join } from "node:path";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
+import { createDefaultRunHarnessProfile } from "../../../packages/domain/src/index.ts";
 import { buildServer } from "../../control-api/src/index.ts";
 import { deriveRunOperatorState } from "../app/dashboard-helpers";
 import type { RunDetail, RunSummaryItem } from "../app/dashboard-types";
@@ -20,6 +21,9 @@ import {
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
+
+const DEFAULT_EXECUTION_SLOT_BINDING =
+  createDefaultRunHarnessProfile().slots.execution.binding;
 
 async function main(): Promise<void> {
   try {
@@ -94,7 +98,7 @@ async function main(): Promise<void> {
     );
     assert.equal(
       runDetail.run.harness_profile.slots.execution.binding,
-      "codex_cli_execution_worker"
+      DEFAULT_EXECUTION_SLOT_BINDING
     );
     assert.equal(runDetail.harness_gates.preflight_review.mode, "required");
     assert.equal(runDetail.harness_gates.preflight_review.enforced, true);
@@ -107,8 +111,14 @@ async function main(): Promise<void> {
       runDetail.harness_gates.postflight_adversarial.artifact_ref,
       "artifacts/adversarial-verification.json"
     );
-    assert.equal(runDetail.harness_slots.execution.binding, "codex_cli_execution_worker");
-    assert.equal(runDetail.harness_slots.execution.expected_binding, "codex_cli_execution_worker");
+    assert.equal(
+      runDetail.harness_slots.execution.binding,
+      runDetail.run.harness_profile.slots.execution.binding
+    );
+    assert.equal(
+      runDetail.harness_slots.execution.expected_binding,
+      DEFAULT_EXECUTION_SLOT_BINDING
+    );
     assert.equal(runDetail.harness_slots.execution.binding_status, "aligned");
     assert.equal(runDetail.harness_slots.execution.permission_boundary, "workspace_write");
     assert.deepEqual(runDetail.harness_slots.execution.output_artifacts, [
@@ -377,7 +387,10 @@ async function main(): Promise<void> {
       new RegExp(escapeRegExp(fixture.expected_policy_activity_headline))
     );
     assert.match(policyMarkup, /Registry Contract/);
-    assert.match(policyMarkup, /codex_cli_execution_worker/);
+    assert.match(
+      policyMarkup,
+      new RegExp(escapeRegExp(DEFAULT_EXECUTION_SLOT_BINDING))
+    );
     assert.match(policyMarkup, /binding status: aligned/);
     assert.match(policyMarkup, /permission boundary: workspace_write/);
     assert.match(policyMarkup, /failure semantics: fail_closed/);
