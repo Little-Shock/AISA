@@ -1,117 +1,138 @@
 # AISA
 
-`AISA` 是一个 run-centered 的 agent orchestration control plane。
+`AISA` 是一套给长周期 AI 开发任务用的 control plane。
 
-它不是新的底层模型，也不是新的单体 coding agent。当前实现的目标，是围绕一个 `run` 持续推进 `research -> execution -> evaluation -> next attempt` 这条闭环，让系统能自举式地继续开发自己。
+它不想把 AI 包装成“会自动完成一切”的黑盒，而是把每一次推进都收成可追踪、可验证、可接管、可续跑的 `run -> attempt -> review -> next step` 闭环。
 
-当前仓库里同时存在两条线：
+![AISA dashboard screenshot](docs/assets/readme/dashboard-current.png)
 
-- 旧的 `goal / branch / judge / report` MVP 骨架
-- 新的 `run / attempt / current decision / review packet` 主链
+## 先看这 4 句
 
-现在真正优先发展的，是新的 run-centered 主链。
+- 把一条持续推进的 AI 任务收成一个 `run`，而不是零散聊天记录。
+- 把 AI 的每一轮动作收成一个 `attempt`，并强制留下验证记录、交接说明（`handoff`）和 review packet。
+- 在真正发车前先跑发车前检查（`preflight`）/ shadow dispatch，尽量把“运行后才暴露的问题”提前 fail-closed。
+- 让人类打开 dashboard 时，第一眼就知道：现在卡在哪、是不是需要你处理、下一步该做什么。
 
-## 当前状态
+## 用人话解释这个项目
 
-当前这版已经具备下面这些能力：
+你可以把 AISA 理解成一个 “AI 项目驾驶舱”。
 
-- `control-api` 提供 `run` 的创建、启动、steer、详情读取
-- `dashboard` 可以观察 run、attempt、review packet、runtime 状态和错误
-- `orchestrator` 会围绕 `CurrentDecision` 持续推进下一次 attempt
-- `Codex CLI` 作为当前 worker adapter
-- reviewer pipeline 可以并行跑 Gemini CLI / Codex CLI，并让单独的 synthesizer 产出最终 `evaluation.json`
-- execution attempt 会在独立 managed worktree 中运行，而不是直接污染源工作区
-- execution 会留下 replayable verification contract、runtime verification、review packet 和工件清单
-- runtime 改到 live 源码时，会显式要求重启，避免旧内存继续派发
-- `bootstrap:self` 可以创建 self-bootstrap run，并把 runtime health snapshot 带进自举入口
-- `supervise:self-bootstrap` 可以盯住 self-bootstrap run，自动修复 `managed worktree` 缺本地 toolchain 这类卡点，并在 run 死路时续起新的自举 run
+它要解决的问题不是“怎么再做一个聊天 UI”，而是：
 
-这意味着它已经不只是一个展示状态的原型，而是一套能自己跑 runtime 回归、自己继续开发自己的最小工作台。
+- 一条任务让 AI 连续做很多轮之后，人还能不能看懂当前状态。
+- AI 说“我做完了”时，系统能不能拿到可回放的验证证据。
+- 如果 AI 失败、卡住、环境坏掉，系统能不能明确告诉你是继续、重试，还是等人接球。
+- 如果要让 AI 继续开发自己，系统能不能把现场和下一步建议稳定地交给下一轮。
 
-## 核心对象
+核心对象只要记住 4 个就够了：
 
-新的主链围绕这几个对象组织：
+- `Run`: 一条持续推进的任务。
+- `Attempt`: 这条任务的一轮具体尝试。
+- `Review Packet`: 这轮尝试留下的结构化证据。
+- `Handoff Bundle`: 下一轮 AI 或人类继续接手时要看的最小交接说明包。
 
-- `Run`
-- `Attempt`
-- `CurrentDecision`
-- `AttemptEvaluation`
-- `AttemptReviewPacket`
-- `AttemptHandoffBundle`
-- `RunSteer`
-- `RunJournalEntry`
+## 当前它已经能做什么
 
-运行时真相主要落在：
+- `control-api` 可以创建、启动、steer、读取 `run` 与 `attempt`。
+- `dashboard` 已经在往 run-first / triage-first 的 operator board 方向收，而不是纯展示墙。
+- `orchestrator` 会围绕 `CurrentDecision` 持续推进 `research -> execution -> evaluation -> next attempt`。
+- execution 会跑在独立 managed worktree 里，不直接污染源工作区。
+- 系统会留下可回放的验证约定、runtime verification、review packet 和 handoff bundle。
+- reviewer pipeline 支持多 reviewer + synthesizer，不只是一条单点评价链。
+- `bootstrap:self` / `supervise:self-bootstrap` 已经能让系统以自举方式继续推进自己。
 
-- `runs/<run_id>/contract.json`
-- `runs/<run_id>/current.json`
-- `runs/<run_id>/journal.ndjson`
-- `runs/<run_id>/report.md`
-- `runs/<run_id>/artifacts/runtime-health-snapshot.json`
-- `runs/<run_id>/attempts/<attempt_id>/`
-- `runs/<run_id>/attempts/<attempt_id>/artifacts/handoff_bundle.json`
+## 架构图
 
-## 仓库结构
+```mermaid
+flowchart LR
+    U[Operator] --> D[Dashboard UI]
+    D --> A[Control API]
+    A --> O[Orchestrator]
+    O --> W[Worker Adapters]
+    O --> J[Judge / Reviewer / Synthesizer]
+    O --> S[State Store]
+    S --> R[(runs/<run_id>/...)]
+    W --> M[Managed Worktree]
+    M --> V[Preflight / Runtime / Adversarial Verification]
+    V --> S
+    J --> S
+    S --> H[Review Packet / Handoff Bundle / Run Brief]
+    H --> D
+```
 
-- `apps/control-api`
-- `apps/dashboard-ui`
-- `packages/domain`
-- `packages/orchestrator`
-- `packages/worker-adapters`
-- `packages/judge`
-- `packages/state-store`
-- `packages/planner`
-- `packages/context-manager`
-- `packages/event-log`
-- `packages/report-builder`
-- `scripts`
-- `runs`
-- `state`
-- `events`
-- `artifacts`
-- `reports`
-- `plans`
+## 5 分钟跑起来
 
-## 本地启动
-
-先安装依赖：
+### 1. 安装依赖
 
 ```bash
 pnpm install
 ```
 
-启动整套本地控制面：
+### 2. 启动本地控制面
 
 ```bash
 pnpm dev
 ```
 
-如果只想让自举 run 在后台自己续跑，可以直接开监督脚本：
+默认本地地址：
 
-```bash
-pnpm supervise:self-bootstrap -- --target-completed-attempts 40
-```
+- Dashboard: `http://127.0.0.1:3000`
+- Control API: `http://127.0.0.1:8787`
 
-默认地址：
-
-- dashboard: `http://127.0.0.1:3000`
-- control-api: `http://127.0.0.1:8787`
-
-如果只想跑后端：
+### 3. 只跑单侧服务
 
 ```bash
 pnpm --filter @autoresearch/control-api dev
-```
-
-如果只想跑前端：
-
-```bash
 pnpm --filter @autoresearch/dashboard-ui dev
 ```
 
-## 配置
+### 4. 启动本地自举链路
 
-运行时主要从 `.env` 读取统一配置。常用变量：
+```bash
+pnpm bootstrap:self
+pnpm supervise:self-bootstrap -- --target-completed-attempts 40
+```
+
+## 常用验证入口
+
+README 只放最常用入口。更细的脚本说明见 [Scripts Guide](scripts/README.md)。
+
+| Command | What it proves |
+| --- | --- |
+| `pnpm typecheck` | 全仓基本类型检查 |
+| `pnpm verify:run-loop` | run / attempt 主循环、preflight、dispatch、治理链路 |
+| `pnpm verify:runtime` | runtime 侧主回归入口 |
+| `pnpm verify:run-api` | `GET /runs` / `GET /runs/:id` 的 control surface 回归 |
+| `pnpm verify:self-bootstrap` | 自举 run、监督与恢复链路 |
+| `pnpm verify:working-context` | working context 与 snapshot 现场保持 |
+
+常见 focused 入口：
+
+```bash
+pnpm verify:worker-adapter
+pnpm verify:drive-run
+pnpm verify:dashboard-control-surface
+pnpm verify:judge-evals
+pnpm verify:policy-runtime
+```
+
+## 仓库分工
+
+| Path | Responsibility |
+| --- | --- |
+| `apps/control-api` | 对外暴露 run / attempt / control surface |
+| `apps/dashboard-ui` | operator dashboard 与 triage / detail surface |
+| `packages/orchestrator` | 主循环、dispatch、preflight、runtime gate、handoff |
+| `packages/domain` | 领域模型、schema、failure class、contract 类型 |
+| `packages/state-store` | run / attempt / artifact 落盘与读取 |
+| `packages/judge` | reviewer / synthesizer / evaluation 相关能力 |
+| `packages/worker-adapters` | 执行适配层，当前以 Codex CLI 为主 |
+| `scripts` | verify、bootstrap、seed、辅助脚本 |
+| `docs` | PRD、roadmap、决策记录与实现文档 |
+
+## 配置概览
+
+常用环境变量：
 
 - `CONTROL_API_HOST`
 - `CONTROL_API_PORT`
@@ -125,189 +146,43 @@ pnpm --filter @autoresearch/dashboard-ui dev
 - `OPENAI_API_KEY`
 - `OPENAI_BASE_URL`
 
-说明：
+如果你只想先把系统跑起来，通常先配置 `control-api`、dashboard 和 worker adapter 相关变量就够了。
 
-- `control-api` 会把 worker 相关配置透传给底层 `codex exec`
-- dashboard 默认通过同源 `/api/control/*` 代理访问本机 `control-api`
-- 如果没有额外 provider 覆盖，当前环境会直接使用本机已有的 CLI / API 配置
+## 去哪看更多文档
 
-如果要启用多 reviewer 和最终 synthesis，仓库自带了一个统一包装器：
+- [Docs Index](docs/README.md)
+- [Getting Started](docs/getting-started.md)
+- [Run Lifecycle](docs/run-lifecycle.md)
+- [Architecture](docs/architecture.md)
+- [Glossary](docs/glossary.md)
+- [PRD](docs/aisa-harness-prd-v1.md)
+- [Roadmap](docs/aisa-harness-roadmap-v1.md)
+- [Single-Run Hardening Roadmap](docs/aisa-single-run-core-hardening-roadmap.md)
+- [Implementation Blueprint](docs/implementation-blueprint.md)
+- [Architecture Decisions](docs/decisions/0001-mvp-runtime.md)
+- [Scripts Guide](scripts/README.md)
 
-```bash
-node scripts/llm-judge-cli.mjs reviewer
-node scripts/llm-judge-cli.mjs synthesizer
-```
+## 为什么它和普通 agent dashboard 不一样
 
-常见本地配置是让 Gemini CLI 和 Codex CLI 都做 reviewer，再让 Codex CLI 负责最终 synthesis。对应环境变量是：
+普通 dashboard 更像“AI 正在跑”的状态屏。
 
-```bash
-export AISA_REVIEWERS_JSON='[
-  {
-    "kind": "cli",
-    "reviewer_id": "gemini-reviewer",
-    "role": "principal_reviewer",
-    "adapter": "llm-judge-cli",
-    "provider": "gemini",
-    "model": "gemini-2.5-pro",
-    "command": "node",
-    "args": ["scripts/llm-judge-cli.mjs", "reviewer"],
-    "cwd": "/Users/atou/AISA",
-    "env": {
-      "AISA_LLM_PROVIDER": "gemini",
-      "AISA_LLM_MODEL": "gemini-2.5-pro"
-    },
-    "timeout_ms": 300000
-  },
-  {
-    "kind": "cli",
-    "reviewer_id": "codex-reviewer",
-    "role": "risk_reviewer",
-    "adapter": "llm-judge-cli",
-    "provider": "codex",
-    "model": "gpt-5.4",
-    "command": "node",
-    "args": ["scripts/llm-judge-cli.mjs", "reviewer"],
-    "cwd": "/Users/atou/AISA",
-    "env": {
-      "AISA_LLM_PROVIDER": "codex",
-      "AISA_LLM_MODEL": "gpt-5.4"
-    },
-    "timeout_ms": 300000
-  }
-]'
+AISA 更关心的是：
 
-export AISA_REVIEW_SYNTHESIZER_JSON='{
-  "kind": "cli",
-  "synthesizer_id": "codex-synthesizer",
-  "role": "final_synthesizer",
-  "adapter": "llm-judge-cli",
-  "provider": "codex",
-  "model": "gpt-5.4",
-  "command": "node",
-  "args": ["scripts/llm-judge-cli.mjs", "synthesizer"],
-  "cwd": "/Users/atou/AISA",
-  "env": {
-    "AISA_LLM_PROVIDER": "codex",
-    "AISA_LLM_MODEL": "gpt-5.4"
-  },
-  "timeout_ms": 300000
-}'
-```
+- 这轮为什么继续，为什么暂停。
+- 哪条 gate 失败了，失败证据在哪里。
+- 当前是不是需要你处理。
+- 下一轮 AI 继续接手时，最小真相包是不是已经齐了。
 
-这台机器上实测 `gemini-3.1-pro` 当前会返回 404，所以 live 示例先写成 `gemini-2.5-pro`。如果你的 Gemini CLI 环境已经开放了 3.1，只需要替换上面的 model 和对应 env。
+所以它的核心不是“看起来智能”，而是“让持续推进这件事可验证、可接管、可恢复”。
 
-这样每次 attempt 都会留下：
+## 当前 README 的定位
 
-- `review_input_packet.json`
-- `review_opinions/*.json`
-- `evaluation_synthesis.json`
-- `evaluation.json`
+这份 README 只负责回答 5 个问题：
 
-## 常用验证
+- 它是什么。
+- 它解决什么问题。
+- 我怎么 5 分钟跑起来。
+- 我该从哪几个命令验证它。
+- 我接下来去哪里看更深的文档。
 
-类型检查：
-
-```bash
-pnpm typecheck
-```
-
-runtime 主回归：
-
-```bash
-pnpm verify:runtime
-```
-
-run loop 回归：
-
-```bash
-pnpm verify:run-loop
-```
-
-self-bootstrap 回归：
-
-```bash
-pnpm verify:self-bootstrap
-```
-
-本地自举入口：
-
-```bash
-pnpm bootstrap:self
-```
-
-不经过 control-api，直接在本地推进某个 run：
-
-```bash
-pnpm drive:run -- --run-id <run_id>
-```
-
-## 协作开发
-
-当前远端约定：
-
-- `origin`: 个人 fork
-- `upstream`: 共享仓库 `https://github.com/Little-Shock/AISA.git`
-
-如果要把当前 `main` 推到共享仓库：
-
-```bash
-git push upstream HEAD:main
-```
-
-如果是新同事直接拿共享仓库开始：
-
-```bash
-git clone https://github.com/Little-Shock/AISA.git
-cd AISA
-pnpm install
-```
-
-## 同机 worktree 协作
-
-如果你和朋友在同一台机器上并行开发，不要共用一个工作区。直接从已有 clone 拉一个新的 worktree：
-
-```bash
-git fetch upstream main
-git worktree add ../AISA-friend -b friend/<name> refs/remotes/upstream/main
-cd ../AISA-friend
-pnpm install
-```
-
-建议约定：
-
-- 每个人各自占用一个 worktree，不要在同一个工作目录里混改
-- 每个 run 只绑定自己的工作区
-- execution 产生的 managed worktree 会继续落在 `~/.aisa-run-worktrees/`
-- 同机同时跑两套服务时，给每个 worktree 单独配置端口
-
-例如第二个 worktree 可以这样启动：
-
-```bash
-export CONTROL_API_PORT=8788
-export NEXT_PUBLIC_CONTROL_API_URL=http://127.0.0.1:8788
-export PORT=3001
-pnpm dev
-```
-
-这样就不会和主 worktree 的 `3000 / 8787` 冲突。
-
-## 当前限制
-
-- 多 reviewer / synthesizer 已经支持，但 live 是否启用取决于本机 CLI 凭据和 `AISA_REVIEWERS_JSON` / `AISA_REVIEW_SYNTHESIZER_JSON`
-- 旧的 `goal / branch` 逻辑还在 orchestrator 里保留兼容，没有彻底剥离
-- dashboard 已经能看 run detail，但体验上还没有完全围绕 run page 收口
-- provider 可用性仍然会直接影响自举 run 的连续性
-- 更复杂的 trigger、长期记忆、多实例治理和自动 merge 还没进入当前主线
-
-## 现在最重要的开发方向
-
-当前主线不是继续堆外围平台能力，而是把 run-centered runtime 打磨硬：
-
-- replayable verification contract
-- execution 隔离现场
-- review packet 完整落盘
-- runtime source drift 护栏
-- self-bootstrap 主链
-- 更可靠的 evaluator / reviewer pipeline
-
-只要这条链足够硬，AISA 才能真的成为一个能长期自推进的工作台。
+更细的实现细节、roadmap 和模块文档，请从 [docs/README.md](docs/README.md) 继续进入。

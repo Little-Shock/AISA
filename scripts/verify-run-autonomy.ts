@@ -21,6 +21,7 @@ import {
 } from "../packages/domain/src/index.js";
 import {
   Orchestrator,
+  deriveRunRecoveryGuidance,
   resolveRuntimeLayout,
   type RuntimeLayout,
   type RuntimeRestartRequest
@@ -1902,6 +1903,58 @@ async function verifyLowReviewerProfileBlocksSettledAutoResume(): Promise<void> 
   );
 }
 
+async function verifyMissingHandoffRecoveryGuidanceDegradesToResearch(): Promise<void> {
+  const run = createRun({
+    title: "missing-handoff-guidance",
+    description: "Verify degraded recovery guidance without relying on orchestrator backfill.",
+    success_criteria: ["fallback to research rebuild when no handoff bundle exists"],
+    constraints: [],
+    owner_id: "test",
+    workspace_root: "/tmp/missing-handoff-guidance"
+  });
+  const failedExecution = updateAttempt(
+    createAttempt({
+      run_id: run.id,
+      attempt_type: "execution",
+      worker: "fake-codex",
+      objective: "Recover from a settled attempt that never produced a handoff bundle.",
+      success_criteria: run.success_criteria,
+      workspace_root: run.workspace_root
+    }),
+    {
+      status: "failed",
+      started_at: new Date().toISOString(),
+      ended_at: new Date().toISOString()
+    }
+  );
+  const degradedReason =
+    "Execution failed before a settled handoff bundle was written, so recovery must rebuild from primary evidence.";
+  const current = createCurrentDecision({
+    run_id: run.id,
+    latest_attempt_id: failedExecution.id,
+    run_status: "waiting_steer",
+    recommended_next_action: "wait_for_human",
+    recommended_attempt_type: "execution",
+    summary: degradedReason,
+    blocking_reason: degradedReason,
+    waiting_for_human: true
+  });
+
+  const guidance = deriveRunRecoveryGuidance({
+    current,
+    latestAttempt: failedExecution,
+    latestHandoffBundle: null,
+    latestHandoffBundleRef: null
+  });
+
+  assert.equal(guidance.path, "degraded_rebuild");
+  assert.equal(guidance.attemptType, "research");
+  assert.equal(guidance.nextAction, "continue_research");
+  assert.equal(guidance.handoffBundleRef, null);
+  assert.match(guidance.summary, /degraded \/ rebuild path/u);
+  assert.match(guidance.blockingReason ?? "", /handoff bundle/u);
+}
+
 async function verifyRateLimitedExecutionRetriesQuickly(): Promise<void> {
   const { run, workspacePaths, rootDir, detachedRuntimeLayout } = await bootstrapRun(
     "rate-limited-execution-retry"
@@ -3625,6 +3678,10 @@ async function main(): Promise<void> {
       {
         id: "low_reviewer_profile_blocks_settled_auto_resume",
         run: verifyLowReviewerProfileBlocksSettledAutoResume
+      },
+      {
+        id: "missing_handoff_degrades_auto_resume_into_research",
+        run: verifyMissingHandoffRecoveryGuidanceDegradesToResearch
       }
     ];
     const results: CaseResult[] = [];

@@ -29,6 +29,7 @@ import {
   captureSelfBootstrapRuntimeHealthSnapshot,
   createRunWorkspaceScopePolicy,
   captureSelfBootstrapNextTaskArtifacts,
+  deriveRunRecoveryGuidance,
   deriveRunSurfaceFailureSignal,
   lockRunWorkspaceRoot,
   loadSelfBootstrapNextTaskActiveEntry,
@@ -145,6 +146,45 @@ function inferLaunchNextAction(input: {
     : "continue_research";
 }
 
+function buildRecoveryResumeSummary(input: {
+  path: "first_attempt" | "latest_decision" | "handoff_first" | "degraded_rebuild";
+  handoffBundleRef: string | null;
+}): string {
+  switch (input.path) {
+    case "handoff_first":
+      return input.handoffBundleRef
+        ? `Recovery remains handoff-first from ${input.handoffBundleRef}. Relaunch will follow that settled handoff.`
+        : "Recovery remains handoff-first from the latest settled handoff bundle.";
+    case "degraded_rebuild":
+      return "Recovery is degraded because the latest settled attempt has no handoff bundle. Relaunch will rebuild from research first.";
+    case "first_attempt":
+      return "Relaunch will create the first research attempt.";
+    case "latest_decision":
+    default:
+      return "Relaunch will continue from the latest decision.";
+  }
+}
+
+async function readRunRecoveryGuidance(input: {
+  workspacePaths: ReturnType<typeof resolveWorkspacePaths>;
+  runId: string;
+  current: Awaited<ReturnType<typeof getCurrentDecision>> | null;
+  attempts: Awaited<ReturnType<typeof listAttempts>>;
+}) {
+  const latestAttemptSurface = await readLatestRunEvidenceSurface({
+    paths: input.workspacePaths,
+    runId: input.runId,
+    current: input.current,
+    attempts: input.attempts
+  });
+  return deriveRunRecoveryGuidance({
+    current: input.current,
+    latestAttempt: pickLatestAttempt(input.attempts, input.current),
+    latestHandoffBundle: latestAttemptSurface.latestHandoffBundle,
+    latestHandoffBundleRef: latestAttemptSurface.latestHandoffBundleRef
+  });
+}
+
 function isExecutionApprovalPending(
   policyRuntime: Awaited<ReturnType<typeof getRunPolicyRuntime>> | null
 ): boolean {
@@ -152,6 +192,16 @@ function isExecutionApprovalPending(
     policyRuntime?.approval_required === true &&
     policyRuntime.proposed_attempt_type === "execution" &&
     policyRuntime.approval_status === "pending"
+  );
+}
+
+function hasApprovedExecutionPlan(
+  policyRuntime: Awaited<ReturnType<typeof getRunPolicyRuntime>> | null
+): boolean {
+  return (
+    policyRuntime?.approval_required === true &&
+    policyRuntime.approval_status === "approved" &&
+    policyRuntime.proposed_attempt_type === "execution"
   );
 }
 
@@ -174,6 +224,30 @@ type RunMailboxSurface = {
   runMailboxRef: string | null;
   runMailboxInvalidReason: string | null;
 };
+
+type RunPreflightEvaluationSummary = {
+  status: string;
+  summary: string;
+  failure_class: string | null;
+  failure_policy_mode: string | null;
+  failure_code: string | null;
+  failure_reason: string | null;
+  requires_adversarial_verification: boolean;
+  verifier_kit: string | null;
+  verification_command_count: number;
+  source_ref: string | null;
+} | null;
+
+type RunHandoffSummary = {
+  summary: string | null;
+  recommended_next_action: string | null;
+  recommended_attempt_type: string | null;
+  failure_class: string | null;
+  failure_policy_mode: string | null;
+  failure_code: string | null;
+  adversarial_failure_code: string | null;
+  source_ref: string | null;
+} | null;
 
 type RunPolicyActivityItem = {
   id: string;
@@ -235,6 +309,80 @@ async function readRunPolicyRuntimeSurface(
         error instanceof Error ? error.message : "Policy runtime is unreadable."
     };
   }
+}
+
+function buildPreflightEvaluationSummary(input: {
+  evaluation: Awaited<ReturnType<typeof getAttemptPreflightEvaluation>> | null;
+  ref: string | null;
+  fallbackContract?: Awaited<ReturnType<typeof getAttemptContract>> | null;
+  fallbackVerifierKit?: string | null;
+}): RunPreflightEvaluationSummary {
+  if (!input.evaluation) {
+    return null;
+  }
+
+  const evaluation = input.evaluation;
+  const contract = evaluation.contract ?? (input.fallbackContract
+    ? {
+        requires_adversarial_verification:
+          input.fallbackContract.adversarial_verification_required === true,
+        verifier_kit: input.fallbackContract.verifier_kit,
+        verification_commands:
+          input.fallbackContract.verification_plan?.commands.map(
+            (command: { command: string }) => command.command
+          ) ??
+          []
+      }
+    : null);
+  const verificationCommandCount =
+    contract?.verification_commands.length ?? 0;
+  const summary =
+    evaluation.failure_reason ??
+    (evaluation.status === "passed"
+      ? "Preflight evaluation passed."
+      : evaluation.status === "failed"
+        ? "Preflight evaluation failed."
+        : "Preflight evaluation was not applicable.");
+
+  return {
+    status: evaluation.status,
+    summary,
+    failure_class: evaluation.failure_class,
+    failure_policy_mode: evaluation.failure_policy_mode,
+    failure_code: evaluation.failure_code,
+    failure_reason: evaluation.failure_reason,
+    requires_adversarial_verification:
+      contract?.requires_adversarial_verification ?? false,
+    verifier_kit:
+      contract?.verifier_kit ??
+      evaluation.toolchain_assessment?.verifier_kit ??
+      input.fallbackVerifierKit ??
+      null,
+    verification_command_count: verificationCommandCount,
+    source_ref: input.ref
+  };
+}
+
+function buildHandoffSummary(input: {
+  handoff: Awaited<ReturnType<typeof getAttemptHandoffBundle>> | null;
+  ref: string | null;
+}): RunHandoffSummary {
+  if (!input.handoff) {
+    return null;
+  }
+
+  const handoff = input.handoff;
+
+  return {
+    summary: handoff.summary,
+    recommended_next_action: handoff.recommended_next_action,
+    recommended_attempt_type: handoff.recommended_attempt_type,
+    failure_class: handoff.failure_class,
+    failure_policy_mode: handoff.failure_policy_mode,
+    failure_code: handoff.failure_code,
+    adversarial_failure_code: handoff.adversarial_failure_code,
+    source_ref: input.ref
+  };
 }
 
 async function readRunMailboxSurface(
@@ -694,6 +842,18 @@ export async function buildServer(
     const latestAttempt = latestAttemptSurface.latestAttempt;
     const latestAttemptDetail =
       attemptDetails.find((detail) => detail.attempt.id === latestAttempt?.id) ?? null;
+    const preflightEvaluationSummary = buildPreflightEvaluationSummary({
+      evaluation: latestAttemptSurface.latest_preflight_evaluation,
+      ref: latestAttemptSurface.latest_preflight_evaluation_ref,
+      fallbackContract: latestAttemptDetail?.contract ?? null,
+      fallbackVerifierKit:
+        latestAttemptDetail?.effective_verifier_kit_profile?.kit ??
+        run.harness_profile.execution.default_verifier_kit
+    });
+    const handoffSummary = buildHandoffSummary({
+      handoff: latestAttemptSurface.latest_handoff_bundle,
+      ref: latestAttemptSurface.latest_handoff_bundle_ref
+    });
     const runHealth =
       maintenancePlaneView.maintenance_plane?.run_health ??
       assessRunHealth({
@@ -743,6 +903,7 @@ export async function buildServer(
       failure_signal: failureSignal,
       latest_preflight_evaluation: latestAttemptSurface.latest_preflight_evaluation,
       latest_preflight_evaluation_ref: latestAttemptSurface.latest_preflight_evaluation_ref,
+      preflight_evaluation_summary: preflightEvaluationSummary,
       latest_runtime_verification: latestAttemptSurface.latest_runtime_verification,
       latest_runtime_verification_ref: latestAttemptSurface.latest_runtime_verification_ref,
       latest_adversarial_verification: latestAttemptSurface.latest_adversarial_verification,
@@ -750,6 +911,7 @@ export async function buildServer(
         latestAttemptSurface.latest_adversarial_verification_ref,
       latest_handoff_bundle: latestAttemptSurface.latest_handoff_bundle,
       latest_handoff_bundle_ref: latestAttemptSurface.latest_handoff_bundle_ref,
+      handoff_summary: handoffSummary,
       run_brief: runBriefView.run_brief,
       run_brief_ref: runBriefView.run_brief_ref,
       run_brief_invalid_reason: runBriefView.run_brief_invalid_reason,
@@ -809,6 +971,16 @@ export async function buildServer(
         ? getAttemptHeartbeat(workspacePaths, run.id, latestAttempt.id)
         : Promise.resolve(null)
     ]);
+    const preflightEvaluationSummary = buildPreflightEvaluationSummary({
+      evaluation: latestAttemptSurface.latest_preflight_evaluation,
+      ref: latestAttemptSurface.latest_preflight_evaluation_ref,
+      fallbackContract: latestContract,
+      fallbackVerifierKit: run.harness_profile.execution.default_verifier_kit
+    });
+    const handoffSummary = buildHandoffSummary({
+      handoff: latestAttemptSurface.latest_handoff_bundle,
+      ref: latestAttemptSurface.latest_handoff_bundle_ref
+    });
 
     const runHealth =
       maintenancePlaneView.maintenance_plane?.run_health ??
@@ -856,6 +1028,7 @@ export async function buildServer(
       failure_signal: failureSignal,
       latest_preflight_evaluation: latestAttemptSurface.latest_preflight_evaluation,
       latest_preflight_evaluation_ref: latestAttemptSurface.latest_preflight_evaluation_ref,
+      preflight_evaluation_summary: preflightEvaluationSummary,
       latest_runtime_verification: latestAttemptSurface.latest_runtime_verification,
       latest_runtime_verification_ref: latestAttemptSurface.latest_runtime_verification_ref,
       latest_adversarial_verification: latestAttemptSurface.latest_adversarial_verification,
@@ -863,6 +1036,7 @@ export async function buildServer(
         latestAttemptSurface.latest_adversarial_verification_ref,
       latest_handoff_bundle: latestAttemptSurface.latest_handoff_bundle,
       latest_handoff_bundle_ref: latestAttemptSurface.latest_handoff_bundle_ref,
+      handoff_summary: handoffSummary,
       run_brief: runBriefView.run_brief,
       run_brief_ref: runBriefView.run_brief_ref,
       run_brief_invalid_reason: runBriefView.run_brief_invalid_reason,
@@ -1287,6 +1461,12 @@ export async function buildServer(
           run_id: runId,
           run_status: "draft"
         });
+      const latestAttemptSurface = await readLatestRunEvidenceSurface({
+        paths: workspacePaths,
+        runId,
+        current,
+        attempts
+      });
       let policyRuntime = await getRunPolicyRuntime(workspacePaths, runId);
       if (policyRuntime === null) {
         try {
@@ -1317,25 +1497,63 @@ export async function buildServer(
             "Execution is paused because the policy killswitch is active."
         });
       }
-      const nextAction = inferLaunchNextAction({
+      const latestAttempt = pickLatestAttempt(attempts, current);
+      const recoveryGuidance = deriveRunRecoveryGuidance({
         current,
-        attempts
+        latestAttempt,
+        latestHandoffBundle: latestAttemptSurface.latestHandoffBundle,
+        latestHandoffBundleRef: latestAttemptSurface.latestHandoffBundleRef
       });
-      const nextAttemptType = inferLaunchAttemptType({
-        current,
-        attempts
-      });
+      const resumesApprovedExecution = hasApprovedExecutionPlan(policyRuntime);
+      const forcesResearchReplan =
+        policyRuntime?.approval_status === "rejected" &&
+        policyRuntime.proposed_attempt_type === "execution";
+      const nextAction = resumesApprovedExecution
+        ? "continue_execution"
+        : forcesResearchReplan
+          ? "continue_research"
+        : recoveryGuidance.path === "latest_decision"
+          ? inferLaunchNextAction({
+              current,
+              attempts
+            })
+          : recoveryGuidance.nextAction;
+      const nextAttemptType = resumesApprovedExecution
+        ? "execution"
+        : forcesResearchReplan
+          ? "research"
+        : recoveryGuidance.path === "latest_decision"
+          ? inferLaunchAttemptType({
+              current,
+              attempts
+            })
+          : recoveryGuidance.attemptType;
+      const launchSummary = resumesApprovedExecution
+        ? "Run resumed. Loop will dispatch the approved execution plan."
+        : forcesResearchReplan
+          ? "Run resumed after execution rejection. Loop will gather more research before proposing another execution."
+        : current.latest_attempt_id === null
+          ? "Run launched. Loop will create the first attempt."
+          : recoveryGuidance.path === "handoff_first"
+            ? recoveryGuidance.handoffBundleRef
+              ? `Run resumed from settled handoff ${recoveryGuidance.handoffBundleRef}. Loop will follow the handoff-first recovery path.`
+              : "Run resumed from the latest settled handoff bundle. Loop will follow the handoff-first recovery path."
+            : recoveryGuidance.path === "degraded_rebuild"
+              ? "Run resumed without a settled handoff bundle. Loop will rebuild the recovery context from degraded evidence first."
+              : "Run resumed. Loop will continue from the latest decision.";
 
       const nextCurrent = updateCurrentDecision(current, {
         run_status: "running",
         waiting_for_human: false,
-        blocking_reason: null,
+        blocking_reason:
+          resumesApprovedExecution || recoveryGuidance.path === "latest_decision"
+            ? null
+            : forcesResearchReplan
+              ? policyRuntime?.blocking_reason ?? recoveryGuidance.blockingReason
+            : recoveryGuidance.blockingReason,
         recommended_next_action: nextAction,
         recommended_attempt_type: nextAttemptType,
-        summary:
-          current.latest_attempt_id === null
-            ? "Run launched. Loop will create the first attempt."
-            : "Run resumed. Loop will continue from the latest decision."
+        summary: launchSummary
       });
 
       await saveCurrentDecision(workspacePaths, nextCurrent);
@@ -1378,12 +1596,29 @@ export async function buildServer(
         createRunJournalEntry({
           run_id: runId,
           type: "run.launched",
-          payload: {}
+          payload: {
+            recovery_path: resumesApprovedExecution
+              ? "approved_execution_plan"
+              : forcesResearchReplan
+                ? "rejected_execution_replan"
+              : recoveryGuidance.path,
+            handoff_bundle_ref: recoveryGuidance.handoffBundleRef
+          }
         })
       );
       await refreshRunOperatorSurface(workspacePaths, runId);
 
-      return { current: nextCurrent };
+      return {
+        current: nextCurrent,
+        recovery: {
+          path: resumesApprovedExecution
+            ? "approved_execution_plan"
+            : forcesResearchReplan
+              ? "rejected_execution_replan"
+            : recoveryGuidance.path,
+          handoff_bundle_ref: recoveryGuidance.handoffBundleRef
+        }
+      };
     } catch (error) {
       if (error instanceof RunWorkspaceScopeError) {
         return reply.code(400).send({ message: error.message });
@@ -1718,6 +1953,12 @@ export async function buildServer(
           run_id: runId,
           run_status: "draft"
         });
+      const recoveryGuidance = await readRunRecoveryGuidance({
+        workspacePaths,
+        runId,
+        current,
+        attempts
+      });
       const actor = body.actor?.trim() || "control-api";
       const restoredBlockingReason =
         policyRuntime.blocking_reason === policyRuntime.killswitch_reason
@@ -1730,19 +1971,35 @@ export async function buildServer(
         last_decision: "killswitch_cleared"
       });
       await saveRunPolicyRuntime(workspacePaths, nextPolicy);
+      const resumesApprovedExecution = hasApprovedExecutionPlan(nextPolicy);
 
       const hasActiveAttempt = attempts.some((attempt) =>
         ["created", "queued", "running"].includes(attempt.status)
       );
-      const clearMessage =
-        restoredBlockingReason ?? "Policy killswitch cleared. Relaunch when ready.";
+      const clearMessage = resumesApprovedExecution
+        ? [
+            restoredBlockingReason ?? "Policy killswitch cleared. Relaunch when ready.",
+            "Approved execution plan remains staged for relaunch."
+          ].join(" ")
+        : [
+            restoredBlockingReason ?? "Policy killswitch cleared. Relaunch when ready.",
+            buildRecoveryResumeSummary({
+              path: recoveryGuidance.path,
+              handoffBundleRef: recoveryGuidance.handoffBundleRef
+            })
+          ].join(" ");
       const nextCurrent = hasActiveAttempt
         ? current
         : updateCurrentDecision(current, {
             run_status: "waiting_steer",
             waiting_for_human: true,
             recommended_next_action: "wait_for_human",
-            blocking_reason: restoredBlockingReason,
+            recommended_attempt_type: resumesApprovedExecution
+              ? "execution"
+              : recoveryGuidance.attemptType,
+            blocking_reason:
+              restoredBlockingReason ??
+              (resumesApprovedExecution ? null : recoveryGuidance.blockingReason),
             summary: clearMessage
           });
       if (!hasActiveAttempt) {
@@ -1758,6 +2015,12 @@ export async function buildServer(
             actor,
             note: body.note?.trim() || null,
             message: clearMessage,
+            recovery_path: resumesApprovedExecution
+              ? "approved_execution_plan"
+              : recoveryGuidance.path,
+            handoff_bundle_ref: resumesApprovedExecution
+              ? null
+              : recoveryGuidance.handoffBundleRef,
             proposed_signature: nextPolicy.proposed_signature,
             source_ref: nextPolicy.source_ref
           }
@@ -1767,7 +2030,15 @@ export async function buildServer(
 
       return {
         current: nextCurrent,
-        policy_runtime: nextPolicy
+        policy_runtime: nextPolicy,
+        recovery: {
+          path: resumesApprovedExecution
+            ? "approved_execution_plan"
+            : recoveryGuidance.path,
+          handoff_bundle_ref: resumesApprovedExecution
+            ? null
+            : recoveryGuidance.handoffBundleRef
+        }
       };
     } catch (error) {
       return reply.code(409).send({
@@ -1783,13 +2054,22 @@ export async function buildServer(
     const { runId } = request.params as { runId: string };
 
     try {
-      const run = await getRun(workspacePaths, runId);
+      const [run, attempts] = await Promise.all([
+        getRun(workspacePaths, runId),
+        listAttempts(workspacePaths, runId)
+      ]);
       const current =
         (await getCurrentDecision(workspacePaths, runId)) ??
         createCurrentDecision({
           run_id: runId,
           run_status: "draft"
         });
+      const recoveryGuidance = await readRunRecoveryGuidance({
+        workspacePaths,
+        runId,
+        current,
+        attempts
+      });
 
       try {
         const ensuredRun = await ensureRunManagedWorkspace({
@@ -1803,12 +2083,19 @@ export async function buildServer(
           await saveRun(workspacePaths, ensuredRun);
         }
 
-        const summary = "隔离工作区已经就绪。重新启动 run 后继续最近决策。";
+        const summary = [
+          "隔离工作区已经就绪。",
+          buildRecoveryResumeSummary({
+            path: recoveryGuidance.path,
+            handoffBundleRef: recoveryGuidance.handoffBundleRef
+          })
+        ].join(" ");
         const nextCurrent = updateCurrentDecision(current, {
           run_status: "waiting_steer",
           waiting_for_human: true,
           recommended_next_action: "wait_for_human",
-          blocking_reason: summary,
+          recommended_attempt_type: recoveryGuidance.attemptType,
+          blocking_reason: recoveryGuidance.blockingReason ?? summary,
           summary
         });
         await saveCurrentDecision(workspacePaths, nextCurrent);
@@ -1827,6 +2114,8 @@ export async function buildServer(
               action: "repair_managed_workspace",
               status: "noop",
               message: summary,
+              recovery_path: recoveryGuidance.path,
+              handoff_bundle_ref: recoveryGuidance.handoffBundleRef,
               managed_workspace_root:
                 ensuredRun.managed_workspace_root ?? ensuredRun.workspace_root
             }
@@ -1840,6 +2129,10 @@ export async function buildServer(
           repair: {
             status: "noop",
             message: summary
+          },
+          recovery: {
+            path: recoveryGuidance.path,
+            handoff_bundle_ref: recoveryGuidance.handoffBundleRef
           }
         };
       } catch (error) {
@@ -1858,12 +2151,16 @@ export async function buildServer(
 
         const summary =
           `隔离工作区已重建，旧现场保留在 ${repair.archived_managed_workspace_root}。` +
-          "重新启动 run 后继续最近决策。";
+          ` ${buildRecoveryResumeSummary({
+            path: recoveryGuidance.path,
+            handoffBundleRef: recoveryGuidance.handoffBundleRef
+          })}`;
         const nextCurrent = updateCurrentDecision(current, {
           run_status: "waiting_steer",
           waiting_for_human: true,
           recommended_next_action: "wait_for_human",
-          blocking_reason: summary,
+          recommended_attempt_type: recoveryGuidance.attemptType,
+          blocking_reason: recoveryGuidance.blockingReason ?? summary,
           summary
         });
         await saveCurrentDecision(workspacePaths, nextCurrent);
@@ -1897,6 +2194,8 @@ export async function buildServer(
               repaired_managed_head: repair.repaired_managed_head,
               source_repo_root: repair.source_repo_root,
               source_head: repair.source_head,
+              recovery_path: recoveryGuidance.path,
+              handoff_bundle_ref: recoveryGuidance.handoffBundleRef,
               message: summary
             }
           })
@@ -1906,7 +2205,11 @@ export async function buildServer(
         return {
           run: repair.run,
           current: nextCurrent,
-          repair
+          repair,
+          recovery: {
+            path: recoveryGuidance.path,
+            handoff_bundle_ref: recoveryGuidance.handoffBundleRef
+          }
         };
       }
     } catch (error) {

@@ -545,23 +545,17 @@ async function verifyRejectRouteForcesResearchReplan(): Promise<void> {
       url: `/runs/${run.id}/launch`
     });
     assert.equal(launchResponse.statusCode, 200);
+    const launchPayload = launchResponse.json() as {
+      current: {
+        run_status: string;
+        recommended_attempt_type: string | null;
+      };
+    };
+    assert.equal(launchPayload.current.run_status, "running");
+    assert.equal(launchPayload.current.recommended_attempt_type, "research");
   } finally {
     await app.close();
   }
-
-  const resumedOrchestrator = await createScenarioOrchestrator({
-    runtimeDataRoot,
-    workspaceRoot,
-    workspacePaths
-  });
-  await driveOrchestratorUntil({
-    orchestrator: resumedOrchestrator,
-    predicate: async () => (await listAttempts(workspacePaths, run.id)).length >= 2
-  });
-
-  const attempts = await listAttempts(workspacePaths, run.id);
-  const latestAttempt = attempts.at(-1) ?? null;
-  assert.equal(latestAttempt?.attempt_type, "research");
 }
 
 async function verifyApproveAndRejectRequirePendingApproval(): Promise<void> {
@@ -758,17 +752,148 @@ async function verifyKillswitchRoutesGateLaunch(): Promise<void> {
     });
     assert.equal(clearResponse.statusCode, 200);
     const clearedPayload = clearResponse.json() as {
+      current: {
+        summary: string;
+        recommended_attempt_type: string | null;
+      };
       policy_runtime: {
         killswitch_active: boolean;
       };
+      recovery: {
+        path: string;
+        handoff_bundle_ref: string | null;
+      };
     };
     assert.equal(clearedPayload.policy_runtime.killswitch_active, false);
+    assert.equal(clearedPayload.current.recommended_attempt_type, "execution");
+    assert.equal(clearedPayload.recovery.path, "approved_execution_plan");
+    assert.match(clearedPayload.current.summary, /approved execution plan/i);
 
     const launchResponse = await app.inject({
       method: "POST",
       url: `/runs/${run.id}/launch`
     });
     assert.equal(launchResponse.statusCode, 200);
+    const launchPayload = launchResponse.json() as {
+      current: {
+        summary: string;
+        recommended_attempt_type: string | null;
+      };
+      recovery: {
+        path: string;
+        handoff_bundle_ref: string | null;
+      };
+    };
+    assert.equal(launchPayload.current.recommended_attempt_type, "execution");
+    assert.equal(launchPayload.recovery.path, "approved_execution_plan");
+    assert.match(launchPayload.current.summary, /approved execution plan/i);
+  } finally {
+    await app.close();
+  }
+}
+
+async function verifyLaunchWithoutHandoffUsesDegradedRecovery(): Promise<void> {
+  const runtimeDataRoot = await createTrackedVerifyTempDir(
+    "aisa-policy-runtime-degraded-launch-"
+  );
+  const workspaceRoot = await createTrackedVerifyTempDir(
+    "aisa-policy-workspace-degraded-launch-"
+  );
+  const workspacePaths = resolveWorkspacePaths(runtimeDataRoot);
+  await ensureWorkspace(workspacePaths);
+  await initializeGitRepo(workspaceRoot);
+
+  const run = createRun({
+    title: "Launch degrades without handoff",
+    description:
+      "Ensure manual relaunch enters an explicit degraded rebuild path when the latest settled attempt has no handoff bundle.",
+    success_criteria: ["Relaunch should prefer degraded research recovery over silent execution fallback."],
+    constraints: [],
+    owner_id: "policy-verify",
+    workspace_root: workspaceRoot
+  });
+  const failedExecution = updateAttempt(
+    createAttempt({
+      run_id: run.id,
+      attempt_type: "execution",
+      worker: "fake-codex",
+      objective: "Leave a settled attempt without a handoff bundle.",
+      success_criteria: run.success_criteria,
+      workspace_root: workspaceRoot
+    }),
+    {
+      status: "failed",
+      started_at: new Date().toISOString(),
+      ended_at: new Date().toISOString()
+    }
+  );
+  const degradedMessage =
+    "Execution failed before writing a settled handoff bundle, so relaunch must rebuild from degraded evidence.";
+
+  await saveRun(workspacePaths, run);
+  await saveAttempt(workspacePaths, failedExecution);
+  await saveCurrentDecision(
+    workspacePaths,
+    createCurrentDecision({
+      run_id: run.id,
+      run_status: "waiting_steer",
+      latest_attempt_id: failedExecution.id,
+      recommended_next_action: "wait_for_human",
+      recommended_attempt_type: "execution",
+      summary: degradedMessage,
+      blocking_reason: degradedMessage,
+      waiting_for_human: true
+    })
+  );
+  await appendRunJournal(
+    workspacePaths,
+    createRunJournalEntry({
+      run_id: run.id,
+      attempt_id: failedExecution.id,
+      type: "attempt.failed",
+      payload: {
+        message: degradedMessage
+      }
+    })
+  );
+
+  const app = await buildServer({
+    runtimeDataRoot,
+    workspaceRoot,
+    startOrchestrator: false
+  });
+  try {
+    const launchResponse = await app.inject({
+      method: "POST",
+      url: `/runs/${run.id}/launch`
+    });
+    assert.equal(launchResponse.statusCode, 200);
+    const launchPayload = launchResponse.json() as {
+      current: {
+        run_status: string;
+        recommended_next_action: string | null;
+        recommended_attempt_type: string | null;
+        summary: string;
+        blocking_reason: string | null;
+      };
+      recovery: {
+        path: string;
+        handoff_bundle_ref: string | null;
+      };
+    };
+    assert.equal(launchPayload.current.run_status, "running");
+    assert.equal(launchPayload.current.recommended_attempt_type, "research");
+    assert.equal(launchPayload.current.recommended_next_action, "continue_research");
+    assert.equal(launchPayload.recovery.path, "degraded_rebuild");
+    assert.equal(launchPayload.recovery.handoff_bundle_ref, null);
+    assert.match(launchPayload.current.summary, /degraded evidence/i);
+    assert.match(launchPayload.current.blocking_reason ?? "", /handoff bundle/i);
+
+    const journal = await listRunJournal(workspacePaths, run.id);
+    const launchedEntry = journal.find((entry) => entry.type === "run.launched");
+    assert.ok(launchedEntry, "launch should record the explicit degraded recovery path");
+    assert.equal(launchedEntry?.payload.recovery_path, "degraded_rebuild");
+    assert.equal(launchedEntry?.payload.handoff_bundle_ref ?? null, null);
   } finally {
     await app.close();
   }
@@ -897,6 +1022,10 @@ async function main(): Promise<void> {
         verifyDangerousVerificationCommandsFailClosed
       ],
       ["killswitch_routes_gate_launch", verifyKillswitchRoutesGateLaunch],
+      [
+        "launch_without_handoff_uses_degraded_recovery",
+        verifyLaunchWithoutHandoffUsesDegradedRecovery
+      ],
       ["corrupt_policy_fails_closed", verifyCorruptPolicyFailsClosed],
       ["killswitch_fails_closed", verifyKillswitchFailsClosed]
     ];

@@ -1118,8 +1118,9 @@ async function main(): Promise<void> {
 
     const resumableRun = createRun({
       title: "Resumable waiting run",
-      description: "Ensure launch turns a waiting run back into an actionable run.",
-      success_criteria: ["resume should create a new execution attempt"],
+      description:
+        "Ensure launch sends a waiting run without a settled handoff into an explicit degraded rebuild path.",
+      success_criteria: ["resume should rebuild through research when no settled handoff exists"],
       constraints: [],
       owner_id: "test-owner",
       workspace_root: projectRoot
@@ -1195,16 +1196,28 @@ async function main(): Promise<void> {
         waiting_for_human: boolean;
         recommended_next_action: string | null;
         recommended_attempt_type: string | null;
+        summary: string | null;
+      };
+      recovery: {
+        path: string;
+        handoff_bundle_ref: string | null;
       };
     };
     assert.equal(resumePayload.current.run_status, "running");
     assert.equal(resumePayload.current.waiting_for_human, false);
     assert.equal(
       resumePayload.current.recommended_next_action,
-      "retry_attempt",
-      "launch should turn wait_for_human into an actionable retry"
+      "continue_research",
+      "launch should enter degraded rebuild when the latest failed execution has no settled handoff"
     );
-    assert.equal(resumePayload.current.recommended_attempt_type, "execution");
+    assert.equal(resumePayload.current.recommended_attempt_type, "research");
+    assert.equal(resumePayload.recovery.path, "degraded_rebuild");
+    assert.equal(resumePayload.recovery.handoff_bundle_ref, null);
+    assert.match(
+      resumePayload.current.summary ?? "",
+      /degraded evidence/i,
+      "launch summary should explain the degraded rebuild path"
+    );
     const resumeAutomation = await getRunAutomationControl(workspacePaths, resumableRun.id);
     assert.equal(
       resumeAutomation?.mode,
@@ -1220,8 +1233,23 @@ async function main(): Promise<void> {
       workspacePaths,
       {
         type: "fake-codex",
-        async runAttemptTask() {
-          throw new Error("launch resume verification should not dispatch worker execution");
+        async runAttemptTask(input: { attempt: { attempt_type: string } }) {
+          if (input.attempt.attempt_type === "execution") {
+            throw new Error("launch resume verification should not dispatch worker execution");
+          }
+
+          return {
+            writeback: {
+              summary: "research rebuild",
+              findings: [],
+              questions: [],
+              recommended_next_steps: [],
+              confidence: 0.5,
+              artifacts: []
+            },
+            reportMarkdown: "# research rebuild",
+            exitCode: 0
+          };
         }
       } as never,
       undefined,
@@ -1231,15 +1259,15 @@ async function main(): Promise<void> {
       }
     );
     await launchOrchestrator.tick();
+    await new Promise((resolve) => setTimeout(resolve, 250));
     const resumedAttempts = await listAttempts(workspacePaths, resumableRun.id);
-    assert.equal(resumedAttempts.length, 1);
+    assert.equal(resumedAttempts.length, 2);
+    assert.equal(resumedAttempts.at(-1)?.attempt_type, "research");
     const resumedCurrent = await getCurrentDecision(workspacePaths, resumableRun.id);
-    assert.equal(resumedCurrent?.run_status, "waiting_steer");
-    assert.equal(resumedCurrent?.waiting_for_human, true);
+    assert.equal(resumedCurrent?.run_status, "running");
+    assert.equal(resumedCurrent?.waiting_for_human, false);
     const resumedPolicy = await getRunPolicyRuntime(workspacePaths, resumableRun.id);
-    assert.equal(resumedPolicy?.stage, "approval");
-    assert.equal(resumedPolicy?.approval_status, "pending");
-    assert.equal(resumedPolicy?.proposed_attempt_type, "execution");
+    assert.ok(resumedPolicy, "relaunch should keep policy runtime readable after degraded rebuild");
 
     const approvalRun = createRun({
       title: "Mailbox approval verification",
@@ -1997,6 +2025,18 @@ async function main(): Promise<void> {
         }>;
       } | null;
       latest_preflight_evaluation_ref: string | null;
+      preflight_evaluation_summary: {
+        status: string;
+        summary: string;
+        failure_class: string | null;
+        failure_policy_mode: string | null;
+        failure_code: string | null;
+        failure_reason: string | null;
+        requires_adversarial_verification: boolean;
+        verifier_kit: string | null;
+        verification_command_count: number;
+        source_ref: string | null;
+      } | null;
       latest_runtime_verification: {
         attempt_id: string;
         status: string;
@@ -2034,6 +2074,16 @@ async function main(): Promise<void> {
         };
       } | null;
       latest_handoff_bundle_ref: string | null;
+      handoff_summary: {
+        summary: string | null;
+        recommended_next_action: string | null;
+        recommended_attempt_type: string | null;
+        failure_class: string | null;
+        failure_policy_mode: string | null;
+        failure_code: string | null;
+        adversarial_failure_code: string | null;
+        source_ref: string | null;
+      } | null;
       run_brief: {
         headline: string;
         summary: string;
@@ -2318,11 +2368,22 @@ async function main(): Promise<void> {
         failure_reason: string | null;
       } | null;
       latest_preflight_evaluation_ref: string | null;
+      preflight_evaluation_summary: {
+        status: string;
+        failure_code: string | null;
+        failure_reason: string | null;
+        source_ref: string | null;
+      } | null;
       latest_handoff_bundle: {
         attempt_id: string;
         failure_code: string | null;
       } | null;
       latest_handoff_bundle_ref: string | null;
+      handoff_summary: {
+        summary: string | null;
+        failure_code: string | null;
+        source_ref: string | null;
+      } | null;
       run_brief: null;
       run_brief_ref: null;
       maintenance_plane: {
@@ -2616,6 +2677,38 @@ async function main(): Promise<void> {
     assert.ok(
       payload.latest_preflight_evaluation_ref?.endsWith("artifacts/preflight-evaluation.json")
     );
+    assert.equal(payload.preflight_evaluation_summary?.status, "failed");
+    assert.equal(
+      payload.preflight_evaluation_summary?.summary,
+      blockerFailureContext.message
+    );
+    assert.equal(
+      payload.preflight_evaluation_summary?.failure_class,
+      "preflight_blocked"
+    );
+    assert.equal(
+      payload.preflight_evaluation_summary?.failure_policy_mode,
+      "fail_closed"
+    );
+    assert.equal(
+      payload.preflight_evaluation_summary?.failure_code,
+      "blocked_pnpm_verification_plan"
+    );
+    assert.equal(
+      payload.preflight_evaluation_summary?.failure_reason,
+      blockerFailureContext.message
+    );
+    assert.equal(
+      payload.preflight_evaluation_summary?.requires_adversarial_verification,
+      true
+    );
+    assert.equal(payload.preflight_evaluation_summary?.verifier_kit, "repo");
+    assert.equal(payload.preflight_evaluation_summary?.verification_command_count, 2);
+    assert.ok(
+      payload.preflight_evaluation_summary?.source_ref?.endsWith(
+        "artifacts/preflight-evaluation.json"
+      )
+    );
     assert.equal(payload.latest_runtime_verification?.attempt_id, attempt.id);
     assert.equal(payload.latest_runtime_verification?.status, "passed");
     assert.equal(payload.latest_runtime_verification?.verifier_kit, "api");
@@ -2654,6 +2747,19 @@ async function main(): Promise<void> {
     assert.ok(
       payload.latest_handoff_bundle_ref?.endsWith("artifacts/handoff_bundle.json")
     );
+    assert.equal(payload.handoff_summary?.summary, blockerFailureContext.message);
+    assert.equal(payload.handoff_summary?.recommended_next_action, "wait_for_human");
+    assert.equal(payload.handoff_summary?.recommended_attempt_type, "execution");
+    assert.equal(payload.handoff_summary?.failure_class, "preflight_blocked");
+    assert.equal(payload.handoff_summary?.failure_policy_mode, "fail_closed");
+    assert.equal(
+      payload.handoff_summary?.failure_code,
+      "blocked_pnpm_verification_plan"
+    );
+    assert.equal(payload.handoff_summary?.adversarial_failure_code, null);
+    assert.ok(
+      payload.handoff_summary?.source_ref?.endsWith("artifacts/handoff_bundle.json")
+    );
     assert.ok(
       payload.latest_handoff_bundle?.source_refs.preflight_evaluation?.endsWith(
         "artifacts/preflight-evaluation.json"
@@ -2671,9 +2777,27 @@ async function main(): Promise<void> {
       payload.run_brief?.failure_signal?.failure_code,
       "blocked_pnpm_verification_plan"
     );
+    assert.ok(payload.run_brief?.summary.includes("接球：需要人工"));
+    assert.ok(
+      payload.run_brief?.summary.includes(
+        "统一失败：preflight_blocked (blocked_pnpm_verification_plan)"
+      )
+    );
+    assert.ok(payload.run_brief?.summary.includes("对抗门：required，未进入"));
+    assert.ok(payload.run_brief?.summary.includes(`焦点：${blockerAttempt.objective}`));
     assert.ok(payload.run_brief_ref?.endsWith("run-brief.json"));
     assert.equal(payload.run_brief_invalid_reason, null);
     assert.equal(payload.run_brief_degraded.is_degraded, false);
+    assert.ok(
+      payload.run_brief?.evidence_refs.some(
+        (item) => item.kind === "failure_signal" && item.label === "统一失败信号"
+      )
+    );
+    assert.ok(
+      payload.run_brief?.evidence_refs.some(
+        (item) => item.kind === "adversarial_gate" && item.label === "Postflight Gate"
+      )
+    );
     assert.ok(payload.maintenance_plane_ref?.endsWith("artifacts/maintenance-plane.json"));
     assert.equal(payload.maintenance_plane?.blocked_diagnosis.status, "attention");
     assert.equal(
@@ -2800,9 +2924,16 @@ async function main(): Promise<void> {
       writeFailedWorkingContextPayload.run_brief?.failure_signal?.failure_class,
       "working_context_degraded"
     );
-    assert.equal(
-      staleReadableRunBriefPayload.run_brief?.summary,
-      staleReadableOldFailureReason
+    assert.ok(staleReadableRunBriefPayload.run_brief?.summary.includes("接球：需要人工"));
+    assert.ok(
+      staleReadableRunBriefPayload.run_brief?.summary.includes(
+        "统一失败：preflight_blocked (blocked_pnpm_verification_plan)"
+      )
+    );
+    assert.ok(
+      staleReadableRunBriefPayload.run_brief?.summary.includes(
+        `焦点：${staleReadableRunBriefAttempt.objective}`
+      )
     );
     assert.ok(staleReadableRunBriefPayload.run_brief_ref?.endsWith("run-brief.json"));
     assert.equal(staleReadableRunBriefPayload.run_brief_degraded.is_degraded, true);
@@ -3007,6 +3138,20 @@ async function main(): Promise<void> {
         "artifacts/preflight-evaluation.json"
       )
     );
+    assert.equal(missingRunBriefPayload.preflight_evaluation_summary?.status, "failed");
+    assert.equal(
+      missingRunBriefPayload.preflight_evaluation_summary?.failure_code,
+      "blocked_pnpm_verification_plan"
+    );
+    assert.equal(
+      missingRunBriefPayload.preflight_evaluation_summary?.failure_reason,
+      missingRunBriefFailureReason
+    );
+    assert.ok(
+      missingRunBriefPayload.preflight_evaluation_summary?.source_ref?.endsWith(
+        "artifacts/preflight-evaluation.json"
+      )
+    );
     assert.equal(
       missingRunBriefPayload.latest_handoff_bundle?.attempt_id,
       missingRunBriefAttempt.id
@@ -3017,6 +3162,19 @@ async function main(): Promise<void> {
     );
     assert.ok(
       missingRunBriefPayload.latest_handoff_bundle_ref?.endsWith("artifacts/handoff_bundle.json")
+    );
+    assert.equal(
+      missingRunBriefPayload.handoff_summary?.summary,
+      missingRunBriefFailureReason
+    );
+    assert.equal(
+      missingRunBriefPayload.handoff_summary?.failure_code,
+      "blocked_pnpm_verification_plan"
+    );
+    assert.ok(
+      missingRunBriefPayload.handoff_summary?.source_ref?.endsWith(
+        "artifacts/handoff_bundle.json"
+      )
     );
     assert.equal(
       missingRunBriefPayload.maintenance_plane?.blocked_diagnosis.status,
@@ -3105,6 +3263,18 @@ async function main(): Promise<void> {
           } | null;
         } | null;
         latest_preflight_evaluation_ref: string | null;
+        preflight_evaluation_summary: {
+          status: string;
+          summary: string;
+          failure_class: string | null;
+          failure_policy_mode: string | null;
+          failure_code: string | null;
+          failure_reason: string | null;
+          requires_adversarial_verification: boolean;
+          verifier_kit: string | null;
+          verification_command_count: number;
+          source_ref: string | null;
+        } | null;
         latest_runtime_verification: {
           attempt_id: string;
           status: string;
@@ -3136,6 +3306,16 @@ async function main(): Promise<void> {
           };
         } | null;
         latest_handoff_bundle_ref: string | null;
+        handoff_summary: {
+          summary: string | null;
+          recommended_next_action: string | null;
+          recommended_attempt_type: string | null;
+          failure_class: string | null;
+          failure_policy_mode: string | null;
+          failure_code: string | null;
+          adversarial_failure_code: string | null;
+          source_ref: string | null;
+        } | null;
         run_brief: {
           latest_attempt_id: string | null;
           headline: string;
@@ -3276,6 +3456,38 @@ async function main(): Promise<void> {
     assert.ok(
       runSummary?.latest_preflight_evaluation_ref?.endsWith("artifacts/preflight-evaluation.json")
     );
+    assert.equal(runSummary?.preflight_evaluation_summary?.status, "failed");
+    assert.equal(
+      runSummary?.preflight_evaluation_summary?.summary,
+      blockerFailureContext.message
+    );
+    assert.equal(
+      runSummary?.preflight_evaluation_summary?.failure_class,
+      "preflight_blocked"
+    );
+    assert.equal(
+      runSummary?.preflight_evaluation_summary?.failure_policy_mode,
+      "fail_closed"
+    );
+    assert.equal(
+      runSummary?.preflight_evaluation_summary?.failure_code,
+      "blocked_pnpm_verification_plan"
+    );
+    assert.equal(
+      runSummary?.preflight_evaluation_summary?.failure_reason,
+      blockerFailureContext.message
+    );
+    assert.equal(
+      runSummary?.preflight_evaluation_summary?.requires_adversarial_verification,
+      true
+    );
+    assert.equal(runSummary?.preflight_evaluation_summary?.verifier_kit, "repo");
+    assert.equal(runSummary?.preflight_evaluation_summary?.verification_command_count, 2);
+    assert.ok(
+      runSummary?.preflight_evaluation_summary?.source_ref?.endsWith(
+        "artifacts/preflight-evaluation.json"
+      )
+    );
     assert.equal(runSummary?.latest_runtime_verification?.attempt_id, attempt.id);
     assert.equal(runSummary?.latest_runtime_verification?.status, "passed");
     assert.equal(runSummary?.latest_runtime_verification?.verifier_kit, "api");
@@ -3312,6 +3524,19 @@ async function main(): Promise<void> {
     assert.ok(
       runSummary?.latest_handoff_bundle_ref?.endsWith("artifacts/handoff_bundle.json")
     );
+    assert.equal(runSummary?.handoff_summary?.summary, blockerFailureContext.message);
+    assert.equal(runSummary?.handoff_summary?.recommended_next_action, "wait_for_human");
+    assert.equal(runSummary?.handoff_summary?.recommended_attempt_type, "execution");
+    assert.equal(runSummary?.handoff_summary?.failure_class, "preflight_blocked");
+    assert.equal(runSummary?.handoff_summary?.failure_policy_mode, "fail_closed");
+    assert.equal(
+      runSummary?.handoff_summary?.failure_code,
+      "blocked_pnpm_verification_plan"
+    );
+    assert.equal(runSummary?.handoff_summary?.adversarial_failure_code, null);
+    assert.ok(
+      runSummary?.handoff_summary?.source_ref?.endsWith("artifacts/handoff_bundle.json")
+    );
     assert.ok(
       runSummary?.latest_handoff_bundle?.source_refs.preflight_evaluation?.endsWith(
         "artifacts/preflight-evaluation.json"
@@ -3321,7 +3546,14 @@ async function main(): Promise<void> {
     assert.equal(runSummary?.latest_handoff_bundle?.adversarial_verification, null);
     assert.equal(runSummary?.run_brief?.latest_attempt_id, blockerAttempt.id);
     assert.equal(runSummary?.run_brief?.headline, blockerFailureContext.message);
-    assert.equal(runSummary?.run_brief?.summary, blockerFailureContext.message);
+    assert.ok(runSummary?.run_brief?.summary.includes("接球：需要人工"));
+    assert.ok(
+      runSummary?.run_brief?.summary.includes(
+        "统一失败：preflight_blocked (blocked_pnpm_verification_plan)"
+      )
+    );
+    assert.ok(runSummary?.run_brief?.summary.includes("对抗门：required，未进入"));
+    assert.ok(runSummary?.run_brief?.summary.includes(`焦点：${blockerAttempt.objective}`));
     assert.equal(runSummary?.run_brief?.primary_focus, blockerAttempt.objective);
     assert.equal(runSummary?.run_brief?.failure_signal?.failure_class, "preflight_blocked");
     assert.equal(
@@ -3331,6 +3563,16 @@ async function main(): Promise<void> {
     assert.ok(runSummary?.run_brief_ref?.endsWith("run-brief.json"));
     assert.equal(runSummary?.run_brief_invalid_reason, null);
     assert.equal(runSummary?.run_brief_degraded.is_degraded, false);
+    assert.ok(
+      runSummary?.run_brief?.evidence_refs.some(
+        (item) => item.kind === "failure_signal" && item.label === "统一失败信号"
+      )
+    );
+    assert.ok(
+      runSummary?.run_brief?.evidence_refs.some(
+        (item) => item.kind === "adversarial_gate" && item.label === "Postflight Gate"
+      )
+    );
     assert.ok(runSummary?.maintenance_plane_ref?.endsWith("artifacts/maintenance-plane.json"));
     assert.equal(runSummary?.maintenance_plane?.blocked_diagnosis.status, "attention");
     assert.ok(
@@ -3410,9 +3652,16 @@ async function main(): Promise<void> {
           item.summary === "run brief 写入失败，控制面摘要已退化。"
       )
     );
-    assert.equal(
-      staleReadableRunBriefSummary?.run_brief?.summary,
-      staleReadableOldFailureReason
+    assert.ok(staleReadableRunBriefSummary?.run_brief?.summary.includes("接球：需要人工"));
+    assert.ok(
+      staleReadableRunBriefSummary?.run_brief?.summary.includes(
+        "统一失败：preflight_blocked (blocked_pnpm_verification_plan)"
+      )
+    );
+    assert.ok(
+      staleReadableRunBriefSummary?.run_brief?.summary.includes(
+        `焦点：${staleReadableRunBriefAttempt.objective}`
+      )
     );
     assert.equal(staleReadableRunBriefSummary?.run_brief_degraded.is_degraded, true);
     assert.equal(

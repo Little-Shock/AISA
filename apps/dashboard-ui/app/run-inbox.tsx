@@ -6,9 +6,12 @@ import {
 } from "./copy";
 import {
   readFailureSurface,
+  readHandoffSummary,
   readMaintenancePlane,
   readPolicyRuntime,
+  readPreflightSummary,
   readRunBrief,
+  readWorkingContextSignal,
   readWorkingContext
 } from "./dashboard-read-model";
 import {
@@ -48,10 +51,10 @@ const FOCUS_LENS_OPTIONS: Array<{
   label: string;
 }> = [
   { lens: "all", label: "全部信号" },
-  { lens: "waiting_human", label: "等待人工" },
-  { lens: "replay_gap", label: "缺回放契约" },
-  { lens: "runtime_fault", label: "runtime 风险" },
-  { lens: "unstarted", label: "未启动" }
+  { lens: "waiting_human", label: "需要你处理" },
+  { lens: "replay_gap", label: "验证记录不完整" },
+  { lens: "runtime_fault", label: "运行出错" },
+  { lens: "unstarted", label: "还没开始" }
 ];
 
 const PRESET_OPTIONS: Array<{
@@ -63,29 +66,29 @@ const PRESET_OPTIONS: Array<{
 }> = [
   {
     key: "human-handoff",
-    label: "待人工接球",
-    description: "明确等待人工、blocking reason 已出现的 run。",
+    label: "需要你处理",
+    description: "已经明确要你拍板，或已经出现卡点的 run。",
     filter: "needs_action",
     lens: "waiting_human"
   },
   {
     key: "runtime-risk",
-    label: "Runtime 风险",
+    label: "运行出错",
     description: "当前更像会卡死、报错或信号异常的问题。",
     filter: "needs_action",
     lens: "runtime_fault"
   },
   {
     key: "replay-gap",
-    label: "缺回放契约",
-    description: "execution 已开始，但 operator 还不能放心让 runtime 自证。",
+    label: "验证记录不完整",
+    description: "已经开始执行，但验证记录还不完整的 run。",
     filter: "all",
     lens: "replay_gap"
   },
   {
     key: "cold-start",
-    label: "冷启动池",
-    description: "还没真正开始的 run，适合补首次 attempt 或 steer。",
+    label: "还没开始",
+    description: "还没真正开始的 run，适合补首次尝试或 steer。",
     filter: "watch",
     lens: "unstarted"
   }
@@ -93,6 +96,14 @@ const PRESET_OPTIONS: Array<{
 
 function runHealthLabel(status: string | null | undefined): string {
   return status ? statusLabel(status) : "未知";
+}
+
+function workingContextStateLabel(hasRef: boolean, isDegraded: boolean): string {
+  if (isDegraded) {
+    return "降级";
+  }
+
+  return hasRef ? "已落盘" : "未落盘";
 }
 
 function selectionTone(
@@ -123,7 +134,7 @@ function describeInboxSelection(
 ) {
   if (activePreset) {
     return {
-      eyebrow: "Operator Preset",
+      eyebrow: "快捷筛选",
       title: activePreset.label,
       description: activePreset.description,
       countLabel: filteredCount === 1 ? "1 条 run 命中" : `${filteredCount} 条 run 命中`,
@@ -139,7 +150,7 @@ function describeInboxSelection(
   if (activeFilter === "all") {
     descriptionParts.push("当前先看整个运行池。");
   } else if (activeFilter === "needs_action") {
-    descriptionParts.push("当前优先扫明确需介入或风险偏高的运行。");
+    descriptionParts.push("当前优先看明确需要你处理或风险偏高的运行。");
   } else if (activeFilter === "active") {
     descriptionParts.push("当前只看仍在持续推进的运行。");
   } else {
@@ -147,17 +158,17 @@ function describeInboxSelection(
   }
 
   if (focusLens === "waiting_human") {
-    descriptionParts.push("列表进一步收窄到等待人工或已有 blocking reason 的 run。");
+    descriptionParts.push("列表进一步收窄到已经明确需要你处理或已有卡点的 run。");
   } else if (focusLens === "replay_gap") {
-    descriptionParts.push("列表进一步强调已经执行、但缺少回放契约的 run。");
+    descriptionParts.push("列表进一步强调已经执行、但验证记录还不完整的 run。");
   } else if (focusLens === "runtime_fault") {
-    descriptionParts.push("列表进一步强调 runtime 报错或心跳陈旧的 run。");
+    descriptionParts.push("列表进一步强调运行报错或心跳陈旧的 run。");
   } else if (focusLens === "unstarted") {
-    descriptionParts.push("列表进一步强调还没跑出首个 attempt 的 run。");
+    descriptionParts.push("列表进一步强调还没跑出第一次尝试的 run。");
   }
 
   return {
-    eyebrow: "Current Slice",
+    eyebrow: "当前视图",
     title:
       activeFilter === "all" && focusLens === "all"
         ? "全部运行"
@@ -174,27 +185,27 @@ function emptyStateText(
   activePreset: (typeof PRESET_OPTIONS)[number] | null
 ): string {
   if (activePreset) {
-    return `当前“${activePreset.label}”预设下没有运行任务，可以切到其他预设继续巡检。`;
+    return `当前“${activePreset.label}”下没有运行任务，可以切到其他筛选继续巡检。`;
   }
 
   if (focusLens === "waiting_human") {
-    return "当前没有等待人工或明确 blocking reason 的运行。";
+    return "当前没有明确需要你处理或已经出现卡点的运行。";
   }
 
   if (focusLens === "replay_gap") {
-    return "当前没有命中“缺回放契约”的运行。";
+    return "当前没有命中“验证记录不完整”的运行。";
   }
 
   if (focusLens === "runtime_fault") {
-    return "当前没有 runtime 错误或心跳陈旧的运行。";
+    return "当前没有运行报错或心跳陈旧的运行。";
   }
 
   if (focusLens === "unstarted") {
-    return "当前没有尚未启动的运行。";
+    return "当前没有还没开始的运行。";
   }
 
   if (activeFilter === "needs_action") {
-    return "当前没有需要人工介入或优先排查的运行。";
+    return "当前没有需要你处理或优先排查的运行。";
   }
 
   if (activeFilter === "active") {
@@ -223,17 +234,19 @@ export function InterventionQueuePanel({
 
   return (
     <Panel
-      title={`人工介入队列 · ${queuedRuns.length}`}
-      subtitle="先处理明确卡住、等待人工或实时信号异常的运行。"
+      title={`优先处理队列 · ${queuedRuns.length}`}
+      subtitle="先处理明确卡住、需要你处理或实时信号异常的运行。"
     >
       <div className="intervention-queue">
         {queuedRuns.length === 0 ? (
-          <EmptyState text="当前没有需要立刻人工接管的运行。" />
+          <EmptyState text="当前没有需要立刻处理的运行。" />
         ) : (
           queuedRuns.map(({ run, state }) => {
             const selected = run.run.id === selectedRunId;
             const signalBadges = deriveRunSignalBadges(run, nowTs).slice(0, 3);
             const runBrief = readRunBrief(run);
+            const handoffSummary = readHandoffSummary(run);
+            const preflightSummary = readPreflightSummary(run);
             return (
               <button
                 key={run.run.id}
@@ -255,17 +268,37 @@ export function InterventionQueuePanel({
                 <MeasuredText
                   className="queue-card-summary"
                   lines={2}
-                  text={truncateText(localizeUiText(runBrief.headline || state.reason), 180)}
+                  text={truncateText(
+                    localizeUiText(
+                      handoffSummary.summary ??
+                        preflightSummary.summary ??
+                        runBrief.headline ??
+                        state.reason
+                    ),
+                    180
+                  )}
                 />
                 <MeasuredText
                   className="queue-card-summary"
                   lines={2}
-                  text={truncateText(localizeUiText(runBrief.summary ?? state.recovery_hint), 180)}
+                  text={truncateText(
+                    localizeUiText(
+                      preflightSummary.failure_reason ??
+                        preflightSummary.summary ??
+                        runBrief.summary ??
+                        state.recovery_hint
+                    ),
+                    180
+                  )}
                 />
                 <div className="queue-card-meta">
-                  {runBrief.recommended_next_action
-                    ? `下一动作 ${nextActionLabel(runBrief.recommended_next_action)}`
-                    : "先看详情"}
+                  {handoffSummary.recommended_next_action
+                    ? `交接建议 ${nextActionLabel(handoffSummary.recommended_next_action)}`
+                    : preflightSummary.status
+                      ? `发车前 ${statusLabel(preflightSummary.status)}`
+                      : runBrief.recommended_next_action
+                        ? `下一动作 ${nextActionLabel(runBrief.recommended_next_action)}`
+                        : "先看详情"}
                   {runBrief.updated_at
                     ? ` · 最近判断 ${formatRelativeTime(runBrief.updated_at, nowTs)}`
                     : ""}
@@ -312,9 +345,9 @@ export function RunInboxPanel({
   return (
     <Panel
       title={`运行池 · ${runs.length}`}
-      subtitle="先用运行状态分组，再用 operator focus lens 缩小真正要优先看的 run。"
+      subtitle="先按运行状态分组，再按你最关心的问题缩小真正要优先看的 run。"
     >
-      <div className="preset-grid" aria-label="operator presets">
+      <div className="preset-grid" aria-label="快捷筛选">
         {PRESET_OPTIONS.map((option) => {
           const presetCount = filterRunsByFocusLens(
             filterRunsByInboxState(runs, option.filter, nowTs),
@@ -353,7 +386,7 @@ export function RunInboxPanel({
             }`} />
             {focusLens !== "all" ? (
               <InlineTag
-                label={`Focus · ${
+                label={`聚焦 · ${
                   FOCUS_LENS_OPTIONS.find((option) => option.lens === focusLens)?.label ?? "全部信号"
                 }`}
                 tone="amber"
@@ -380,7 +413,7 @@ export function RunInboxPanel({
         ))}
       </div>
 
-      <div className="filter-row filter-row-secondary" aria-label="operator focus lens">
+      <div className="filter-row filter-row-secondary" aria-label="优先视角">
         {FOCUS_LENS_OPTIONS.map((option) => (
           <button
             key={option.lens}
@@ -402,23 +435,32 @@ export function RunInboxPanel({
             const runBrief = readRunBrief(item);
             const policyRuntime = readPolicyRuntime(item);
             const workingContext = readWorkingContext(item);
+            const workingContextSignal = readWorkingContextSignal(item);
             const maintenancePlane = readMaintenancePlane(item);
             const failureSurface = readFailureSurface(item);
+            const handoffSummary = readHandoffSummary(item);
+            const preflightSummary = readPreflightSummary(item);
             const operatorState = deriveRunOperatorState(item, nowTs);
             const priority = deriveRunPriorityInfo(item, focusLens, nowTs);
             const signalBadges = deriveRunSignalBadges(item, nowTs).slice(0, 4);
             const inboxReasons = deriveRunInboxReasons(item, activeFilter, focusLens, nowTs);
             const taskFocus = truncateText(
               localizeUiText(
-                workingContext.current_focus ?? item.task_focus ?? item.run.description
+                handoffSummary.summary ??
+                  preflightSummary.summary ??
+                  workingContext.current_focus ??
+                  item.task_focus ??
+                  item.run.description
               ),
               120
             );
             const taskSummary = truncateText(
               localizeUiText(
-                failureSurface?.summary ??
+                preflightSummary.failure_reason ??
+                  preflightSummary.summary ??
+                  handoffSummary.summary ??
+                  failureSurface?.summary ??
                   runBrief.summary ??
-                  item.latest_handoff_bundle?.summary ??
                   item.latest_adversarial_verification?.failure_reason ??
                   item.latest_runtime_verification?.failure_reason ??
                   item.run.description
@@ -501,6 +543,38 @@ export function RunInboxPanel({
                     ))}
                   </div>
                 ) : null}
+                {handoffSummary.summary || preflightSummary.status ? (
+                  <div className="triage-hit-row">
+                    {handoffSummary.summary ? (
+                      <span className="triage-hit">
+                        {`交接 · ${truncateText(localizeUiText(handoffSummary.summary), 72)}`}
+                      </span>
+                    ) : null}
+                    {preflightSummary.status ? (
+                      <span className="triage-hit">
+                        {`发车前 · ${statusLabel(preflightSummary.status)}`}
+                      </span>
+                    ) : null}
+                  </div>
+                ) : null}
+                {workingContextSignal.artifact_ref || workingContextSignal.is_degraded ? (
+                  <div className="triage-hit-row">
+                    <span className="triage-hit">
+                      {`现场记录 · ${workingContextStateLabel(
+                        Boolean(workingContextSignal.artifact_ref),
+                        workingContextSignal.is_degraded
+                      )}`}
+                    </span>
+                    {workingContextSignal.current_snapshot_ref ? (
+                      <span className="triage-hit">
+                        {`快照 · ${truncateText(
+                          workingContextSignal.current_snapshot_ref,
+                          56
+                        )}`}
+                      </span>
+                    ) : null}
+                  </div>
+                ) : null}
                 <div className="run-card-chips">
                   <span className="run-card-chip">尝试 {item.attempt_count}</span>
                   <span className="run-card-chip">
@@ -522,17 +596,48 @@ export function RunInboxPanel({
                   >
                     健康 {healthStatus}
                   </span>
+                  <span
+                    className={`run-card-chip ${
+                      workingContextSignal.is_degraded
+                        ? "run-card-chip-rose"
+                        : workingContextSignal.artifact_ref
+                          ? "run-card-chip-emerald"
+                          : "run-card-chip-amber"
+                    }`}
+                  >
+                    {`现场 ${workingContextStateLabel(
+                      Boolean(workingContextSignal.artifact_ref),
+                      workingContextSignal.is_degraded
+                    )}`}
+                  </span>
                   {runningSince ? (
                     <span className="run-card-chip run-card-chip-live">
                       已跑 {formatElapsed(runningSince, nowTs)}
                     </span>
                   ) : null}
                   {runBrief.waiting_for_human ? (
-                    <span className="run-card-chip run-card-chip-alert">等待人工</span>
+                    <span className="run-card-chip run-card-chip-alert">需要处理</span>
                   ) : null}
                 </div>
                 <MeasuredText className="run-card-summary" lines={3} text={taskSummary} />
-                {runBrief.summary ? (
+                {handoffSummary.summary ? (
+                  <MeasuredText
+                    className="run-card-summary"
+                    lines={2}
+                    text={truncateText(localizeUiText(handoffSummary.summary), 120)}
+                  />
+                ) : null}
+                {preflightSummary.summary &&
+                preflightSummary.summary !== handoffSummary.summary ? (
+                  <MeasuredText
+                    className="run-card-summary"
+                    lines={2}
+                    text={truncateText(localizeUiText(preflightSummary.summary), 120)}
+                  />
+                ) : null}
+                {runBrief.summary &&
+                runBrief.summary !== handoffSummary.summary &&
+                runBrief.summary !== preflightSummary.summary ? (
                   <MeasuredText
                     className="run-card-summary"
                     lines={2}
@@ -541,6 +646,26 @@ export function RunInboxPanel({
                 ) : null}
                 {liveProgress ? (
                   <MeasuredText className="run-card-summary" lines={2} text={liveProgress} />
+                ) : null}
+                {workingContextSignal.degraded_summary ? (
+                  <MeasuredText
+                    className="run-card-summary"
+                    lines={2}
+                    text={truncateText(
+                      localizeUiText(workingContextSignal.degraded_summary),
+                      120
+                    )}
+                  />
+                ) : null}
+                {workingContextSignal.artifact_ref ? (
+                  <MeasuredText
+                    className="run-card-summary run-card-summary-terminal"
+                    lines={2}
+                    text={truncateText(
+                      `现场记录快照：${workingContextSignal.artifact_ref}`,
+                      120
+                    )}
+                  />
                 ) : null}
                 {governanceHeadline ? (
                   <MeasuredText
@@ -552,7 +677,14 @@ export function RunInboxPanel({
                 <MeasuredText
                   className="run-card-summary"
                   lines={2}
-                  text={truncateText(priority.reason, 180)}
+                  text={truncateText(
+                    handoffSummary.recommended_next_action
+                      ? `交接建议：${nextActionLabel(handoffSummary.recommended_next_action)}`
+                      : preflightSummary.status
+                        ? `发车前状态：${statusLabel(preflightSummary.status)}`
+                        : priority.reason,
+                    180
+                  )}
                 />
                 <MeasuredText
                   className="run-card-summary"

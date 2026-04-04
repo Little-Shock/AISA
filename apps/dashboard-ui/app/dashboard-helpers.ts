@@ -354,7 +354,7 @@ export function deriveRunSignalBadges(
           (maintenancePlane.stale_after_ms ?? WORKER_HEARTBEAT_STALE_MS)));
 
   if (runBrief.waiting_for_human) {
-    badges.push({ key: "waiting-human", label: "等待人工", tone: "rose" });
+    badges.push({ key: "waiting-human", label: "需要处理", tone: "rose" });
   }
 
   if (failureSignal) {
@@ -430,9 +430,9 @@ export function deriveRunInboxReasons(
 
   if (lens === "waiting_human") {
     if (runBrief.waiting_for_human) {
-      reasons.push("明确在等待人工接球。");
+      reasons.push("这条运行已经明确需要你处理。");
     } else if (runBrief.blocking_reason) {
-      reasons.push("blocking reason 已出现，适合先人工判断。");
+      reasons.push("已经出现卡点原因，适合先人工判断。");
     }
   }
 
@@ -441,13 +441,13 @@ export function deriveRunInboxReasons(
       item.latest_attempt?.attempt_type === "execution" &&
       item.verification_command_count === 0
     ) {
-      reasons.push("执行已开始，但还没有回放验证约定。");
+      reasons.push("执行已开始，但验证记录还没补齐。");
     }
   }
 
   if (lens === "runtime_fault") {
     if (failureSurface?.source === "runtime" && failureSurface.summary) {
-      reasons.push("runtime 已上报错误。");
+      reasons.push("运行已经报错。");
     }
     if (staleHeartbeat) {
       reasons.push("worker 心跳已陈旧，先确认是否假活。");
@@ -455,7 +455,7 @@ export function deriveRunInboxReasons(
   }
 
   if (lens === "unstarted" && !item.latest_attempt) {
-    reasons.push("还没有首个 attempt，可优先冷启动。");
+    reasons.push("还没有第一次尝试，可以优先启动。");
   }
 
   if (filter === "needs_action") {
@@ -522,8 +522,8 @@ export function deriveRunPriorityInfo(
 
   if (replayGap) {
     score = 78;
-    label = "P1 回放债务";
-    reason = "execution 已发生，但 operator 还拿不到可回放的验证契约。";
+    label = "P1 验证记录不完整";
+    reason = "已经开始执行，但验证记录还不完整。";
     tone = "amber";
   }
 
@@ -559,15 +559,15 @@ export function deriveRunPriorityInfo(
 
   if (hasRuntimeError) {
     score = 106;
-    label = "P0 Runtime 故障";
-    reason = "runtime 已明确报错，优先级高于普通等待和观察。";
+    label = "P0 运行出错";
+    reason = "运行已经明确报错，优先级高于普通等待和观察。";
     tone = "rose";
   }
 
   if (waitingForHuman) {
     score = 114;
-    label = "P0 人工接球";
-    reason = "运行明确等待人工输入，应该最先处理。";
+    label = "P0 需要你处理";
+    reason = "运行已经明确需要你处理，应该最先处理。";
     tone = "rose";
   }
 
@@ -634,11 +634,11 @@ export function deriveRunOperatorChecklist(
           (maintenancePlane.stale_after_ms ?? WORKER_HEARTBEAT_STALE_MS)));
 
   if (runBrief.waiting_for_human) {
-    checklist.push("先处理人工决策：确认是补 steer、继续下一尝试，还是暂时挂起。");
+    checklist.push("先处理这条需要你拍板的事：确认是补 steer、继续下一次尝试，还是暂时挂起。");
   }
 
   if (runBrief.blocking_reason) {
-    checklist.push("先看 blocking reason 与当前判断，确认卡点是环境问题、策略问题，还是缺人工输入。");
+    checklist.push("先看卡点原因与当前建议，确认问题是环境、策略，还是缺人工输入。");
   }
 
   if (failureSurface?.source === "runtime" && failureSurface.summary) {
@@ -646,7 +646,7 @@ export function deriveRunOperatorChecklist(
   }
 
   if (item.working_context_degraded?.is_degraded) {
-    checklist.push("先读 run detail 顶部的 working context 区块，确认现场是缺失、过期，还是写入失败。");
+    checklist.push("先读 run detail 顶部的现场记录区块，确认现场是缺失、过期，还是写入失败。");
   }
 
   if (staleHeartbeat) {
@@ -676,7 +676,7 @@ export function deriveRunOperatorChecklist(
   }
 
   if (checklist.length === 0) {
-    checklist.push("当前没有明显风险信号，继续观察 recent activities、回放结果和最终输出。");
+    checklist.push("当前没有明显风险信号，继续观察最近活动、回放结果和最终输出。");
   }
 
   return checklist;
@@ -696,7 +696,7 @@ function inferRecoveryHint(item: RunSummaryItem, staleHeartbeat: boolean): strin
     .toLowerCase();
 
   if (failureSignal?.failure_class === "preflight_blocked") {
-    return "先读发车前结论和对应契约，再补齐硬门、验证计划或工具链。";
+    return "先读发车前结果和对应约定，再补齐硬门、验证计划或工具链。";
   }
 
   if (failureSignal?.failure_class === "runtime_verification_failed") {
@@ -708,7 +708,7 @@ function inferRecoveryHint(item: RunSummaryItem, staleHeartbeat: boolean): strin
   }
 
   if (failureSignal?.failure_class === "handoff_incomplete") {
-    return "先补出 handoff bundle，再继续自动续跑或人工接手。";
+    return "先补出交接说明，再继续自动续跑或人工接手。";
   }
 
   if (detail.includes("restart") || detail.includes("source drift")) {
@@ -733,11 +733,11 @@ function inferRecoveryHint(item: RunSummaryItem, staleHeartbeat: boolean): strin
   }
 
   if (item.working_context_degraded?.is_degraded) {
-    return "先修 working context 现场，再决定要不要继续长任务；不要在现场失真的情况下硬推下一轮。";
+    return "先修现场记录，再决定要不要继续长任务；不要在现场失真的情况下硬推下一轮。";
   }
 
   if (runBrief.waiting_for_human) {
-    return "先看当前判断、最近尝试和回放结果，再决定是补 steer、重试，还是继续下一次尝试。";
+    return "先看处理建议、最近尝试和回放结果，再决定是补 steer、重试，还是继续下一次尝试。";
   }
 
   if (!item.latest_attempt) {

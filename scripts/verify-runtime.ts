@@ -94,6 +94,17 @@ type RunLoopReport = {
   }>;
 };
 
+type JudgeEvalsReport = {
+  suite: string;
+  passed: number;
+  failed: number;
+  results: Array<{
+    id: string;
+    status: "pass" | "fail";
+    error?: string;
+  }>;
+};
+
 type ScriptResult = {
   exitCode: number | null;
   stdout: string;
@@ -356,6 +367,22 @@ async function assertEvaluatorCalibrationReplay(): Promise<void> {
   );
 }
 
+async function assertJudgeEvalsReplay(): Promise<JudgeEvalsReport> {
+  const result = await runTsxScript("scripts/verify-judge-evals.ts");
+  assert.equal(
+    result.exitCode,
+    0,
+    formatScriptFailure("scripts/verify-judge-evals.ts", result)
+  );
+
+  const report = parseScriptJsonReport<JudgeEvalsReport>(
+    "scripts/verify-judge-evals.ts",
+    result.stdout
+  );
+  assert.equal(report.failed, 0, "judge/evals focused replay should not report failed cases.");
+  return report;
+}
+
 async function assertDashboardControlSurfaceReplay(): Promise<void> {
   const result = await runCommand("pnpm", ["verify:dashboard-control-surface"]);
   assert.equal(
@@ -551,6 +578,7 @@ async function assertHistoryContractDriftClean(): Promise<HistoryContractDriftRe
 }
 
 async function runSelfBootstrapHealthSnapshotReplay(): Promise<{
+  judgeEvals: JudgeEvalsReport;
   workerAdapter: WorkerAdapterReport;
   driveRun: VerifyDriveRunReport;
   runAutonomy: RunAutonomyReport;
@@ -559,6 +587,7 @@ async function runSelfBootstrapHealthSnapshotReplay(): Promise<{
   historyContractDrift: HistoryContractDriftReport;
 }> {
   await assertRunLoopReplay("happy_path");
+  const judgeEvals = await assertJudgeEvalsReplay();
   await assertEvaluatorCalibrationReplay();
   await assertControlApiSupervisorReplay();
   await assertWorkingContextReplay();
@@ -576,6 +605,7 @@ async function runSelfBootstrapHealthSnapshotReplay(): Promise<{
   const historyContractDrift = await assertHistoryContractDriftClean();
 
   return {
+    judgeEvals,
     workerAdapter,
     driveRun,
     runAutonomy,
@@ -611,6 +641,11 @@ async function main(): Promise<void> {
           skipped_suites: ["runtime_lanes", "run_detail_api", "self_bootstrap"],
           evaluator_calibration: {
             status: "passed"
+          },
+          judge_evals: {
+            status: "passed",
+            passed: scopedReport.judgeEvals.passed,
+            failed: scopedReport.judgeEvals.failed
           },
           worker_adapter: {
             status: scopedReport.workerAdapter.status,
@@ -658,6 +693,7 @@ async function main(): Promise<void> {
   }
 
   await assertRunLoopReplay();
+  const judgeEvals = await assertJudgeEvalsReplay();
   await assertEvaluatorCalibrationReplay();
   await assertControlApiSupervisorReplay();
   await assertRuntimeLaneReplay();
@@ -692,6 +728,11 @@ async function main(): Promise<void> {
         },
         evaluator_calibration: {
           status: "passed"
+        },
+        judge_evals: {
+          status: "passed",
+          passed: judgeEvals.passed,
+          failed: judgeEvals.failed
         },
         control_api_supervisor: {
           status: "passed"

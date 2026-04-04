@@ -231,18 +231,23 @@ function hudMetricLabel(label: string): string {
     case "尝试数":
       return "ATTEMPTS";
     case "等待人工":
+    case "需要处理":
       return "WAITING";
     case "目标数":
       return "GOALS";
     case "运行中目标":
       return "LIVE GOALS";
     case "人工接球":
+    case "需要你处理":
       return "HANDOFFS";
     case "Runtime 风险":
+    case "运行出错":
       return "RUNTIME";
     case "回放债务":
+    case "验证记录不完整":
       return "REPLAY";
     case "冷启动池":
+    case "还没开始":
       return "COLD START";
     default:
       return label.toUpperCase();
@@ -799,7 +804,7 @@ export function MasterConsole({
                   />
                   <div className="min-w-0">
                     <div className="font-pixel text-[9px] tracking-[0.16em] text-cyan-300">OPERATOR LINK</div>
-                    <div className="text-sm font-semibold text-cyan-50">手动接管 / 运行池 / 目标池</div>
+                    <div className="text-sm font-semibold text-cyan-50">需要你处理 / 运行池 / 目标池</div>
                   </div>
                 </div>
                 <div className="grid grid-cols-2 gap-2">
@@ -858,7 +863,7 @@ export function InterferenceZone({
             <div className="font-pixel text-[10px] tracking-[0.18em] text-rose-200">ALERT TRACK</div>
             <div className="mt-2 text-4xl font-black leading-none text-rose-50">{stateLabel}</div>
             <p className="mt-3 text-sm leading-6 text-rose-50/85">
-              {error ?? `${liveAttemptText}。当前人工接球 ${humanHandoffCount} 条，Runtime 风险 ${runtimeRiskCount} 条。`}
+              {error ?? `${liveAttemptText}。当前需要你处理 ${humanHandoffCount} 条，运行出错 ${runtimeRiskCount} 条。`}
             </p>
           </div>
         </div>
@@ -1053,7 +1058,7 @@ export function CommandEmptyState({
         <div className="cockpit-panel p-4">
           <div className="mb-3 flex items-center gap-2 font-pixel text-[10px] tracking-[0.18em] text-rose-200">
             <ShieldAlert className="size-4" />
-            Runtime 风险
+            运行出错
           </div>
           <div className="micro-led border-2 border-rose-300/40 bg-[rgba(37,14,22,0.95)] p-3">
             <MiniCodeMonitor />

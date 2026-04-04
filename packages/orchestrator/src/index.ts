@@ -185,6 +185,142 @@ import {
   ensureRunManagedWorkspace,
   getEffectiveRunWorkspaceRoot
 } from "./run-workspace.js";
+
+export type RunRecoveryPath =
+  | "first_attempt"
+  | "latest_decision"
+  | "handoff_first"
+  | "degraded_rebuild";
+
+export type RunRecoveryGuidance = {
+  path: RunRecoveryPath;
+  nextAction: string;
+  attemptType: Attempt["attempt_type"];
+  summary: string;
+  blockingReason: string | null;
+  handoffBundleRef: string | null;
+};
+
+function getDefaultRecoveryNextAction(input: {
+  latestAttempt: Attempt;
+  attemptType: Attempt["attempt_type"];
+}): string {
+  if (input.latestAttempt.status === "completed") {
+    return input.attemptType === "execution"
+      ? input.latestAttempt.attempt_type === "research"
+        ? "start_execution"
+        : "continue_execution"
+      : "continue_research";
+  }
+
+  if (
+    input.latestAttempt.attempt_type === "research" &&
+    input.attemptType === "execution"
+  ) {
+    return "start_execution";
+  }
+
+  return "retry_attempt";
+}
+
+function buildDegradedRecoveryReason(
+  current: CurrentDecision | null
+): string {
+  const degradedMessage =
+    "最近一轮 settled attempt 没有 handoff bundle，所以恢复必须先走 degraded / rebuild path，不能再静默回退到多源拼装。";
+  return [current?.blocking_reason, degradedMessage].filter(Boolean).join(" ");
+}
+
+export function deriveRunRecoveryGuidance(input: {
+  current: CurrentDecision | null;
+  latestAttempt: Attempt | null;
+  latestHandoffBundle: AttemptHandoffBundle | null;
+  latestHandoffBundleRef: string | null;
+}): RunRecoveryGuidance {
+  if (!input.latestAttempt) {
+    return {
+      path: "first_attempt",
+      nextAction: "start_first_attempt",
+      attemptType: "research",
+      summary: "系统会重新启动首次研究。",
+      blockingReason: input.current?.blocking_reason ?? null,
+      handoffBundleRef: null
+    };
+  }
+
+  const latestAttempt = input.latestAttempt;
+
+  if (
+    latestAttempt.status !== "completed" &&
+    latestAttempt.status !== "failed" &&
+    latestAttempt.status !== "stopped"
+  ) {
+    const attemptType =
+      input.current?.recommended_attempt_type ?? latestAttempt.attempt_type;
+    const nextAction =
+      input.current?.recommended_next_action &&
+      input.current.recommended_next_action !== "wait_for_human"
+        ? input.current.recommended_next_action
+        : attemptType === "execution"
+          ? "continue_execution"
+          : "continue_research";
+    return {
+      path: "latest_decision",
+      nextAction,
+      attemptType,
+      summary: "系统会沿当前最新决策继续恢复。",
+      blockingReason: input.current?.blocking_reason ?? null,
+      handoffBundleRef: null
+    };
+  }
+
+  if (!input.latestHandoffBundle) {
+    return {
+      path: "degraded_rebuild",
+      nextAction: "continue_research",
+      attemptType: "research",
+      summary:
+        "最近一轮 settled attempt 没有 handoff bundle，系统会先进入 degraded / rebuild path，再决定下一步执行。",
+      blockingReason: buildDegradedRecoveryReason(input.current),
+      handoffBundleRef: null
+    };
+  }
+
+  const handoffAttemptType =
+    input.latestHandoffBundle.recommended_attempt_type ??
+    input.latestHandoffBundle.current_decision_snapshot?.recommended_attempt_type ??
+    input.current?.recommended_attempt_type ??
+    latestAttempt.attempt_type;
+  const handoffNextActionCandidate =
+    input.latestHandoffBundle.recommended_next_action &&
+    input.latestHandoffBundle.recommended_next_action !== "wait_for_human"
+      ? input.latestHandoffBundle.recommended_next_action
+      : input.latestHandoffBundle.current_decision_snapshot?.recommended_next_action &&
+          input.latestHandoffBundle.current_decision_snapshot.recommended_next_action !==
+            "wait_for_human"
+        ? input.latestHandoffBundle.current_decision_snapshot.recommended_next_action
+        : null;
+
+  return {
+    path: "handoff_first",
+    nextAction:
+      handoffNextActionCandidate ??
+      getDefaultRecoveryNextAction({
+        latestAttempt,
+        attemptType: handoffAttemptType
+      }),
+    attemptType: handoffAttemptType,
+    summary:
+      input.latestHandoffBundle.summary ??
+      "系统会按最新 settled handoff bundle 继续恢复。",
+    blockingReason:
+      input.latestHandoffBundle.failure_context?.message ??
+      input.latestHandoffBundle.current_decision_snapshot?.blocking_reason ??
+      input.current?.blocking_reason ??
+      null,
+    handoffBundleRef: input.latestHandoffBundleRef
+  };
+}
 import { type RuntimeLayout } from "./runtime-layout.js";
 import {
   SELF_BOOTSTRAP_NEXT_TASK_ACTIVE_ENTRY_RELATIVE_PATH,
@@ -6121,14 +6257,20 @@ export class Orchestrator {
     | null
   > {
     const governance = await getRunGovernanceState(this.workspacePaths, input.runId);
+    const recoveryGuidance = deriveRunRecoveryGuidance({
+      current: input.current,
+      latestAttempt: input.latestAttempt,
+      latestHandoffBundle: input.latestHandoffBundle,
+      latestHandoffBundleRef: input.latestHandoffBundleRef
+    });
     if (!input.latestAttempt) {
       return {
-        next_action: "start_first_attempt",
-        attempt_type: "research",
-        summary: "人工窗口超时，系统自动恢复并重新启动首次研究。",
-        blocking_reason: input.current.blocking_reason,
+        next_action: recoveryGuidance.nextAction,
+        attempt_type: recoveryGuidance.attemptType,
+        summary: `人工窗口超时，${recoveryGuidance.summary}`,
+        blocking_reason: recoveryGuidance.blockingReason,
         reason: "no_attempts_yet",
-        handoffBundleRef: null
+        handoffBundleRef: recoveryGuidance.handoffBundleRef
       };
     }
 
@@ -6175,15 +6317,17 @@ export class Orchestrator {
 
     if (input.latestAttempt.status === "stopped") {
       return {
-        next_action: "retry_attempt",
-        attempt_type: input.latestAttempt.attempt_type,
-        summary: `人工窗口超时，系统自动恢复上一轮${input.latestAttempt.attempt_type === "execution" ? "执行" : "研究"}尝试。`,
+        next_action: recoveryGuidance.nextAction,
+        attempt_type: recoveryGuidance.attemptType,
+        summary: `人工窗口超时，${recoveryGuidance.summary}`,
         blocking_reason:
-          input.latestHandoffBundle?.current_decision_snapshot?.blocking_reason ??
-          input.current.blocking_reason ??
-          "上一轮尝试中断，系统会先按原契约恢复。",
-        reason: "resume_stopped_attempt",
-        handoffBundleRef: input.latestHandoffBundleRef
+          recoveryGuidance.blockingReason ??
+          "上一轮尝试中断，系统会先按恢复指引继续。",
+        reason:
+          recoveryGuidance.path === "degraded_rebuild"
+            ? "degraded_rebuild_missing_handoff"
+            : "resume_stopped_attempt",
+        handoffBundleRef: recoveryGuidance.handoffBundleRef
       };
     }
 
@@ -6240,29 +6384,32 @@ export class Orchestrator {
 
       if (input.latestAttempt.attempt_type === "execution") {
         return {
-          next_action: "retry_attempt",
-          attempt_type: "execution",
-          summary:
-            "人工窗口超时，系统自动继续执行并直接处理上一轮执行卡点。",
+          next_action: recoveryGuidance.nextAction,
+          attempt_type: recoveryGuidance.attemptType,
+          summary: `人工窗口超时，${recoveryGuidance.summary}`,
           blocking_reason:
-            input.latestHandoffBundle?.current_decision_snapshot?.blocking_reason ??
-            input.current.blocking_reason ??
-            "上一轮执行失败，继续执行并直接修掉当前阻塞。",
-          reason: "failed_execution_retries_directly",
-          handoffBundleRef: input.latestHandoffBundleRef
+            recoveryGuidance.blockingReason ??
+            "上一轮执行失败，恢复路径会先处理当前阻塞。",
+          reason:
+            recoveryGuidance.path === "degraded_rebuild"
+              ? "degraded_rebuild_missing_handoff"
+              : "failed_execution_retries_directly",
+          handoffBundleRef: recoveryGuidance.handoffBundleRef
         };
       }
 
       return {
-        next_action: "retry_attempt",
-        attempt_type: "research",
-        summary: "人工窗口超时，系统自动继续研究并优先诊断阻塞点。",
+        next_action: recoveryGuidance.nextAction,
+        attempt_type: recoveryGuidance.attemptType,
+        summary: `人工窗口超时，${recoveryGuidance.summary}`,
         blocking_reason:
-          input.latestHandoffBundle?.current_decision_snapshot?.blocking_reason ??
-          input.current.blocking_reason ??
-          "上一轮研究失败，先定位阻塞点再继续。",
-        reason: "failed_research_retry",
-        handoffBundleRef: input.latestHandoffBundleRef
+          recoveryGuidance.blockingReason ??
+          "上一轮研究失败，恢复路径会先重建阻塞上下文。",
+        reason:
+          recoveryGuidance.path === "degraded_rebuild"
+            ? "degraded_rebuild_missing_handoff"
+            : "failed_research_retry",
+        handoffBundleRef: recoveryGuidance.handoffBundleRef
       };
     }
 
@@ -6285,44 +6432,22 @@ export class Orchestrator {
           handoffBundleRef: input.latestHandoffBundleRef
         };
       }
-
-      const nextAttemptType =
-        input.latestHandoffBundle?.recommended_attempt_type ??
-        input.latestHandoffBundle?.current_decision_snapshot?.recommended_attempt_type ??
-        input.current.recommended_attempt_type ??
-        input.latestAttempt.attempt_type;
-      if (nextAttemptType === "execution") {
-        return {
-          next_action:
-            input.latestAttempt.attempt_type === "research" ? "start_execution" : "continue_execution",
-          attempt_type: "execution",
-          summary:
-            input.latestAttempt.attempt_type === "research"
-              ? "人工窗口超时，系统直接进入下一轮执行，不再重复方案研究。"
-              : "人工窗口超时，系统继续执行当前已收敛的下一步。",
-          blocking_reason:
-            input.latestHandoffBundle?.current_decision_snapshot?.blocking_reason ??
-            input.current.blocking_reason ??
-            "已有明确的下一步执行方向，直接进入 execution。",
-          reason:
-            input.latestAttempt.attempt_type === "research"
-              ? "completed_research_starts_execution"
-              : "completed_execution_continues_execution",
-          handoffBundleRef: input.latestHandoffBundleRef
-        };
-      }
-
       return {
-        next_action: "continue_research",
-        attempt_type: "research",
-        summary:
-          "人工窗口超时，系统自动进入怀疑式研究，重新审查现有证据并收束下一步。",
+        next_action: recoveryGuidance.nextAction,
+        attempt_type: recoveryGuidance.attemptType,
+        summary: `人工窗口超时，${recoveryGuidance.summary}`,
         blocking_reason:
-          input.latestHandoffBundle?.current_decision_snapshot?.blocking_reason ??
-          input.current.blocking_reason ??
-          "需要重新审查现有证据，避免沿着旧假设继续空转。",
-        reason: "completed_attempt_needs_skeptical_review",
-        handoffBundleRef: input.latestHandoffBundleRef
+          recoveryGuidance.blockingReason ??
+          "恢复路径会先基于 settled handoff 重新确认下一步。",
+        reason:
+          recoveryGuidance.path === "degraded_rebuild"
+            ? "degraded_rebuild_missing_handoff"
+            : recoveryGuidance.attemptType === "execution"
+              ? input.latestAttempt.attempt_type === "research"
+                ? "completed_research_starts_execution"
+                : "completed_execution_continues_execution"
+              : "completed_attempt_needs_skeptical_review",
+        handoffBundleRef: recoveryGuidance.handoffBundleRef
       };
     }
 
