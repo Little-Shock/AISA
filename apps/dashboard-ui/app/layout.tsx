@@ -1,8 +1,18 @@
 import type { Metadata } from "next";
 import localFont from "next/font/local";
-import { Fira_Code, Press_Start_2P, VT323 } from "next/font/google";
+import * as googleFonts from "next/font/google";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import "./globals.css";
+
+type GoogleFontLoader = (options: {
+  subsets?: string[];
+  variable?: string;
+  weight?: string;
+}) => {
+  variable: string;
+};
+
+const fontLoaders = googleFonts as Record<string, GoogleFontLoader>;
 
 const bodyFont = localFont({
   variable: "--font-body",
@@ -15,18 +25,18 @@ const bodyFont = localFont({
   ]
 });
 
-const terminalFont = Fira_Code({
+const terminalFont = fontLoaders.Fira_Code({
   subsets: ["latin"],
   variable: "--font-terminal"
 });
 
-const hudFont = VT323({
+const hudFont = fontLoaders.VT323({
   subsets: ["latin"],
   variable: "--font-hud",
   weight: "400"
 });
 
-const pixelFont = Press_Start_2P({
+const pixelFont = fontLoaders.Press_Start_2P({
   subsets: ["latin"],
   variable: "--font-pixel",
   weight: "400"
