@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { chmod, readFile, readdir, writeFile } from "node:fs/promises";
+import { constants as fsConstants } from "node:fs";
+import { access, chmod, readFile, readdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
   createAttempt,
@@ -177,8 +178,10 @@ async function runZshProbe(input: {
   env: NodeJS.ProcessEnv;
   script: string;
 }): Promise<{ exitCode: number; stdout: string; stderr: string }> {
+  const shell = await resolveProbeShell();
+
   return await new Promise((resolve, reject) => {
-    const child = spawn("/bin/zsh", ["-lc", input.script], {
+    const child = spawn(shell, ["-lc", input.script], {
       env: {
         ...process.env,
         ...input.env
@@ -203,6 +206,33 @@ async function runZshProbe(input: {
       });
     });
   });
+}
+
+let cachedProbeShell: string | null = null;
+
+async function resolveProbeShell(): Promise<string> {
+  if (cachedProbeShell) {
+    return cachedProbeShell;
+  }
+
+  const candidates = [
+    process.env.SHELL?.trim(),
+    "/bin/bash",
+    "/bin/sh"
+  ].filter((value): value is string => Boolean(value));
+
+  for (const candidate of candidates) {
+    try {
+      await access(candidate, fsConstants.X_OK);
+      cachedProbeShell = candidate;
+      return candidate;
+    } catch {
+      continue;
+    }
+  }
+
+  cachedProbeShell = "sh";
+  return cachedProbeShell;
 }
 
 async function main(): Promise<void> {
