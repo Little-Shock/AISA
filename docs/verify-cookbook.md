@@ -38,6 +38,7 @@ pnpm verify:run-api
 
 - 改了 `apps/control-api`
 - 改了 run detail payload、summary surface、brief / handoff / preflight 返回结构
+- 改了 project attach / baseline / control-api 的外部项目接入 surface
 
 ### Run loop / dispatch / gate
 

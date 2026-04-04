@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import { mkdir, realpath, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
@@ -1010,6 +1011,249 @@ async function main(): Promise<void> {
       createBlockedRunResponse.body,
       /工作区超出允许范围/u
     );
+
+    const attachBlockedProjectResponse = await app.inject({
+      method: "POST",
+      url: "/projects/attach",
+      payload: {
+        workspace_root: outsideWorkspaceDir
+      }
+    });
+    assert.equal(attachBlockedProjectResponse.statusCode, 400);
+    const attachBlockedProjectPayload = attachBlockedProjectResponse.json() as {
+      code: string;
+      message: string;
+    };
+    assert.equal(
+      attachBlockedProjectPayload.code,
+      "workspace_outside_allowed_scope"
+    );
+    assert.match(attachBlockedProjectPayload.message, /允许范围/u);
+
+    const attachedNodeProjectRoot = join(projectScopeDir, "attached-node-project");
+    await writeNodeProjectFixture(attachedNodeProjectRoot);
+    await initializeGitRepo(attachedNodeProjectRoot);
+    const attachNodeProjectResponse = await app.inject({
+      method: "POST",
+      url: "/projects/attach",
+      payload: {
+        workspace_root: attachedNodeProjectRoot,
+        owner_id: "attach-owner"
+      }
+    });
+    assert.equal(attachNodeProjectResponse.statusCode, 201);
+    const attachedNodeProject = attachNodeProjectResponse.json() as {
+      project: {
+        id: string;
+        workspace_root: string;
+        project_type: string;
+        primary_language: string;
+        package_manager: string | null;
+        default_commands: {
+          build: string | null;
+          test: string | null;
+          start: string | null;
+        };
+      };
+      project_profile_ref: string;
+      baseline_snapshot: {
+        git: {
+          repo_root: string;
+          head_sha: string | null;
+        };
+        repo_health: {
+          default_verifier_hint: string | null;
+        };
+      };
+      baseline_snapshot_ref: string | null;
+      run_template: {
+        owner_id: string;
+        workspace_root: string;
+      };
+    };
+    assert.equal(attachedNodeProject.project.project_type, "node_repo");
+    assert.equal(attachedNodeProject.project.primary_language, "typescript");
+    assert.equal(attachedNodeProject.project.package_manager, "pnpm");
+    assert.equal(
+      attachedNodeProject.project.workspace_root,
+      await realpath(attachedNodeProjectRoot)
+    );
+    assert.equal(
+      attachedNodeProject.project.default_commands.build,
+      "pnpm build"
+    );
+    assert.equal(
+      attachedNodeProject.project.default_commands.test,
+      "pnpm test"
+    );
+    assert.equal(
+      attachedNodeProject.project.default_commands.start,
+      "pnpm dev"
+    );
+    assert.equal(
+      attachedNodeProject.baseline_snapshot.git.repo_root,
+      await realpath(attachedNodeProjectRoot)
+    );
+    assert.match(
+      attachedNodeProject.project_profile_ref,
+      /state\/projects\/project_[a-f0-9]{10}\/project-profile\.json$/u
+    );
+    assert.match(
+      attachedNodeProject.baseline_snapshot_ref ?? "",
+      /artifacts\/projects\/project_[a-f0-9]{10}\/baseline-snapshot\.json$/u
+    );
+    assert.equal(
+      attachedNodeProject.baseline_snapshot.repo_health.default_verifier_hint,
+      "node_repo"
+    );
+    assert.equal(attachedNodeProject.run_template.owner_id, "attach-owner");
+    assert.equal(
+      attachedNodeProject.run_template.workspace_root,
+      await realpath(attachedNodeProjectRoot)
+    );
+    assert.ok(
+      attachedNodeProject.baseline_snapshot.git.head_sha,
+      "attach should capture git baseline head sha for committed repos"
+    );
+
+    const attachedPythonProjectRoot = join(projectScopeDir, "attached-python-project");
+    await writePythonProjectFixture(attachedPythonProjectRoot);
+    await initializeGitRepo(attachedPythonProjectRoot);
+    const attachPythonProjectResponse = await app.inject({
+      method: "POST",
+      url: "/projects/attach",
+      payload: {
+        workspace_root: attachedPythonProjectRoot
+      }
+    });
+    assert.equal(attachPythonProjectResponse.statusCode, 201);
+    const attachedPythonProject = attachPythonProjectResponse.json() as {
+      project: {
+        project_type: string;
+        package_manager: string | null;
+      };
+    };
+    assert.equal(attachedPythonProject.project.project_type, "python_repo");
+    assert.equal(attachedPythonProject.project.package_manager, "pip");
+
+    const attachedGoProjectRoot = join(projectScopeDir, "attached-go-project");
+    await writeGoProjectFixture(attachedGoProjectRoot);
+    await initializeGitRepo(attachedGoProjectRoot);
+    const attachGoProjectResponse = await app.inject({
+      method: "POST",
+      url: "/projects/attach",
+      payload: {
+        workspace_root: attachedGoProjectRoot
+      }
+    });
+    assert.equal(attachGoProjectResponse.statusCode, 201);
+    const attachedGoProject = attachGoProjectResponse.json() as {
+      project: {
+        project_type: string;
+        package_manager: string | null;
+      };
+    };
+    assert.equal(attachedGoProject.project.project_type, "go_repo");
+    assert.equal(attachedGoProject.project.package_manager, "go");
+
+    const listAttachedProjectsResponse = await app.inject({
+      method: "GET",
+      url: "/projects"
+    });
+    assert.equal(listAttachedProjectsResponse.statusCode, 200);
+    const attachedProjectsList = listAttachedProjectsResponse.json() as {
+      projects: Array<{
+        project: {
+          id: string;
+          project_type: string;
+        };
+        baseline_snapshot_ref: string | null;
+      }>;
+    };
+    assert.ok(
+      attachedProjectsList.projects.some(
+        (item) =>
+          item.project.id === attachedNodeProject.project.id &&
+          item.project.project_type === "node_repo" &&
+          item.baseline_snapshot_ref !== null
+      ),
+      "attached node project should appear in project list with a baseline ref"
+    );
+    assert.ok(
+      attachedProjectsList.projects.some(
+        (item) => item.project.project_type === "python_repo"
+      ),
+      "attached python project should appear in project list"
+    );
+    assert.ok(
+      attachedProjectsList.projects.some(
+        (item) => item.project.project_type === "go_repo"
+      ),
+      "attached go project should appear in project list"
+    );
+
+    const getAttachedProjectResponse = await app.inject({
+      method: "GET",
+      url: `/projects/${attachedNodeProject.project.id}`
+    });
+    assert.equal(getAttachedProjectResponse.statusCode, 200);
+    const attachedNodeProjectDetail = getAttachedProjectResponse.json() as {
+      project: {
+        id: string;
+      };
+      baseline_snapshot_ref: string | null;
+    };
+    assert.equal(
+      attachedNodeProjectDetail.project.id,
+      attachedNodeProject.project.id
+    );
+    assert.equal(
+      attachedNodeProjectDetail.baseline_snapshot_ref,
+      attachedNodeProject.baseline_snapshot_ref
+    );
+
+    const nonGitProjectRoot = join(projectScopeDir, "non-git-project");
+    await writePythonProjectFixture(nonGitProjectRoot);
+    const attachNonGitProjectResponse = await app.inject({
+      method: "POST",
+      url: "/projects/attach",
+      payload: {
+        workspace_root: nonGitProjectRoot
+      }
+    });
+    assert.equal(attachNonGitProjectResponse.statusCode, 422);
+    const attachNonGitProjectPayload = attachNonGitProjectResponse.json() as {
+      code: string;
+      message: string;
+    };
+    assert.equal(attachNonGitProjectPayload.code, "workspace_not_git_repo");
+    assert.match(attachNonGitProjectPayload.message, /git/u);
+
+    const invalidManifestProjectRoot = join(
+      projectScopeDir,
+      "invalid-manifest-project"
+    );
+    await mkdir(invalidManifestProjectRoot, { recursive: true });
+    await writeFile(
+      join(invalidManifestProjectRoot, "package.json"),
+      "{ invalid json }\n",
+      "utf8"
+    );
+    await initializeGitRepo(invalidManifestProjectRoot);
+    const attachInvalidManifestResponse = await app.inject({
+      method: "POST",
+      url: "/projects/attach",
+      payload: {
+        workspace_root: invalidManifestProjectRoot
+      }
+    });
+    assert.equal(attachInvalidManifestResponse.statusCode, 422);
+    const attachInvalidManifestPayload = attachInvalidManifestResponse.json() as {
+      code: string;
+      message: string;
+    };
+    assert.equal(attachInvalidManifestPayload.code, "invalid_project_manifest");
+    assert.match(attachInvalidManifestPayload.message, /package\.json/u);
 
     const selfBootstrapResponse = await app.inject({
       method: "POST",
@@ -3861,6 +4105,117 @@ async function main(): Promise<void> {
   } finally {
     await cleanupTrackedVerifyTempDirs();
   }
+}
+
+async function initializeGitRepo(rootDir: string): Promise<void> {
+  await mkdir(rootDir, { recursive: true });
+  await writeFile(
+    join(rootDir, ".gitignore"),
+    ["runs/", "state/", "events/", "artifacts/", "reports/", "plans/"].join("\n") + "\n",
+    "utf8"
+  );
+  await writeFile(join(rootDir, "README.md"), "# attached project fixture\n", "utf8");
+  await runCommand(rootDir, ["git", "-C", rootDir, "init"]);
+  await runCommand(rootDir, ["git", "-C", rootDir, "config", "user.name", "AISA Verify"]);
+  await runCommand(
+    rootDir,
+    ["git", "-C", rootDir, "config", "user.email", "aisa-verify@example.com"]
+  );
+  await runCommand(rootDir, ["git", "-C", rootDir, "add", "."]);
+  await runCommand(rootDir, ["git", "-C", rootDir, "commit", "-m", "test: seed attached project"]);
+}
+
+async function writeNodeProjectFixture(rootDir: string): Promise<void> {
+  await mkdir(rootDir, { recursive: true });
+  await writeFile(
+    join(rootDir, "package.json"),
+    JSON.stringify(
+      {
+        name: "attached-node-project",
+        private: true,
+        packageManager: "pnpm@10.27.0",
+        scripts: {
+          build: "pnpm build",
+          test: "pnpm test",
+          dev: "pnpm dev"
+        },
+        devDependencies: {
+          typescript: "^5.8.0"
+        }
+      },
+      null,
+      2
+    ) + "\n",
+    "utf8"
+  );
+  await writeFile(join(rootDir, "tsconfig.json"), "{\n  \"compilerOptions\": {}\n}\n", "utf8");
+  await writeFile(join(rootDir, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\n", "utf8");
+}
+
+async function writePythonProjectFixture(rootDir: string): Promise<void> {
+  await mkdir(rootDir, { recursive: true });
+  await writeFile(
+    join(rootDir, "pyproject.toml"),
+    [
+      "[project]",
+      'name = "attached-python-project"',
+      'version = "0.1.0"',
+      'requires-python = ">=3.11"',
+      ""
+    ].join("\n"),
+    "utf8"
+  );
+  await writeFile(join(rootDir, "requirements.txt"), "pytest==8.3.5\n", "utf8");
+}
+
+async function writeGoProjectFixture(rootDir: string): Promise<void> {
+  await mkdir(rootDir, { recursive: true });
+  await writeFile(
+    join(rootDir, "go.mod"),
+    "module example.com/attached-go-project\n\ngo 1.22.0\n",
+    "utf8"
+  );
+  await writeFile(
+    join(rootDir, "main.go"),
+    [
+      "package main",
+      "",
+      'import "fmt"',
+      "",
+      "func main() {",
+      '  fmt.Println("hello")',
+      "}",
+      ""
+    ].join("\n"),
+    "utf8"
+  );
+}
+
+async function runCommand(rootDir: string, args: string[]): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    const [command, ...commandArgs] = args;
+    const child = spawn(command!, commandArgs, {
+      cwd: rootDir,
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+    let stderr = "";
+    child.stderr.on("data", (chunk) => {
+      stderr += String(chunk);
+    });
+    child.on("error", reject);
+    child.on("close", (exitCode) => {
+      if (exitCode === 0) {
+        resolve();
+        return;
+      }
+
+      reject(
+        new Error(
+          `${args.join(" ")} failed in ${rootDir} with exit code ${exitCode ?? "null"}.\n${stderr}`
+        )
+      );
+    });
+  });
 }
 
 main().catch((error) => {

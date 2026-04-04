@@ -281,6 +281,112 @@ export const CreateRunInputSchema = RunSchema.omit({
   budget: BudgetSchema.optional()
 });
 
+export const AttachedProjectTypeSchema = z.enum([
+  "node_repo",
+  "python_repo",
+  "go_repo",
+  "generic_git_repo"
+]);
+
+export const AttachedProjectPrimaryLanguageSchema = z.enum([
+  "javascript",
+  "typescript",
+  "python",
+  "go",
+  "generic"
+]);
+
+export const AttachedProjectDefaultCommandsSchema = z.object({
+  install: z.string().nullable().default(null),
+  build: z.string().nullable().default(null),
+  test: z.string().nullable().default(null),
+  lint: z.string().nullable().default(null),
+  start: z.string().nullable().default(null)
+});
+
+const DEFAULT_ATTACHED_PROJECT_COMMANDS = {
+  install: null,
+  build: null,
+  test: null,
+  lint: null,
+  start: null
+};
+
+export const AttachedProjectProfileSchema = z.object({
+  id: z.string(),
+  slug: z.string().min(1),
+  title: z.string().min(1),
+  workspace_root: z.string().min(1),
+  repo_root: z.string().min(1),
+  repo_name: z.string().min(1),
+  project_type: AttachedProjectTypeSchema,
+  primary_language: AttachedProjectPrimaryLanguageSchema,
+  package_manager: z.string().nullable().default(null),
+  manifest_files: z.array(z.string().min(1)).default([]),
+  detection_reasons: z.array(z.string().min(1)).default([]),
+  default_commands: AttachedProjectDefaultCommandsSchema.default(
+    DEFAULT_ATTACHED_PROJECT_COMMANDS
+  ),
+  supported: z.boolean().default(true),
+  unsupported_reason: z.string().nullable().default(null),
+  created_at: z.string().datetime(),
+  updated_at: z.string().datetime()
+});
+
+export const AttachedProjectWorkspaceScopeSchema = z.object({
+  requested_root: z.string().min(1),
+  resolved_root: z.string().min(1),
+  matched_scope_root: z.string().min(1)
+});
+
+export const AttachedProjectGitBaselineSchema = z.object({
+  repo_root: z.string().min(1),
+  branch: z.string().nullable().default(null),
+  head_sha: z.string().nullable().default(null),
+  dirty: z.boolean(),
+  staged_file_count: z.number().int().nonnegative(),
+  modified_file_count: z.number().int().nonnegative(),
+  untracked_file_count: z.number().int().nonnegative(),
+  status_lines: z.array(z.string()).default([])
+});
+
+export const AttachedProjectToolchainSnapshotSchema = z.object({
+  git: z.string().nullable().default(null),
+  node: z.string().nullable().default(null),
+  pnpm: z.string().nullable().default(null),
+  npm: z.string().nullable().default(null),
+  python: z.string().nullable().default(null),
+  pip: z.string().nullable().default(null),
+  poetry: z.string().nullable().default(null),
+  uv: z.string().nullable().default(null),
+  go: z.string().nullable().default(null)
+});
+
+export const AttachedProjectRepoHealthSchema = z.object({
+  has_tests: z.boolean(),
+  has_build_command: z.boolean(),
+  default_verifier_hint: z.string().nullable().default(null),
+  suggested_workspace_scope: z.array(z.string().min(1)).default([]),
+  supported: z.boolean().default(true),
+  unsupported_reason: z.string().nullable().default(null)
+});
+
+export const AttachedProjectBaselineSnapshotSchema = z.object({
+  project_id: z.string(),
+  workspace_root: z.string().min(1),
+  captured_at: z.string().datetime(),
+  workspace_scope: AttachedProjectWorkspaceScopeSchema,
+  git: AttachedProjectGitBaselineSchema,
+  toolchain: AttachedProjectToolchainSnapshotSchema,
+  repo_health: AttachedProjectRepoHealthSchema
+});
+
+export const AttachProjectInputSchema = z.object({
+  workspace_root: z.string().min(1),
+  owner_id: z.string().min(1).optional(),
+  title: z.string().min(1).optional()
+});
+
 export const BranchSchema = z.object({
   id: z.string(),
   goal_id: z.string(),
@@ -1447,6 +1553,30 @@ export type AttemptType = z.infer<typeof AttemptTypeSchema>;
 export type AttemptStatus = z.infer<typeof AttemptStatusSchema>;
 export type Run = z.infer<typeof RunSchema>;
 export type CreateRunInput = z.infer<typeof CreateRunInputSchema>;
+export type AttachedProjectType = z.infer<typeof AttachedProjectTypeSchema>;
+export type AttachedProjectPrimaryLanguage = z.infer<
+  typeof AttachedProjectPrimaryLanguageSchema
+>;
+export type AttachedProjectDefaultCommands = z.infer<
+  typeof AttachedProjectDefaultCommandsSchema
+>;
+export type AttachedProjectProfile = z.infer<typeof AttachedProjectProfileSchema>;
+export type AttachedProjectWorkspaceScope = z.infer<
+  typeof AttachedProjectWorkspaceScopeSchema
+>;
+export type AttachedProjectGitBaseline = z.infer<
+  typeof AttachedProjectGitBaselineSchema
+>;
+export type AttachedProjectToolchainSnapshot = z.infer<
+  typeof AttachedProjectToolchainSnapshotSchema
+>;
+export type AttachedProjectRepoHealth = z.infer<
+  typeof AttachedProjectRepoHealthSchema
+>;
+export type AttachedProjectBaselineSnapshot = z.infer<
+  typeof AttachedProjectBaselineSnapshotSchema
+>;
+export type AttachProjectInput = z.infer<typeof AttachProjectInputSchema>;
 export type Branch = z.infer<typeof BranchSchema>;
 export type WorkerRun = z.infer<typeof WorkerRunSchema>;
 export type Attempt = z.infer<typeof AttemptSchema>;
@@ -1747,6 +1877,54 @@ export function createRun(input: CreateRunInput): Run {
     budget,
     created_at: now,
     updated_at: now
+  });
+}
+
+export function createAttachedProjectProfile(input: {
+  id: string;
+  slug: string;
+  title: string;
+  workspace_root: string;
+  repo_root: string;
+  repo_name: string;
+  project_type: AttachedProjectType;
+  primary_language: AttachedProjectPrimaryLanguage;
+  package_manager?: string | null;
+  manifest_files?: string[];
+  detection_reasons?: string[];
+  default_commands?: Partial<AttachedProjectDefaultCommands>;
+  supported?: boolean;
+  unsupported_reason?: string | null;
+  created_at?: string;
+}): AttachedProjectProfile {
+  const now = new Date().toISOString();
+  return AttachedProjectProfileSchema.parse({
+    ...input,
+    package_manager: input.package_manager ?? null,
+    manifest_files: input.manifest_files ?? [],
+    detection_reasons: input.detection_reasons ?? [],
+    default_commands:
+      input.default_commands ?? DEFAULT_ATTACHED_PROJECT_COMMANDS,
+    supported: input.supported ?? true,
+    unsupported_reason: input.unsupported_reason ?? null,
+    created_at: input.created_at ?? now,
+    updated_at: now
+  });
+}
+
+export function createAttachedProjectBaselineSnapshot(input: {
+  project_id: string;
+  workspace_root: string;
+  workspace_scope: AttachedProjectWorkspaceScope;
+  git: AttachedProjectGitBaseline;
+  toolchain: Partial<AttachedProjectToolchainSnapshot>;
+  repo_health: Partial<AttachedProjectRepoHealth>;
+}): AttachedProjectBaselineSnapshot {
+  return AttachedProjectBaselineSnapshotSchema.parse({
+    ...input,
+    captured_at: new Date().toISOString(),
+    toolchain: input.toolchain,
+    repo_health: input.repo_health
   });
 }
 

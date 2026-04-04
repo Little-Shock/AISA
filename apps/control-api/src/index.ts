@@ -4,8 +4,10 @@ import cors from "@fastify/cors";
 import { config as loadEnv } from "dotenv";
 import Fastify from "fastify";
 import {
+  AttachProjectInputSchema,
   CreateRunInputSchema,
   CreateGoalInputSchema,
+  type AttachedProjectProfile,
   createBranch,
   createCurrentDecision,
   createEvent,
@@ -42,15 +44,20 @@ import {
   readRunWorkingContextView,
   repairRunManagedWorkspace,
   ensureRunManagedWorkspace,
+  inspectAttachedProjectWorkspace,
   refreshRunOperatorSurface,
   resolveRuntimeLayout,
   syncRuntimeLayoutHint,
+  ProjectAttachError,
   RunWorkspaceScopeError
 } from "@autoresearch/orchestrator";
 import { buildSelfBootstrapRunTemplate, generateInitialPlan } from "@autoresearch/planner";
 import {
   appendRunJournal,
+  buildProjectRef,
   buildRunRef,
+  getAttachedProjectBaselineSnapshot,
+  getAttachedProjectProfile,
   getAttemptAdversarialVerification,
   getAttemptContract,
   getAttemptContext,
@@ -78,6 +85,7 @@ import {
   getRunReport,
   getWriteback,
   listAttemptRuntimeEvents,
+  listAttachedProjectProfiles,
   listAttempts,
   listBranches,
   listGoals,
@@ -93,6 +101,8 @@ import {
   readRunPolicyRuntimeStrict,
   readRunMailboxStrict,
   saveCurrentDecision,
+  saveAttachedProjectBaselineSnapshot,
+  saveAttachedProjectProfile,
   saveBranch,
   saveGoal,
   savePlanArtifacts,
@@ -211,6 +221,37 @@ function buildPlanningPolicyRuntime(runId: string) {
     stage: "planning",
     last_decision: "planning"
   });
+}
+
+type AttachedProjectRunTemplate = {
+  title: string;
+  description: string;
+  success_criteria: string[];
+  constraints: string[];
+  owner_id: string;
+  workspace_root: string;
+};
+
+function buildAttachedProjectRunTemplate(input: {
+  project: AttachedProjectProfile;
+  ownerId?: string | null;
+}): AttachedProjectRunTemplate {
+  return {
+    title: `Attach ${input.project.repo_name}`,
+    description:
+      `Use the attached project profile for ${input.project.repo_name} to plan the first safe development step.`,
+    success_criteria: [
+      "Confirm the attached project profile and baseline snapshot are accurate.",
+      "Produce a first research attempt that identifies the next safe change.",
+      "Keep the work inside the attached workspace scope."
+    ],
+    constraints: [
+      `Stay inside ${input.project.workspace_root}.`,
+      "Treat the attached baseline snapshot as the starting evidence surface."
+    ],
+    owner_id: input.ownerId?.trim() || "operator",
+    workspace_root: input.project.workspace_root
+  };
 }
 
 type RunPolicyRuntimeSurface = {
@@ -1077,6 +1118,131 @@ export async function buildServer(
         latestContract?.verification_plan?.commands.length ?? 0
     };
   };
+
+  const buildAttachedProjectPayload = async (
+    projectId: string,
+    ownerId?: string | null
+  ) => {
+    const project = await getAttachedProjectProfile(workspacePaths, projectId);
+    const baselineSnapshot = await getAttachedProjectBaselineSnapshot(
+      workspacePaths,
+      projectId
+    );
+
+    return {
+      project,
+      project_profile_ref: buildProjectRef(workspacePaths, projectId, "profileFile"),
+      baseline_snapshot: baselineSnapshot,
+      baseline_snapshot_ref: baselineSnapshot
+        ? buildProjectRef(workspacePaths, projectId, "baselineSnapshotFile")
+        : null,
+      run_template: buildAttachedProjectRunTemplate({
+        project,
+        ownerId
+      })
+    };
+  };
+
+  app.get("/projects", async () => {
+    const projects = await listAttachedProjectProfiles(workspacePaths);
+
+    return {
+      projects: await Promise.all(
+        projects.map(async (project) => {
+          const baselineSnapshot = await getAttachedProjectBaselineSnapshot(
+            workspacePaths,
+            project.id
+          );
+          return {
+            project,
+            project_profile_ref: buildProjectRef(
+              workspacePaths,
+              project.id,
+              "profileFile"
+            ),
+            baseline_snapshot_ref: baselineSnapshot
+              ? buildProjectRef(
+                  workspacePaths,
+                  project.id,
+                  "baselineSnapshotFile"
+                )
+              : null,
+            baseline_captured_at: baselineSnapshot?.captured_at ?? null
+          };
+        })
+      )
+    };
+  });
+
+  app.get("/projects/:projectId", async (request, reply) => {
+    const { projectId } = request.params as { projectId: string };
+
+    try {
+      return await buildAttachedProjectPayload(projectId);
+    } catch (error) {
+      const err = error as NodeJS.ErrnoException;
+      if (err?.code === "ENOENT") {
+        return reply.code(404).send({
+          message: `Attached project not found: ${projectId}`
+        });
+      }
+
+      throw error;
+    }
+  });
+
+  app.post("/projects/attach", async (request, reply) => {
+    try {
+      const input = AttachProjectInputSchema.parse(request.body);
+      const inspection = await inspectAttachedProjectWorkspace({
+        workspaceRoot: input.workspace_root,
+        policy: runWorkspaceScopePolicy,
+        title: input.title ?? null
+      });
+      const existingProject = await getAttachedProjectProfile(
+        workspacePaths,
+        inspection.project.id
+      ).catch(() => null);
+
+      if (existingProject) {
+        inspection.project.created_at = existingProject.created_at;
+      }
+
+      await saveAttachedProjectProfile(workspacePaths, inspection.project);
+      await saveAttachedProjectBaselineSnapshot(
+        workspacePaths,
+        inspection.baselineSnapshot
+      );
+
+      return reply.code(201).send({
+        ...(await buildAttachedProjectPayload(
+          inspection.project.id,
+          input.owner_id ?? null
+        )),
+        attach_result: {
+          workspace_root: inspection.lock.resolvedRoot,
+          matched_scope_root: inspection.lock.matchedScopeRoot
+        }
+      });
+    } catch (error) {
+      if (error instanceof ProjectAttachError) {
+        const statusCode =
+          error.code === "workspace_not_git_repo" ||
+          error.code === "invalid_project_manifest"
+            ? 422
+            : 400;
+        return reply.code(statusCode).send({
+          code: error.code,
+          message: error.message,
+          details: error.details
+        });
+      }
+
+      return reply.code(400).send({
+        message: describeWorkspaceScopeError(error)
+      });
+    }
+  });
 
   app.get("/health", async () => {
     const runSummaries = await Promise.all((await listRuns(workspacePaths)).map((run) => buildRunSummaryItem(run)));

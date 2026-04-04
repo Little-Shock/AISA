@@ -158,9 +158,12 @@ pnpm verify:policy-runtime
 - [PRD](docs/aisa-harness-prd-v1.md)
 - [Roadmap](docs/aisa-harness-roadmap-v1.md)
 - [Single-Run Hardening Roadmap](docs/aisa-single-run-core-hardening-roadmap.md)
+- [Common Dev Scenarios Roadmap](docs/aisa-common-dev-scenarios-roadmap.md)
 - [Implementation Blueprint](docs/implementation-blueprint.md)
 - [Architecture Decisions](docs/decisions/0001-mvp-runtime.md)
 - [Scripts Guide](scripts/README.md)
+
+如果你的目标不是让 AISA 开发自己，而是把它接到一个外部项目上，优先看 [Common Dev Scenarios Roadmap](docs/aisa-common-dev-scenarios-roadmap.md)。
 
 ## 为什么它和普通 agent dashboard 不一样
 

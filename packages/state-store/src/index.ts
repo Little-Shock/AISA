@@ -9,6 +9,8 @@ import {
 } from "node:fs/promises";
 import { basename, dirname, join, relative } from "node:path";
 import type {
+  AttachedProjectBaselineSnapshot,
+  AttachedProjectProfile,
   Attempt,
   AttemptAdversarialVerification,
   AttemptContract,
@@ -48,6 +50,8 @@ import type {
   WorkerWriteback
 } from "@autoresearch/domain";
 import {
+  AttachedProjectBaselineSnapshotSchema,
+  AttachedProjectProfileSchema,
   AttemptSchema,
   AttemptAdversarialVerificationSchema,
   AttemptContractSchema,
@@ -93,6 +97,13 @@ export interface WorkspacePaths {
   eventsDir: string;
   artifactsDir: string;
   reportsDir: string;
+}
+
+export interface ProjectPaths {
+  projectDir: string;
+  artifactDir: string;
+  profileFile: string;
+  baselineSnapshotFile: string;
 }
 
 export interface GoalPaths {
@@ -175,6 +186,8 @@ export type RunRefKey =
   | "journalFile"
   | "runtimeHealthSnapshotFile";
 
+export type ProjectRefKey = "profileFile" | "baselineSnapshotFile";
+
 export type AttemptRefKey =
   | "metaFile"
   | "contractFile"
@@ -249,6 +262,23 @@ export function resolveRunPaths(paths: WorkspacePaths, runId: string): RunPaths 
       runDir,
       "artifacts",
       "runtime-health-snapshot.json"
+    )
+  };
+}
+
+export function resolveProjectPaths(
+  paths: WorkspacePaths,
+  projectId: string
+): ProjectPaths {
+  return {
+    projectDir: join(paths.stateDir, "projects", projectId),
+    artifactDir: join(paths.artifactsDir, "projects", projectId),
+    profileFile: join(paths.stateDir, "projects", projectId, "project-profile.json"),
+    baselineSnapshotFile: join(
+      paths.artifactsDir,
+      "projects",
+      projectId,
+      "baseline-snapshot.json"
     )
   };
 }
@@ -355,6 +385,14 @@ export function buildRunRef(
   key: RunRefKey
 ): string {
   return buildRelativeRef(paths, resolveRunPaths(paths, runId)[key]);
+}
+
+export function buildProjectRef(
+  paths: WorkspacePaths,
+  projectId: string,
+  key: ProjectRefKey
+): string {
+  return buildRelativeRef(paths, resolveProjectPaths(paths, projectId)[key]);
 }
 
 export function buildAttemptRef(
@@ -556,9 +594,26 @@ export async function ensureWorkspace(paths: WorkspacePaths): Promise<void> {
       join(paths.plansDir, "goals"),
       join(paths.eventsDir, "goals"),
       join(paths.artifactsDir, "goals"),
-      join(paths.reportsDir, "goals")
+      join(paths.reportsDir, "goals"),
+      join(paths.stateDir, "projects"),
+      join(paths.artifactsDir, "projects")
     ].map((dir) => mkdir(dir, { recursive: true }))
   );
+}
+
+export async function ensureProjectDirectories(
+  paths: WorkspacePaths,
+  projectId: string
+): Promise<ProjectPaths> {
+  const projectPaths = resolveProjectPaths(paths, projectId);
+
+  await Promise.all(
+    [projectPaths.projectDir, projectPaths.artifactDir].map((dir) =>
+      mkdir(dir, { recursive: true })
+    )
+  );
+
+  return projectPaths;
 }
 
 export async function ensureRunDirectories(
@@ -698,6 +753,75 @@ export async function listGoals(paths: WorkspacePaths): Promise<Goal[]> {
   }
 
   return goals.sort((a, b) => b.updated_at.localeCompare(a.updated_at));
+}
+
+export async function saveAttachedProjectProfile(
+  paths: WorkspacePaths,
+  project: AttachedProjectProfile
+): Promise<void> {
+  await ensureWorkspace(paths);
+  const projectPaths = await ensureProjectDirectories(paths, project.id);
+  await writeJsonFile(projectPaths.profileFile, project);
+}
+
+export async function getAttachedProjectProfile(
+  paths: WorkspacePaths,
+  projectId: string
+): Promise<AttachedProjectProfile> {
+  const project = await readJsonFile<AttachedProjectProfile>(
+    resolveProjectPaths(paths, projectId).profileFile
+  );
+  return AttachedProjectProfileSchema.parse(project);
+}
+
+export async function listAttachedProjectProfiles(
+  paths: WorkspacePaths
+): Promise<AttachedProjectProfile[]> {
+  await ensureWorkspace(paths);
+  const projectsRoot = join(paths.stateDir, "projects");
+  const entries = await readdir(projectsRoot, { withFileTypes: true });
+  const projects: AttachedProjectProfile[] = [];
+
+  for (const entry of entries) {
+    if (!entry.isDirectory()) {
+      continue;
+    }
+
+    try {
+      projects.push(await getAttachedProjectProfile(paths, entry.name));
+    } catch {
+      // Ignore incomplete project directories while attach is still being written.
+    }
+  }
+
+  return projects.sort((a, b) => b.updated_at.localeCompare(a.updated_at));
+}
+
+export async function saveAttachedProjectBaselineSnapshot(
+  paths: WorkspacePaths,
+  baselineSnapshot: AttachedProjectBaselineSnapshot
+): Promise<void> {
+  await ensureWorkspace(paths);
+  const projectPaths = await ensureProjectDirectories(
+    paths,
+    baselineSnapshot.project_id
+  );
+  await writeJsonFile(projectPaths.baselineSnapshotFile, baselineSnapshot);
+}
+
+export async function getAttachedProjectBaselineSnapshot(
+  paths: WorkspacePaths,
+  projectId: string
+): Promise<AttachedProjectBaselineSnapshot | null> {
+  try {
+    const baselineSnapshot =
+      await readJsonFile<AttachedProjectBaselineSnapshot>(
+        resolveProjectPaths(paths, projectId).baselineSnapshotFile
+      );
+    return AttachedProjectBaselineSnapshotSchema.parse(baselineSnapshot);
+  } catch {
+    return null;
+  }
 }
 
 async function listJsonFiles<T>(

@@ -7485,6 +7485,11 @@ export {
 } from "./effective-policy-bundle.js";
 
 export {
+  inspectAttachedProjectWorkspace,
+  ProjectAttachError
+} from "./project-attach.js";
+
+export {
   appendResolvedRunMailboxEntry,
   buildRunMailboxThreadId,
   resolveOpenRunMailboxMessagesByType,

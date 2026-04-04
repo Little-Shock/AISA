@@ -16,6 +16,8 @@
   - 产品定位、Quick Start、主要验证入口
 - [`getting-started.md`](./getting-started.md)
   - 新同学第一次跑通本地环境、理解 repo map 和常用验证入口的首站
+- [`aisa-common-dev-scenarios-roadmap.md`](./aisa-common-dev-scenarios-roadmap.md)
+  - 如果目标是把 AISA 接到外部仓库，这份是近程主路线
 - [`glossary.md`](./glossary.md)
   - 先把 `run`、`attempt`、`handoff`、`working context` 这些词对齐
 
@@ -68,6 +70,8 @@
   - 当前主 roadmap
 - `aisa-single-run-core-hardening-roadmap.md`
   - 单 run 核心收敛路线
+- `aisa-common-dev-scenarios-roadmap.md`
+  - 面向常见外部开发场景的接入与采用路线
 
 ### 专项计划与历史材料
 
