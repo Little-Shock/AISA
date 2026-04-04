@@ -115,7 +115,10 @@ export const RunHarnessSlotBindingValues = [
   "attempt_evaluation_synthesizer"
 ] as const;
 export const RunHarnessSlotBindingSchema = z.enum(RunHarnessSlotBindingValues);
-const RUN_HARNESS_SLOT_BINDING_CANONICAL_MAP = {
+const RUN_HARNESS_SLOT_BINDING_CANONICAL_MAP: Record<
+  RunHarnessSlotBinding,
+  CanonicalRunHarnessSlotBinding
+> = {
   research_worker: "research_worker",
   codex_cli_research_worker: "research_worker",
   execution_worker: "execution_worker",
