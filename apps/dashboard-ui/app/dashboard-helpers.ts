@@ -1,4 +1,11 @@
 import { nextActionLabel } from "./copy";
+import {
+  readFailureSurface,
+  readMaintenancePlane,
+  readPolicyRuntime,
+  readRunBrief,
+  readWorkingContext
+} from "./dashboard-read-model";
 import type {
   RunFocusLens,
   RunInboxFilter,
@@ -187,22 +194,30 @@ export function deriveRunOperatorState(
   nowTs: number
 ): RunOperatorState {
   const failureSignal = item.failure_signal ?? item.run_brief?.failure_signal ?? null;
-  const blockingReason = item.current?.blocking_reason?.trim() ?? "";
-  const runtimeError = item.latest_attempt_runtime_state?.error?.trim() ?? "";
-  const workingContextDegraded = item.working_context_degraded?.is_degraded === true;
-  const heartbeatAt = toTimestamp(item.latest_attempt_heartbeat?.heartbeat_at);
+  const runBrief = readRunBrief(item);
+  const failureSurface = readFailureSurface(item);
+  const maintenancePlane = readMaintenancePlane(item);
+  const workingContext = readWorkingContext(item);
+  const heartbeatAt = toTimestamp(maintenancePlane.heartbeat_at);
   const attemptStartedAt = toTimestamp(item.latest_attempt?.started_at);
-  const waitingForHuman = item.current?.waiting_for_human === true;
-  const hasBlockingReason = blockingReason.length > 0;
-  const hasRuntimeError = runtimeError.length > 0;
+  const waitingForHuman = runBrief.waiting_for_human;
+  const hasBlockingReason =
+    failureSurface?.source === "policy_runtime" && Boolean(failureSurface.summary);
+  const hasRuntimeError =
+    failureSurface?.source === "runtime" && Boolean(failureSurface.summary);
+  const hasWorkingContextDegraded = item.working_context_degraded?.is_degraded === true;
   const isRunning =
-    item.current?.run_status === "running" || item.latest_attempt?.status === "running";
+    readPolicyRuntime(item).status === "running" ||
+    item.latest_attempt?.status === "running";
   const staleHeartbeat =
     isRunning &&
-    ((heartbeatAt !== null && nowTs - heartbeatAt > WORKER_HEARTBEAT_STALE_MS) ||
+    ((heartbeatAt !== null &&
+      nowTs - heartbeatAt >
+        (maintenancePlane.stale_after_ms ?? WORKER_HEARTBEAT_STALE_MS)) ||
       (heartbeatAt === null &&
         attemptStartedAt !== null &&
-        nowTs - attemptStartedAt > WORKER_HEARTBEAT_STALE_MS));
+        nowTs - attemptStartedAt >
+          (maintenancePlane.stale_after_ms ?? WORKER_HEARTBEAT_STALE_MS)));
 
   if (
     waitingForHuman ||
@@ -211,11 +226,11 @@ export function deriveRunOperatorState(
   ) {
     return {
       kind: "needs_action",
-      label: "需介入",
+      label: "待处理",
       tone: "rose",
       reason:
         failureSignal?.summary ||
-        blockingReason ||
+        failureSurface?.summary ||
         "当前运行明确在等待人工决策或恢复动作。",
       recovery_hint: inferRecoveryHint(item, staleHeartbeat),
       sort_order: 0
@@ -225,17 +240,17 @@ export function deriveRunOperatorState(
   if (
     hasRuntimeError ||
     staleHeartbeat ||
-    workingContextDegraded ||
+    hasWorkingContextDegraded ||
     failureSignal?.policy_mode === "soft_degrade"
   ) {
     return {
       kind: "at_risk",
-      label: "需排查",
+      label: "有风险",
       tone: "amber",
       reason:
-        failureSignal?.summary ||
-        runtimeError ||
-        item.working_context_degraded?.summary ||
+        failureSignal?.summary ??
+        failureSurface?.summary ??
+        item.working_context_degraded?.summary ??
         "运行还在继续，但心跳或实时信号已经偏陈旧，需要先确认 worker 是否卡住。",
       recovery_hint: inferRecoveryHint(item, staleHeartbeat),
       sort_order: 1
@@ -248,8 +263,8 @@ export function deriveRunOperatorState(
       label: "推进中",
       tone: "emerald",
       reason:
-        item.latest_attempt_runtime_state?.progress_text?.trim() ||
-        item.current?.summary ||
+        workingContext.progress_text?.trim() ||
+        runBrief.summary ||
         "运行正在沿当前判断持续推进。",
       recovery_hint:
         "继续观察当前尝试与回放证据；只有在出现卡点或错误时再人工接管。",
@@ -262,11 +277,11 @@ export function deriveRunOperatorState(
     label: "待观察",
     tone: "amber",
     reason:
-      item.current?.summary || "当前没有进行中的尝试，保留在运行池中供后续继续推进。",
+      runBrief.summary || "当前没有进行中的尝试，保留在运行池中供后续继续推进。",
     recovery_hint:
-      item.current?.recommended_next_action &&
-      item.current.recommended_next_action !== "wait_for_human"
-        ? `当前建议动作：${nextActionLabel(item.current.recommended_next_action)}。`
+      runBrief.recommended_next_action &&
+      runBrief.recommended_next_action !== "wait_for_human"
+        ? `当前建议动作：${nextActionLabel(runBrief.recommended_next_action)}。`
         : "先打开运行详情，确认下一轮是否该继续研究、执行，或补一条 steer。",
     sort_order: 3
   };
@@ -282,9 +297,11 @@ export function runMatchesFocusLens(
   }
 
   const staleHeartbeat = hasStaleRunHeartbeat(item, nowTs);
+  const runBrief = readRunBrief(item);
+  const failureSurface = readFailureSurface(item);
 
   if (lens === "waiting_human") {
-    return item.current?.waiting_for_human === true || Boolean(item.current?.blocking_reason);
+    return runBrief.waiting_for_human || Boolean(runBrief.blocking_reason);
   }
 
   if (lens === "replay_gap") {
@@ -295,7 +312,10 @@ export function runMatchesFocusLens(
   }
 
   if (lens === "runtime_fault") {
-    return Boolean(item.latest_attempt_runtime_state?.error) || staleHeartbeat;
+    return (
+      (failureSurface?.source === "runtime" && Boolean(failureSurface.summary)) ||
+      staleHeartbeat
+    );
   }
 
   return !item.latest_attempt;
@@ -307,26 +327,33 @@ export function deriveRunSignalBadges(
 ): RunSignalBadge[] {
   const badges: RunSignalBadge[] = [];
   const failureSignal = item.failure_signal ?? item.run_brief?.failure_signal ?? null;
+  const runBrief = readRunBrief(item);
+  const failureSurface = readFailureSurface(item);
+  const maintenancePlane = readMaintenancePlane(item);
   const detail = [
-    item.current?.blocking_reason,
-    item.latest_attempt_runtime_state?.error,
-    item.current?.summary
+    failureSurface?.summary,
+    item.working_context_degraded?.summary,
+    runBrief.summary
   ]
     .filter(Boolean)
     .join(" ")
     .toLowerCase();
-  const heartbeatAt = toTimestamp(item.latest_attempt_heartbeat?.heartbeat_at);
+  const heartbeatAt = toTimestamp(maintenancePlane.heartbeat_at);
   const attemptStartedAt = toTimestamp(item.latest_attempt?.started_at);
   const isRunning =
-    item.current?.run_status === "running" || item.latest_attempt?.status === "running";
+    readPolicyRuntime(item).status === "running" ||
+    item.latest_attempt?.status === "running";
   const staleHeartbeat =
     isRunning &&
-    ((heartbeatAt !== null && nowTs - heartbeatAt > WORKER_HEARTBEAT_STALE_MS) ||
+    ((heartbeatAt !== null &&
+      nowTs - heartbeatAt >
+        (maintenancePlane.stale_after_ms ?? WORKER_HEARTBEAT_STALE_MS)) ||
       (heartbeatAt === null &&
         attemptStartedAt !== null &&
-        nowTs - attemptStartedAt > WORKER_HEARTBEAT_STALE_MS));
+        nowTs - attemptStartedAt >
+          (maintenancePlane.stale_after_ms ?? WORKER_HEARTBEAT_STALE_MS)));
 
-  if (item.current?.waiting_for_human) {
+  if (runBrief.waiting_for_human) {
     badges.push({ key: "waiting-human", label: "等待人工", tone: "rose" });
   }
 
@@ -355,7 +382,7 @@ export function deriveRunSignalBadges(
     badges.push({ key: "provider-limit", label: "provider 限流", tone: "amber" });
   }
 
-  if (item.latest_attempt_runtime_state?.error) {
+  if (failureSurface?.source === "runtime" && failureSurface.summary) {
     badges.push({ key: "runtime-error", label: "runtime 错误", tone: "rose" });
   }
 
@@ -398,11 +425,13 @@ export function deriveRunInboxReasons(
   const reasons: string[] = [];
   const operatorState = deriveRunOperatorState(item, nowTs);
   const staleHeartbeat = hasStaleRunHeartbeat(item, nowTs);
+  const runBrief = readRunBrief(item);
+  const failureSurface = readFailureSurface(item);
 
   if (lens === "waiting_human") {
-    if (item.current?.waiting_for_human) {
+    if (runBrief.waiting_for_human) {
       reasons.push("明确在等待人工接球。");
-    } else if (item.current?.blocking_reason) {
+    } else if (runBrief.blocking_reason) {
       reasons.push("blocking reason 已出现，适合先人工判断。");
     }
   }
@@ -417,7 +446,7 @@ export function deriveRunInboxReasons(
   }
 
   if (lens === "runtime_fault") {
-    if (item.latest_attempt_runtime_state?.error) {
+    if (failureSurface?.source === "runtime" && failureSurface.summary) {
       reasons.push("runtime 已上报错误。");
     }
     if (staleHeartbeat) {
@@ -460,10 +489,14 @@ export function deriveRunPriorityInfo(
   const operatorState = deriveRunOperatorState(item, nowTs);
   const failureSignal = item.failure_signal ?? item.run_brief?.failure_signal ?? null;
   const staleHeartbeat = hasStaleRunHeartbeat(item, nowTs);
-  const hasRuntimeError = Boolean(item.latest_attempt_runtime_state?.error);
+  const failureSurface = readFailureSurface(item);
+  const runBrief = readRunBrief(item);
+  const hasRuntimeError =
+    failureSurface?.source === "runtime" && Boolean(failureSurface.summary);
   const hasWorkingContextDegraded = item.working_context_degraded?.is_degraded === true;
-  const waitingForHuman = item.current?.waiting_for_human === true;
-  const hasBlockingReason = Boolean(item.current?.blocking_reason);
+  const waitingForHuman = runBrief.waiting_for_human;
+  const hasBlockingReason =
+    failureSurface?.source === "policy_runtime" && Boolean(failureSurface.summary);
   const replayGap =
     item.latest_attempt?.attempt_type === "execution" &&
     item.verification_command_count === 0;
@@ -574,35 +607,41 @@ export function deriveRunOperatorChecklist(
   nowTs: number
 ): string[] {
   const checklist: string[] = [];
+  const runBrief = readRunBrief(item);
+  const failureSurface = readFailureSurface(item);
+  const maintenancePlane = readMaintenancePlane(item);
   const detail = [
-    item.current?.blocking_reason,
-    item.latest_attempt_runtime_state?.error,
+    failureSurface?.summary,
     item.working_context_degraded?.summary,
-    item.current?.summary
+    runBrief.summary
   ]
     .filter(Boolean)
     .join(" ")
     .toLowerCase();
-  const heartbeatAt = toTimestamp(item.latest_attempt_heartbeat?.heartbeat_at);
+  const heartbeatAt = toTimestamp(maintenancePlane.heartbeat_at);
   const attemptStartedAt = toTimestamp(item.latest_attempt?.started_at);
   const isRunning =
-    item.current?.run_status === "running" || item.latest_attempt?.status === "running";
+    readPolicyRuntime(item).status === "running" ||
+    item.latest_attempt?.status === "running";
   const staleHeartbeat =
     isRunning &&
-    ((heartbeatAt !== null && nowTs - heartbeatAt > WORKER_HEARTBEAT_STALE_MS) ||
+    ((heartbeatAt !== null &&
+      nowTs - heartbeatAt >
+        (maintenancePlane.stale_after_ms ?? WORKER_HEARTBEAT_STALE_MS)) ||
       (heartbeatAt === null &&
         attemptStartedAt !== null &&
-        nowTs - attemptStartedAt > WORKER_HEARTBEAT_STALE_MS));
+        nowTs - attemptStartedAt >
+          (maintenancePlane.stale_after_ms ?? WORKER_HEARTBEAT_STALE_MS)));
 
-  if (item.current?.waiting_for_human) {
+  if (runBrief.waiting_for_human) {
     checklist.push("先处理人工决策：确认是补 steer、继续下一尝试，还是暂时挂起。");
   }
 
-  if (item.current?.blocking_reason) {
+  if (runBrief.blocking_reason) {
     checklist.push("先看 blocking reason 与当前判断，确认卡点是环境问题、策略问题，还是缺人工输入。");
   }
 
-  if (item.latest_attempt_runtime_state?.error) {
+  if (failureSurface?.source === "runtime" && failureSurface.summary) {
     checklist.push("打开当前错误、stderr 和 process content，先判断失败是否来自 runtime 或工具链。");
   }
 
@@ -630,10 +669,10 @@ export function deriveRunOperatorChecklist(
   }
 
   if (
-    item.current?.recommended_next_action &&
-    item.current.recommended_next_action !== "wait_for_human"
+    runBrief.recommended_next_action &&
+    runBrief.recommended_next_action !== "wait_for_human"
   ) {
-    checklist.push(`若当前尝试结束，优先执行建议动作：${nextActionLabel(item.current.recommended_next_action)}。`);
+    checklist.push(`若当前尝试结束，优先执行建议动作：${nextActionLabel(runBrief.recommended_next_action)}。`);
   }
 
   if (checklist.length === 0) {
@@ -645,11 +684,12 @@ export function deriveRunOperatorChecklist(
 
 function inferRecoveryHint(item: RunSummaryItem, staleHeartbeat: boolean): string {
   const failureSignal = item.failure_signal ?? item.run_brief?.failure_signal ?? null;
+  const runBrief = readRunBrief(item);
+  const failureSurface = readFailureSurface(item);
   const detail = [
-    item.current?.blocking_reason,
-    item.latest_attempt_runtime_state?.error,
+    failureSurface?.summary,
     item.working_context_degraded?.summary,
-    item.current?.summary
+    runBrief.summary
   ]
     .filter(Boolean)
     .join(" ")
@@ -696,7 +736,7 @@ function inferRecoveryHint(item: RunSummaryItem, staleHeartbeat: boolean): strin
     return "先修 working context 现场，再决定要不要继续长任务；不要在现场失真的情况下硬推下一轮。";
   }
 
-  if (item.current?.waiting_for_human) {
+  if (runBrief.waiting_for_human) {
     return "先看当前判断、最近尝试和回放结果，再决定是补 steer、重试，还是继续下一次尝试。";
   }
 
@@ -705,10 +745,10 @@ function inferRecoveryHint(item: RunSummaryItem, staleHeartbeat: boolean): strin
   }
 
   if (
-    item.current?.recommended_next_action &&
-    item.current.recommended_next_action !== "wait_for_human"
+    runBrief.recommended_next_action &&
+    runBrief.recommended_next_action !== "wait_for_human"
   ) {
-    return `当前运行已经给出下一动作：${nextActionLabel(item.current.recommended_next_action)}。`;
+    return `当前运行已经给出下一动作：${nextActionLabel(runBrief.recommended_next_action)}。`;
   }
 
   return "先打开运行详情，确认当前卡点和下一步建议，再决定是否手动介入。";
@@ -774,15 +814,15 @@ export function sortRunsForInbox(
 
     const leftUpdated =
       toTimestamp(
-        left.current?.updated_at ??
-          left.latest_attempt_heartbeat?.heartbeat_at ??
+        readRunBrief(left).updated_at ??
+          readMaintenancePlane(left).heartbeat_at ??
           left.latest_attempt?.started_at ??
           left.run.created_at
       ) ?? 0;
     const rightUpdated =
       toTimestamp(
-        right.current?.updated_at ??
-          right.latest_attempt_heartbeat?.heartbeat_at ??
+        readRunBrief(right).updated_at ??
+          readMaintenancePlane(right).heartbeat_at ??
           right.latest_attempt?.started_at ??
           right.run.created_at
       ) ?? 0;
@@ -810,24 +850,30 @@ export function listInterventionRuns(
         return orderDelta;
       }
 
-      const leftUpdated = toTimestamp(left.run.current?.updated_at ?? left.run.run.created_at) ?? 0;
+      const leftUpdated =
+        toTimestamp(readRunBrief(left.run).updated_at ?? left.run.run.created_at) ?? 0;
       const rightUpdated =
-        toTimestamp(right.run.current?.updated_at ?? right.run.run.created_at) ?? 0;
+        toTimestamp(readRunBrief(right.run).updated_at ?? right.run.run.created_at) ?? 0;
       return rightUpdated - leftUpdated;
     });
 }
 
 function hasStaleRunHeartbeat(item: RunSummaryItem, nowTs: number): boolean {
-  const heartbeatAt = toTimestamp(item.latest_attempt_heartbeat?.heartbeat_at);
+  const maintenancePlane = readMaintenancePlane(item);
+  const heartbeatAt = toTimestamp(maintenancePlane.heartbeat_at);
   const attemptStartedAt = toTimestamp(item.latest_attempt?.started_at);
   const isRunning =
-    item.current?.run_status === "running" || item.latest_attempt?.status === "running";
+    readPolicyRuntime(item).status === "running" ||
+    item.latest_attempt?.status === "running";
 
   return (
     isRunning &&
-    ((heartbeatAt !== null && nowTs - heartbeatAt > WORKER_HEARTBEAT_STALE_MS) ||
+    ((heartbeatAt !== null &&
+      nowTs - heartbeatAt >
+        (maintenancePlane.stale_after_ms ?? WORKER_HEARTBEAT_STALE_MS)) ||
       (heartbeatAt === null &&
         attemptStartedAt !== null &&
-        nowTs - attemptStartedAt > WORKER_HEARTBEAT_STALE_MS))
+        nowTs - attemptStartedAt >
+          (maintenancePlane.stale_after_ms ?? WORKER_HEARTBEAT_STALE_MS)))
   );
 }

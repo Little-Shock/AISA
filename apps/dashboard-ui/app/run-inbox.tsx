@@ -5,6 +5,13 @@ import {
   workerLabel
 } from "./copy";
 import {
+  readFailureSurface,
+  readMaintenancePlane,
+  readPolicyRuntime,
+  readRunBrief,
+  readWorkingContext
+} from "./dashboard-read-model";
+import {
   abbreviateWorkspace,
   countRunsByFocusLens,
   countRunsByInboxFilter,
@@ -226,6 +233,7 @@ export function InterventionQueuePanel({
           queuedRuns.map(({ run, state }) => {
             const selected = run.run.id === selectedRunId;
             const signalBadges = deriveRunSignalBadges(run, nowTs).slice(0, 3);
+            const runBrief = readRunBrief(run);
             return (
               <button
                 key={run.run.id}
@@ -247,19 +255,19 @@ export function InterventionQueuePanel({
                 <MeasuredText
                   className="queue-card-summary"
                   lines={2}
-                  text={truncateText(localizeUiText(run.run_brief?.headline ?? state.reason), 180)}
+                  text={truncateText(localizeUiText(runBrief.headline || state.reason), 180)}
                 />
                 <MeasuredText
                   className="queue-card-summary"
                   lines={2}
-                  text={truncateText(localizeUiText(run.run_brief?.summary ?? state.recovery_hint), 180)}
+                  text={truncateText(localizeUiText(runBrief.summary ?? state.recovery_hint), 180)}
                 />
                 <div className="queue-card-meta">
-                  {run.current?.recommended_next_action
-                    ? `下一动作 ${nextActionLabel(run.current.recommended_next_action)}`
+                  {runBrief.recommended_next_action
+                    ? `下一动作 ${nextActionLabel(runBrief.recommended_next_action)}`
                     : "先看详情"}
-                  {run.current?.updated_at
-                    ? ` · 最近判断 ${formatRelativeTime(run.current.updated_at, nowTs)}`
+                  {runBrief.updated_at
+                    ? ` · 最近判断 ${formatRelativeTime(runBrief.updated_at, nowTs)}`
                     : ""}
                 </div>
               </button>
@@ -391,25 +399,28 @@ export function RunInboxPanel({
         ) : (
           filteredRuns.map((item) => {
             const selected = item.run.id === selectedRunId;
-            const runtimeState = item.latest_attempt_runtime_state;
+            const runBrief = readRunBrief(item);
+            const policyRuntime = readPolicyRuntime(item);
+            const workingContext = readWorkingContext(item);
+            const maintenancePlane = readMaintenancePlane(item);
+            const failureSurface = readFailureSurface(item);
             const operatorState = deriveRunOperatorState(item, nowTs);
             const priority = deriveRunPriorityInfo(item, focusLens, nowTs);
             const signalBadges = deriveRunSignalBadges(item, nowTs).slice(0, 4);
             const inboxReasons = deriveRunInboxReasons(item, activeFilter, focusLens, nowTs);
             const taskFocus = truncateText(
               localizeUiText(
-                item.run_brief?.primary_focus ?? item.task_focus ?? item.run.description
+                workingContext.current_focus ?? item.task_focus ?? item.run.description
               ),
               120
             );
             const taskSummary = truncateText(
               localizeUiText(
-                item.run_brief?.headline ??
+                failureSurface?.summary ??
+                  runBrief.summary ??
                   item.latest_handoff_bundle?.summary ??
                   item.latest_adversarial_verification?.failure_reason ??
                   item.latest_runtime_verification?.failure_reason ??
-                  item.current?.blocking_reason ??
-                  item.current?.summary ??
                   item.run.description
               ),
               110
@@ -426,21 +437,26 @@ export function RunInboxPanel({
             );
             const workspaceLabel = abbreviateWorkspace(item.run.workspace_root);
             const latestRunSignalAt =
-              item.current?.updated_at ??
-              item.latest_attempt_heartbeat?.heartbeat_at ??
+              runBrief.updated_at ??
+              maintenancePlane.heartbeat_at ??
+              workingContext.last_event_at ??
               item.latest_attempt?.ended_at ??
               item.latest_attempt?.started_at ??
               item.run.created_at;
             const runningSince =
-              item.latest_attempt?.status === "running" ? item.latest_attempt.started_at : null;
+              policyRuntime.status === "running" && item.latest_attempt?.started_at
+                ? item.latest_attempt.started_at
+                : null;
             const liveProgress = truncateText(
               localizeUiText(
-                runtimeState?.progress_text ?? runtimeState?.recent_activities.at(-1) ?? ""
+                workingContext.progress_text ??
+                  item.latest_attempt_runtime_state?.recent_activities.at(-1) ??
+                  ""
               ),
               110
             );
             const governanceStatus = item.governance ? statusLabel(item.governance.status) : "未建";
-            const healthStatus = runHealthLabel(item.run_health?.status);
+            const healthStatus = runHealthLabel(maintenancePlane.status);
 
             return (
               <button
@@ -451,7 +467,7 @@ export function RunInboxPanel({
               >
                 <div className="goal-card-head">
                   <strong>{localizeUiText(item.run.title)}</strong>
-                  <StatusPill value={item.current?.run_status ?? "draft"} />
+                  <StatusPill value={policyRuntime.status} />
                 </div>
                 <div className="run-card-topline">
                   <span className={`queue-chip queue-chip-${operatorState.tone}`}>
@@ -491,15 +507,15 @@ export function RunInboxPanel({
                     约定 {item.verification_command_count}
                   </span>
                   <span className="run-card-chip">
-                    阶段 {runtimePhaseLabel(runtimeState?.phase)}
+                    阶段 {runtimePhaseLabel(workingContext.active_phase)}
                   </span>
                   <span className="run-card-chip run-card-chip-system">治理 {governanceStatus}</span>
                   <span
                     className={`run-card-chip ${
-                      item.run_health?.status === "stale_running_attempt"
+                      maintenancePlane.status === "stale_running_attempt"
                         ? "run-card-chip-rose"
-                        : item.run_health?.status === "waiting_steer" ||
-                            item.run_health?.status === "unknown"
+                        : maintenancePlane.status === "waiting_steer" ||
+                            maintenancePlane.status === "unknown"
                           ? "run-card-chip-amber"
                           : "run-card-chip-emerald"
                     }`}
@@ -511,16 +527,16 @@ export function RunInboxPanel({
                       已跑 {formatElapsed(runningSince, nowTs)}
                     </span>
                   ) : null}
-                  {item.current?.waiting_for_human ? (
+                  {runBrief.waiting_for_human ? (
                     <span className="run-card-chip run-card-chip-alert">等待人工</span>
                   ) : null}
                 </div>
                 <MeasuredText className="run-card-summary" lines={3} text={taskSummary} />
-                {item.run_brief?.summary ? (
+                {runBrief.summary ? (
                   <MeasuredText
                     className="run-card-summary"
                     lines={2}
-                    text={truncateText(localizeUiText(item.run_brief.summary), 120)}
+                    text={truncateText(localizeUiText(runBrief.summary), 120)}
                   />
                 ) : null}
                 {liveProgress ? (

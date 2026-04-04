@@ -10,6 +10,12 @@ import {
 } from "./copy";
 import { AttemptCard } from "./attempt-card";
 import {
+  readMaintenancePlane,
+  readPolicyRuntime,
+  readRunBrief,
+  readWorkingContext
+} from "./dashboard-read-model";
+import {
   countRunsByFocusLens,
   deriveRunOperatorState,
   formatClockTime,
@@ -143,9 +149,11 @@ export default function Page() {
 
   useEffect(() => {
     setRunSteerText("");
-    setRunSteerAttemptId(defaultRunSteerAttemptId(runDetail?.current?.latest_attempt_id));
+    setRunSteerAttemptId(
+      defaultRunSteerAttemptId(runDetail ? readWorkingContext(runDetail).active_attempt_id : null)
+    );
     setRunPolicyNote("");
-  }, [runDetail?.run.id, runDetail?.current?.latest_attempt_id]);
+  }, [runDetail]);
 
   const selectedGoal = useMemo(
     () => goals.find((item) => item.goal.id === selectedGoalId) ?? null,
@@ -162,7 +170,7 @@ export default function Page() {
 
     return (
       runDetail.attempt_details.find(
-        (item) => item.attempt.id === runDetail.current?.latest_attempt_id
+        (item) => item.attempt.id === readWorkingContext(runDetail).active_attempt_id
       ) ??
       runDetail.attempt_details.at(-1) ??
       null
@@ -213,9 +221,9 @@ export default function Page() {
 
   const overviewStats = useMemo(() => {
     const runningGoals = goals.filter((item) => item.goal.status === "running").length;
-    const runningRuns = runs.filter((item) => item.current?.run_status === "running").length;
+    const runningRuns = runs.filter((item) => readPolicyRuntime(item).status === "running").length;
     const runAttempts = runs.reduce((sum, item) => sum + item.attempt_count, 0);
-    const waitingRuns = runs.filter((item) => item.current?.waiting_for_human).length;
+    const waitingRuns = runs.filter((item) => readRunBrief(item).waiting_for_human).length;
 
     return [
       { label: "运行任务数", value: String(runs.length).padStart(2, "0") },
@@ -237,8 +245,9 @@ export default function Page() {
         ? "stale"
         : "live";
   const selectedRunCurrentUpdatedAt =
-    runDetail?.current?.updated_at ??
-    selectedRun?.current?.updated_at ??
+    (runDetail ? readRunBrief(runDetail).updated_at : null) ??
+    (selectedRun ? readRunBrief(selectedRun).updated_at : null) ??
+    (selectedRun ? readMaintenancePlane(selectedRun).heartbeat_at : null) ??
     selectedRun?.latest_attempt?.ended_at ??
     selectedRun?.latest_attempt?.started_at ??
     selectedRun?.run.created_at ??
@@ -310,7 +319,8 @@ export default function Page() {
   function syncRunSummaryFromDetail(nextDetail: RunDetail) {
     const latestDetail =
       nextDetail.attempt_details.find(
-        (detailItem) => detailItem.attempt.id === nextDetail.current?.latest_attempt_id
+        (detailItem) =>
+          detailItem.attempt.id === readWorkingContext(nextDetail).active_attempt_id
       ) ??
       nextDetail.attempt_details.at(-1) ??
       null;
@@ -361,14 +371,12 @@ export default function Page() {
               latest_attempt_runtime_state: latestDetail?.runtime_state ?? null,
               latest_attempt_heartbeat: latestDetail?.heartbeat ?? null,
               task_focus:
-                nextDetail.run_brief?.primary_focus ??
-                nextDetail.working_context?.current_focus ??
+                readWorkingContext(nextDetail).current_focus ??
                 latestDetail?.contract?.objective ??
                 latestDetail?.attempt.objective ??
                 item.task_focus,
               verification_command_count:
-                latestDetail?.contract?.verification_plan?.commands.length ??
-                item.verification_command_count
+                latestDetail?.contract?.verification_plan?.commands.length ?? 0
             }
           : item
       )

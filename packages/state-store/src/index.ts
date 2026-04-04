@@ -7,7 +7,7 @@ import {
   unlink,
   writeFile
 } from "node:fs/promises";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, join, relative } from "node:path";
 import type {
   Attempt,
   AttemptAdversarialVerification,
@@ -161,6 +161,59 @@ export interface AttemptPaths {
   artifactsDir: string;
 }
 
+export type RunRefKey =
+  | "contractFile"
+  | "currentFile"
+  | "automationFile"
+  | "policyFile"
+  | "mailboxFile"
+  | "runBriefFile"
+  | "workingContextFile"
+  | "governanceFile"
+  | "maintenancePlaneFile"
+  | "reportFile"
+  | "journalFile"
+  | "runtimeHealthSnapshotFile";
+
+export type AttemptRefKey =
+  | "metaFile"
+  | "contractFile"
+  | "contextFile"
+  | "taskSpecFile"
+  | "promptFile"
+  | "rawOutputFile"
+  | "resultFile"
+  | "reportFile"
+  | "evaluationFile"
+  | "evaluationSynthesisFile"
+  | "reviewInputPacketFile"
+  | "reviewPacketFile"
+  | "handoffBundleFile"
+  | "evaluatorCalibrationSampleFile"
+  | "preflightEvaluationFile"
+  | "runtimeVerificationFile"
+  | "adversarialVerificationFile"
+  | "heartbeatFile"
+  | "runtimeStateFile"
+  | "runtimeEventsFile"
+  | "stdoutFile"
+  | "stderrFile";
+
+export type LatestRunEvidenceSurface = {
+  latestAttempt: Attempt | null;
+  evidenceAttempt: Attempt | null;
+  latestPreflightEvaluation: AttemptPreflightEvaluation | null;
+  latestPreflightEvaluationRef: string | null;
+  latestHandoffBundle: AttemptHandoffBundle | null;
+  latestHandoffBundleRef: string | null;
+  latestReviewPacket: AttemptReviewPacket | null;
+  latestReviewPacketRef: string | null;
+  latestRuntimeVerification: AttemptRuntimeVerification | null;
+  latestRuntimeVerificationRef: string | null;
+  latestAdversarialVerification: AttemptAdversarialVerification | null;
+  latestAdversarialVerificationRef: string | null;
+};
+
 export function resolveWorkspacePaths(rootDir: string): WorkspacePaths {
   return {
     rootDir,
@@ -286,6 +339,207 @@ export function resolveBranchArtifactPaths(
     writebackFile: join(branchDir, "writeback.json"),
     reportFile: join(branchDir, "report.md"),
     evalFile: join(branchDir, "judge.json")
+  };
+}
+
+export function buildRelativeRef(
+  paths: WorkspacePaths,
+  absolutePath: string
+): string {
+  return relative(paths.rootDir, absolutePath);
+}
+
+export function buildRunRef(
+  paths: WorkspacePaths,
+  runId: string,
+  key: RunRefKey
+): string {
+  return buildRelativeRef(paths, resolveRunPaths(paths, runId)[key]);
+}
+
+export function buildAttemptRef(
+  paths: WorkspacePaths,
+  runId: string,
+  attemptId: string,
+  key: AttemptRefKey
+): string {
+  return buildRelativeRef(paths, resolveAttemptPaths(paths, runId, attemptId)[key]);
+}
+
+export function buildAttemptReviewOpinionRef(
+  paths: WorkspacePaths,
+  runId: string,
+  attemptId: string,
+  opinionId: string
+): string {
+  return buildRelativeRef(
+    paths,
+    join(resolveAttemptPaths(paths, runId, attemptId).reviewOpinionsDir, `${opinionId}.json`)
+  );
+}
+
+export function pickLatestAttempt(
+  attempts: Attempt[],
+  current: CurrentDecision | null
+): Attempt | null {
+  return (
+    attempts.find((attempt) => attempt.id === current?.latest_attempt_id) ??
+    attempts.at(-1) ??
+    null
+  );
+}
+
+export async function readLatestRunEvidenceSurface(input: {
+  paths: WorkspacePaths;
+  runId: string;
+  current?: CurrentDecision | null;
+  attempts?: Attempt[];
+}): Promise<LatestRunEvidenceSurface> {
+  const attempts =
+    input.attempts ?? (await listAttempts(input.paths, input.runId));
+  const current =
+    input.current ?? (await getCurrentDecision(input.paths, input.runId));
+  const latestAttempt = pickLatestAttempt(attempts, current);
+
+  if (!latestAttempt) {
+    return {
+      latestAttempt: null,
+      evidenceAttempt: null,
+      latestPreflightEvaluation: null,
+      latestPreflightEvaluationRef: null,
+      latestHandoffBundle: null,
+      latestHandoffBundleRef: null,
+      latestReviewPacket: null,
+      latestReviewPacketRef: null,
+      latestRuntimeVerification: null,
+      latestRuntimeVerificationRef: null,
+      latestAdversarialVerification: null,
+      latestAdversarialVerificationRef: null
+    };
+  }
+
+  const orderedCandidates = [
+    latestAttempt,
+    ...attempts
+      .slice()
+      .reverse()
+      .filter((attempt) => attempt.id !== latestAttempt.id)
+  ];
+
+  let evidenceAttempt: Attempt | null = null;
+  let latestPreflightEvaluation: AttemptPreflightEvaluation | null = null;
+  let latestPreflightEvaluationRef: string | null = null;
+  let latestHandoffBundle: AttemptHandoffBundle | null = null;
+  let latestHandoffBundleRef: string | null = null;
+  let latestReviewPacket: AttemptReviewPacket | null = null;
+  let latestReviewPacketRef: string | null = null;
+  let latestRuntimeVerification: AttemptRuntimeVerification | null = null;
+  let latestRuntimeVerificationRef: string | null = null;
+  let latestAdversarialVerification: AttemptAdversarialVerification | null = null;
+  let latestAdversarialVerificationRef: string | null = null;
+
+  for (const candidate of orderedCandidates) {
+    const [
+      candidatePreflightEvaluation,
+      candidateHandoffBundle,
+      candidateReviewPacket,
+      candidateRuntimeVerification,
+      candidateAdversarialVerification
+    ] = await Promise.all([
+      getAttemptPreflightEvaluation(input.paths, input.runId, candidate.id),
+      getAttemptHandoffBundle(input.paths, input.runId, candidate.id),
+      getAttemptReviewPacket(input.paths, input.runId, candidate.id),
+      getAttemptRuntimeVerification(input.paths, input.runId, candidate.id),
+      getAttemptAdversarialVerification(input.paths, input.runId, candidate.id)
+    ]);
+
+    if (
+      evidenceAttempt === null &&
+      (
+        candidatePreflightEvaluation ||
+        candidateHandoffBundle ||
+        candidateReviewPacket ||
+        candidateRuntimeVerification ||
+        candidateAdversarialVerification
+      )
+    ) {
+      evidenceAttempt = candidate;
+    }
+
+    if (!latestPreflightEvaluation && candidatePreflightEvaluation) {
+      latestPreflightEvaluation = candidatePreflightEvaluation;
+      latestPreflightEvaluationRef = buildAttemptRef(
+        input.paths,
+        input.runId,
+        candidate.id,
+        "preflightEvaluationFile"
+      );
+    }
+
+    if (!latestHandoffBundle && candidateHandoffBundle) {
+      latestHandoffBundle = candidateHandoffBundle;
+      latestHandoffBundleRef = buildAttemptRef(
+        input.paths,
+        input.runId,
+        candidate.id,
+        "handoffBundleFile"
+      );
+    }
+
+    if (!latestReviewPacket && candidateReviewPacket) {
+      latestReviewPacket = candidateReviewPacket;
+      latestReviewPacketRef = buildAttemptRef(
+        input.paths,
+        input.runId,
+        candidate.id,
+        "reviewPacketFile"
+      );
+    }
+
+    if (!latestRuntimeVerification && candidateRuntimeVerification) {
+      latestRuntimeVerification = candidateRuntimeVerification;
+      latestRuntimeVerificationRef = buildAttemptRef(
+        input.paths,
+        input.runId,
+        candidate.id,
+        "runtimeVerificationFile"
+      );
+    }
+
+    if (!latestAdversarialVerification && candidateAdversarialVerification) {
+      latestAdversarialVerification = candidateAdversarialVerification;
+      latestAdversarialVerificationRef = buildAttemptRef(
+        input.paths,
+        input.runId,
+        candidate.id,
+        "adversarialVerificationFile"
+      );
+    }
+
+    if (
+      latestPreflightEvaluation &&
+      latestHandoffBundle &&
+      latestReviewPacket &&
+      latestRuntimeVerification &&
+      latestAdversarialVerification
+    ) {
+      break;
+    }
+  }
+
+  return {
+    latestAttempt,
+    evidenceAttempt,
+    latestPreflightEvaluation,
+    latestPreflightEvaluationRef,
+    latestHandoffBundle,
+    latestHandoffBundleRef,
+    latestReviewPacket,
+    latestReviewPacketRef,
+    latestRuntimeVerification,
+    latestRuntimeVerificationRef,
+    latestAdversarialVerification,
+    latestAdversarialVerificationRef
   };
 }
 

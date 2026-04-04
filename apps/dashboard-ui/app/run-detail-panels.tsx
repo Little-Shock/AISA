@@ -9,6 +9,12 @@ import {
   workerLabel
 } from "./copy";
 import {
+  readMaintenancePlane,
+  readPolicyRuntime,
+  readRunBrief,
+  readWorkingContext
+} from "./dashboard-read-model";
+import {
   deriveRunOperatorChecklist,
   deriveRunSignalBadges,
   formatDateTime,
@@ -155,11 +161,14 @@ export function RunOverviewPanel({
   const signalBadges = deriveRunSignalBadges(selectedRun, nowTs);
   const operatorChecklist = deriveRunOperatorChecklist(selectedRun, nowTs);
   const governance = runDetail.governance;
-  const policyRuntime = runDetail.policy_runtime;
-  const runHealth = runDetail.run_health;
+  const policyRuntimeRecord = runDetail.policy_runtime;
   const automation = runDetail.automation;
   const runBrief = runDetail.run_brief;
-  const maintenancePlane = runDetail.maintenance_plane;
+  const maintenancePlaneRecord = runDetail.maintenance_plane;
+  const runBriefSurface = readRunBrief(runDetail);
+  const policyRuntimeSurface = readPolicyRuntime(runDetail);
+  const workingContextSurface = readWorkingContext(runDetail);
+  const maintenancePlane = readMaintenancePlane(runDetail);
   const failureSignal = runDetail.failure_signal ?? runBrief?.failure_signal ?? null;
   const latestPreflight = runDetail.latest_preflight_evaluation;
   const latestRuntimeVerification = runDetail.latest_runtime_verification;
@@ -184,12 +193,13 @@ export function RunOverviewPanel({
     runDetail.run_brief_invalid_reason ??
     "暂无";
   const governanceStatus = governance ? statusLabel(governance.status) : "未建立";
-  const healthStatus = runHealthLabel(runHealth?.status);
-  const latestActivityLabel = runHealth?.latest_activity_at
-    ? formatRelativeTime(runHealth.latest_activity_at, nowTs)
+  const healthStatus = runHealthLabel(maintenancePlane.status);
+  const latestActivityLabel = maintenancePlane.latest_activity_at
+    ? formatRelativeTime(maintenancePlane.latest_activity_at, nowTs)
     : "暂无";
-  const heartbeatLabel = selectedRunHeartbeat?.heartbeat_at
-    ? formatRelativeTime(selectedRunHeartbeat.heartbeat_at, nowTs)
+  const heartbeatAt = maintenancePlane.heartbeat_at ?? selectedRunHeartbeat?.heartbeat_at;
+  const heartbeatLabel = heartbeatAt
+    ? formatRelativeTime(heartbeatAt, nowTs)
     : "暂无";
 
   return (
@@ -236,17 +246,17 @@ export function RunOverviewPanel({
       <div className="summary-grid">
         <InfoCard
           label="运行状态"
-          value={statusLabel(runDetail.current?.run_status ?? "draft")}
+          value={statusLabel(policyRuntimeSurface.status)}
         />
         <InfoCard label="介入等级" value={selectedRunOperatorState?.label ?? "暂无"} />
         <InfoCard
           label="下一动作"
-          value={nextActionLabel(runDetail.current?.recommended_next_action)}
+          value={nextActionLabel(runBriefSurface.recommended_next_action)}
         />
-        <InfoCard label="策略阶段" value={policyStageLabel(policyRuntime?.stage)} />
+        <InfoCard label="策略阶段" value={policyStageLabel(policyRuntimeRecord?.stage)} />
         <InfoCard
           label="审批状态"
-          value={policyApprovalStatusLabel(policyRuntime?.approval_status)}
+          value={policyApprovalStatusLabel(policyRuntimeRecord?.approval_status)}
         />
         <InfoCard label="治理状态" value={governanceStatus} />
         <InfoCard label="运行健康" value={healthStatus} />
@@ -255,7 +265,7 @@ export function RunOverviewPanel({
           label="现场状态"
           value={workingContextDegradedReasonLabel(workingContextDegraded.reason_code)}
         />
-        <InfoCard label="最新尝试" value={runDetail.current?.latest_attempt_id ?? "暂无"} />
+        <InfoCard label="最新尝试" value={workingContextSurface.active_attempt_id ?? "暂无"} />
         <InfoCard label="尝试数量" value={String(runDetail.attempts.length)} />
         <InfoCard label="治理主线" value={governance?.mainline_attempt_id ?? "暂无"} />
         <InfoCard label="最新活动" value={latestActivityLabel} />
@@ -271,7 +281,7 @@ export function RunOverviewPanel({
         <InfoCard
           label="心跳"
           value={
-            selectedRunHeartbeat?.heartbeat_at ? `最近 ${heartbeatLabel}` : "暂无"
+            heartbeatAt ? `最近 ${heartbeatLabel}` : "暂无"
           }
         />
       </div>
@@ -297,37 +307,37 @@ export function RunOverviewPanel({
         </Callout>
       ) : null}
 
-      {policyRuntime?.approval_status === "pending" ? (
+      {policyRuntimeRecord?.approval_status === "pending" ? (
         <Callout tone="rose" title="执行审批待处理">
           {localizeUiText(
-            policyRuntime.blocking_reason ??
-              policyRuntime.proposed_objective ??
+            policyRuntimeRecord.blocking_reason ??
+              policyRuntimeRecord.proposed_objective ??
               "当前 execution 计划已生成，但还不能直接发车。"
           )}
         </Callout>
       ) : null}
 
-      {policyRuntime?.approval_status === "rejected" ? (
+      {policyRuntimeRecord?.approval_status === "rejected" ? (
         <Callout tone="amber" title="执行计划已拒绝">
           {localizeUiText(
-            policyRuntime.blocking_reason ??
+            policyRuntimeRecord.blocking_reason ??
               "上一版 execution 计划被拒绝，先补 steer 或重开研究。"
           )}
         </Callout>
       ) : null}
 
-      {policyRuntime?.killswitch_active ? (
+      {policyRuntimeRecord?.killswitch_active ? (
         <Callout tone="rose" title="策略熔断已开启">
           {localizeUiText(
-            policyRuntime.killswitch_reason ??
+            policyRuntimeRecord.killswitch_reason ??
               "当前 execution 已被策略熔断，需要人工处理后再恢复。"
           )}
         </Callout>
       ) : null}
 
-      {runHealth?.status === "stale_running_attempt" ? (
+      {maintenancePlane.status === "stale_running_attempt" ? (
         <Callout tone="rose" title="疑似僵尸运行">
-          {localizeUiText(runHealth.summary)}
+          {localizeUiText(maintenancePlane.summary)}
         </Callout>
       ) : null}
 
@@ -378,17 +388,18 @@ export function RunOverviewPanel({
         </Callout>
       ) : null}
 
-      {maintenancePlane?.blocked_diagnosis.status === "attention" ? (
+      {maintenancePlaneRecord?.blocked_diagnosis.status === "attention" ? (
         <Callout tone="amber" title="维护面诊断">
           <strong>
             {localizeUiText(
-              maintenancePlane.blocked_diagnosis.summary ?? "维护平面检测到当前需要排查。"
+              maintenancePlaneRecord?.blocked_diagnosis.summary ??
+                "维护平面检测到当前需要排查。"
             )}
           </strong>
           <br />
           {localizeUiText(
-            maintenancePlane.blocked_diagnosis.recommended_next_action
-              ? `建议动作 ${maintenancePlane.blocked_diagnosis.recommended_next_action}`
+            maintenancePlaneRecord?.blocked_diagnosis.recommended_next_action
+              ? `建议动作 ${maintenancePlaneRecord.blocked_diagnosis.recommended_next_action}`
               : "当前没有额外建议动作。"
           )}
         </Callout>
@@ -398,7 +409,7 @@ export function RunOverviewPanel({
         <SubPanel title="当前分配任务" accent="emerald">
           <p className="body-copy">
             {localizeUiText(
-              workingContext?.current_focus ??
+              workingContextSurface.current_focus ??
                 selectedRunAttemptDetail?.contract?.objective ??
                 selectedRunAttemptDetail?.attempt.objective ??
                 runDetail.run.description
@@ -407,7 +418,7 @@ export function RunOverviewPanel({
           <SectionList
             title="任务上下文"
             items={[
-              `最新尝试：${selectedRunAttemptDetail?.attempt.id ?? runDetail.current?.latest_attempt_id ?? "暂无"}`,
+              `最新尝试：${selectedRunAttemptDetail?.attempt.id ?? workingContextSurface.active_attempt_id ?? "暂无"}`,
               `尝试类型：${selectedRunAttemptDetail ? attemptTypeLabel(selectedRunAttemptDetail.attempt.attempt_type) : "暂无"}`,
               `执行器：${selectedRunAttemptDetail ? workerLabel(selectedRunAttemptDetail.attempt.worker) : "暂无"}`,
               `创建时间：${formatDateTime(selectedRunAttemptDetail?.attempt.created_at)}`,
@@ -424,14 +435,14 @@ export function RunOverviewPanel({
               `run brief：${localizeUiText(runBriefHeadlineText)}`,
               `run brief ref：${runBriefRefText}`,
               `维护平面：${runDetail.maintenance_plane_ref ?? "未落盘"}`,
-              `当前焦点：${localizeUiText(workingContext?.current_focus ?? "暂无")}`,
+              `当前焦点：${localizeUiText(workingContextSurface.current_focus ?? "暂无")}`,
               `计划锚点：${workingContext?.plan_ref ?? "暂无"}`,
               `来源尝试：${workingContext?.source_attempt_id ?? "暂无"}`,
-              `下一注意点：${localizeUiText(workingContext?.next_operator_attention ?? "暂无")}`,
+              `下一注意点：${localizeUiText(workingContextSurface.next_operator_attention ?? "暂无")}`,
               `自动化模式：${automationModeLabel(workingContext?.automation.mode ?? automation?.mode)}`,
-              `策略阶段：${policyStageLabel(policyRuntime?.stage)}`,
-              `策略决议：${localizeUiText(policyRuntime?.last_decision ?? "暂无")}`,
-              `待批目标：${localizeUiText(policyRuntime?.proposed_objective ?? "暂无")}`
+              `策略阶段：${policyStageLabel(policyRuntimeRecord?.stage)}`,
+              `策略决议：${localizeUiText(policyRuntimeRecord?.last_decision ?? "暂无")}`,
+              `待批目标：${localizeUiText(policyRuntimeRecord?.proposed_objective ?? "暂无")}`
             ]}
           />
           <SectionList
@@ -506,7 +517,7 @@ export function RunOverviewPanel({
           <SectionList
             title="维护平面输出"
             items={
-              maintenancePlane?.outputs.map(
+              maintenancePlaneRecord?.outputs.map(
                 (item) =>
                   `${item.label} · ${item.status}${item.ref ? ` · ${item.ref}` : ""}${item.summary ? ` · ${localizeUiText(item.summary)}` : ""}`
               ) ?? []
@@ -554,8 +565,8 @@ export function RunOverviewPanel({
         <SubPanel title="当前判断" accent="amber">
           <p className="body-copy">
             {localizeUiText(
-              workingContext?.next_operator_attention ??
-                runDetail.current?.summary ??
+              workingContextSurface.next_operator_attention ??
+                runBriefSurface.summary ??
                 "还没有当前判断。"
             )}
           </p>
@@ -563,10 +574,10 @@ export function RunOverviewPanel({
           <SectionList
             title="当前状态"
             items={[
-              `运行状态：${statusLabel(runDetail.current?.run_status ?? "draft")}`,
-              `建议的尝试类型：${runDetail.current?.recommended_attempt_type ? attemptTypeLabel(runDetail.current.recommended_attempt_type) : "暂无"}`,
-              `等待人工：${runDetail.current?.waiting_for_human ? "是" : "否"}`,
-              `最新尝试：${runDetail.current?.latest_attempt_id ?? "暂无"}`,
+              `运行状态：${statusLabel(policyRuntimeSurface.status)}`,
+              `建议的尝试类型：${runBriefSurface.recommended_attempt_type ? attemptTypeLabel(runBriefSurface.recommended_attempt_type) : "暂无"}`,
+              `等待人工：${runBriefSurface.waiting_for_human ? "是" : "否"}`,
+              `最新尝试：${workingContextSurface.active_attempt_id ?? "暂无"}`,
               `实时阶段：${runtimePhaseLabel(selectedRunRuntimeState?.phase)}`,
               `最近事件：${selectedRunRuntimeState?.last_event_at ? formatRelativeTime(selectedRunRuntimeState.last_event_at, nowTs) : "暂无"}`,
               `事件总数：${String(selectedRunRuntimeState?.event_count ?? 0)}`,
@@ -581,7 +592,7 @@ export function RunOverviewPanel({
             items={[
               `run brief blocker：${localizeUiText(runBriefBlockerText)}`,
               `统一失败信号：${failureSignal?.failure_code ?? failureSignal?.failure_class ?? "暂无"}`,
-              `当前 blocker：${localizeUiText(workingContext?.current_blocker?.summary ?? runDetail.current?.blocking_reason ?? "暂无")}`,
+              `当前 blocker：${localizeUiText(workingContext?.current_blocker?.summary ?? runBriefSurface.blocking_reason ?? "暂无")}`,
               `blocker 锚点：${workingContext?.current_blocker?.ref ?? "暂无"}`,
               `blocker 代码：${workingContext?.current_blocker?.code ?? automation?.reason_code ?? "暂无"}`
             ]}
@@ -613,7 +624,7 @@ export function RunOverviewPanel({
           <SectionList
             title="信号来源"
             items={
-              maintenancePlane?.signal_sources.map(
+              maintenancePlaneRecord?.signal_sources.map(
                 (item) =>
                   `${item.label} · ${item.plane}${item.ref ? ` · ${item.ref}` : ""}${item.summary ? ` · ${localizeUiText(item.summary)}` : ""}`
               ) ?? []
@@ -626,9 +637,9 @@ export function RunOverviewPanel({
               `阻塞重复次数：${String(governance?.blocker_repeat_count ?? 0)}`,
               `排除计划数：${String(governance?.excluded_plans.length ?? 0)}`,
               `最新活动：${latestActivityLabel}`,
-              `心跳：${selectedRunHeartbeat?.heartbeat_at ? heartbeatLabel : "暂无"}`,
-              `疑似僵尸：${runHealth?.likely_zombie ? "是" : "否"}`,
-              `阻塞诊断：${localizeUiText(maintenancePlane?.blocked_diagnosis.summary ?? "暂无")}`
+              `心跳：${heartbeatAt ? heartbeatLabel : "暂无"}`,
+              `疑似僵尸：${maintenancePlane.likely_degraded ? "是" : "否"}`,
+              `阻塞诊断：${localizeUiText(maintenancePlaneRecord?.blocked_diagnosis.summary ?? "暂无")}`
             ]}
           />
           <SectionList
@@ -638,9 +649,9 @@ export function RunOverviewPanel({
               return `[${statusLabel(steer.status)}]${attemptPart} ${steer.content}`;
             })}
           />
-          {runDetail.current?.blocking_reason ? (
+          {runBriefSurface.blocking_reason ? (
             <Callout tone="rose" title="当前卡点">
-              {localizeUiText(runDetail.current.blocking_reason)}
+              {localizeUiText(runBriefSurface.blocking_reason)}
             </Callout>
           ) : null}
           <CodeBlock
@@ -662,7 +673,9 @@ export function RunOverviewPanel({
               governance?.context_summary.blocker_summary
                 ? `\n阻塞：${localizeUiText(governance.context_summary.blocker_summary)}`
                 : "",
-              runHealth?.summary ? `\nHealth：${localizeUiText(runHealth.summary)}` : ""
+              maintenancePlane.summary
+                ? `\nHealth：${localizeUiText(maintenancePlane.summary)}`
+                : ""
             ].join("")}
           />
           <CodeBlock

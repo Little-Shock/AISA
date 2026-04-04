@@ -1,4 +1,4 @@
-import { dirname, join, relative } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import cors from "@fastify/cors";
 import { config as loadEnv } from "dotenv";
@@ -49,6 +49,7 @@ import {
 import { buildSelfBootstrapRunTemplate, generateInitialPlan } from "@autoresearch/planner";
 import {
   appendRunJournal,
+  buildRunRef,
   getAttemptAdversarialVerification,
   getAttemptContract,
   getAttemptContext,
@@ -84,7 +85,8 @@ import {
   listRunSteers,
   listSteers,
   listWorkerRuns,
-  resolveAttemptPaths,
+  pickLatestAttempt,
+  readLatestRunEvidenceSurface,
   resolveRunPaths,
   resolveWorkspacePaths,
   readRunPolicyRuntimeStrict,
@@ -110,10 +112,7 @@ function inferLaunchAttemptType(input: {
   current: Awaited<ReturnType<typeof getCurrentDecision>> | null;
   attempts: Awaited<ReturnType<typeof listAttempts>>;
 }): "research" | "execution" {
-  const latestAttempt =
-    input.current?.latest_attempt_id
-      ? input.attempts.find((attempt) => attempt.id === input.current?.latest_attempt_id) ?? null
-      : input.attempts.at(-1) ?? null;
+  const latestAttempt = pickLatestAttempt(input.attempts, input.current);
 
   return (
     input.current?.recommended_attempt_type ??
@@ -131,10 +130,7 @@ function inferLaunchNextAction(input: {
     return currentAction;
   }
 
-  const latestAttempt =
-    input.current?.latest_attempt_id
-      ? input.attempts.find((attempt) => attempt.id === input.current?.latest_attempt_id) ?? null
-      : input.attempts.at(-1) ?? null;
+  const latestAttempt = pickLatestAttempt(input.attempts, input.current);
 
   if (!latestAttempt) {
     return "start_first_attempt";
@@ -214,10 +210,7 @@ async function readRunPolicyRuntimeSurface(
   workspacePaths: ReturnType<typeof resolveWorkspacePaths>,
   runId: string
 ): Promise<RunPolicyRuntimeSurface> {
-  const policyRuntimeRef = relative(
-    workspacePaths.rootDir,
-    resolveRunPaths(workspacePaths, runId).policyFile
-  );
+  const policyRuntimeRef = buildRunRef(workspacePaths, runId, "policyFile");
 
   try {
     return {
@@ -248,10 +241,7 @@ async function readRunMailboxSurface(
   workspacePaths: ReturnType<typeof resolveWorkspacePaths>,
   runId: string
 ): Promise<RunMailboxSurface> {
-  const runMailboxRef = relative(
-    workspacePaths.rootDir,
-    resolveRunPaths(workspacePaths, runId).mailboxFile
-  );
+  const runMailboxRef = buildRunRef(workspacePaths, runId, "mailboxFile");
 
   try {
     return {
@@ -290,10 +280,7 @@ function buildRunPolicyActivity(input: {
     Array.isArray(value)
       ? value.filter((item: unknown): item is string => typeof item === "string")
       : [];
-  const policyActivityRef = relative(
-    input.workspacePaths.rootDir,
-    resolveRunPaths(input.workspacePaths, input.runId).journalFile
-  );
+  const policyActivityRef = buildRunRef(input.workspacePaths, input.runId, "journalFile");
   const policyEntries: RunPolicyActivityItem[] = input.journal
     .filter((entry) =>
       [
@@ -627,13 +614,15 @@ export async function buildServer(
     current: Awaited<ReturnType<typeof getCurrentDecision>> | null;
     attempts: Awaited<ReturnType<typeof listAttempts>>;
   }) => {
-    const latestAttempt =
-      input.attempts.find((attempt) => attempt.id === input.current?.latest_attempt_id) ??
-      input.attempts.at(-1) ??
-      null;
-    if (!latestAttempt) {
+    const latestAttemptSurface = await readLatestRunEvidenceSurface({
+      paths: workspacePaths,
+      runId: input.runId,
+      current: input.current,
+      attempts: input.attempts
+    });
+    if (!latestAttemptSurface.latestAttempt) {
       return {
-        latestAttempt,
+        latestAttempt: null,
         latest_preflight_evaluation: null,
         latest_preflight_evaluation_ref: null,
         latest_runtime_verification: null,
@@ -645,111 +634,17 @@ export async function buildServer(
       };
     }
 
-    const orderedCandidates = [
-      latestAttempt,
-      ...input.attempts
-        .slice()
-        .reverse()
-        .filter((attempt) => attempt.id !== latestAttempt.id)
-    ];
-    let latestPreflightEvaluation = null;
-    let latestPreflightAttempt = null;
-    let latestRuntimeVerification = null;
-    let latestRuntimeAttempt = null;
-    let latestAdversarialVerification = null;
-    let latestAdversarialAttempt = null;
-    let latestHandoffBundle = null;
-    let latestHandoffAttempt = null;
-
-    for (const candidate of orderedCandidates) {
-      const [
-        candidatePreflight,
-        candidateRuntimeVerification,
-        candidateAdversarialVerification,
-        candidateHandoff
-      ] = await Promise.all([
-        getAttemptPreflightEvaluation(workspacePaths, input.runId, candidate.id),
-        getAttemptRuntimeVerification(workspacePaths, input.runId, candidate.id),
-        getAttemptAdversarialVerification(workspacePaths, input.runId, candidate.id),
-        getAttemptHandoffBundle(workspacePaths, input.runId, candidate.id)
-      ]);
-
-      if (!latestPreflightEvaluation && candidatePreflight) {
-        latestPreflightEvaluation = candidatePreflight;
-        latestPreflightAttempt = candidate;
-      }
-
-      if (!latestRuntimeVerification && candidateRuntimeVerification) {
-        latestRuntimeVerification = candidateRuntimeVerification;
-        latestRuntimeAttempt = candidate;
-      }
-
-      if (!latestAdversarialVerification && candidateAdversarialVerification) {
-        latestAdversarialVerification = candidateAdversarialVerification;
-        latestAdversarialAttempt = candidate;
-      }
-
-      if (!latestHandoffBundle && candidateHandoff) {
-        latestHandoffBundle = candidateHandoff;
-        latestHandoffAttempt = candidate;
-      }
-
-      if (
-        latestPreflightEvaluation &&
-        latestRuntimeVerification &&
-        latestAdversarialVerification &&
-        latestHandoffBundle
-      ) {
-        break;
-      }
-    }
-
     return {
-      latestAttempt,
-      latest_preflight_evaluation: latestPreflightEvaluation,
-      latest_preflight_evaluation_ref: latestPreflightEvaluation
-        ? relative(
-            workspacePaths.rootDir,
-            resolveAttemptPaths(
-              workspacePaths,
-              input.runId,
-              latestPreflightAttempt!.id
-            ).preflightEvaluationFile
-          )
-        : null,
-      latest_runtime_verification: latestRuntimeVerification,
-      latest_runtime_verification_ref: latestRuntimeVerification
-        ? relative(
-            workspacePaths.rootDir,
-            resolveAttemptPaths(
-              workspacePaths,
-              input.runId,
-              latestRuntimeAttempt!.id
-            ).runtimeVerificationFile
-          )
-        : null,
-      latest_adversarial_verification: latestAdversarialVerification,
-      latest_adversarial_verification_ref: latestAdversarialVerification
-        ? relative(
-            workspacePaths.rootDir,
-            resolveAttemptPaths(
-              workspacePaths,
-              input.runId,
-              latestAdversarialAttempt!.id
-            ).adversarialVerificationFile
-          )
-        : null,
-      latest_handoff_bundle: latestHandoffBundle,
-      latest_handoff_bundle_ref: latestHandoffBundle
-        ? relative(
-            workspacePaths.rootDir,
-            resolveAttemptPaths(
-              workspacePaths,
-              input.runId,
-              latestHandoffAttempt!.id
-            ).handoffBundleFile
-          )
-        : null
+      latestAttempt: latestAttemptSurface.latestAttempt,
+      latest_preflight_evaluation: latestAttemptSurface.latestPreflightEvaluation,
+      latest_preflight_evaluation_ref: latestAttemptSurface.latestPreflightEvaluationRef,
+      latest_runtime_verification: latestAttemptSurface.latestRuntimeVerification,
+      latest_runtime_verification_ref: latestAttemptSurface.latestRuntimeVerificationRef,
+      latest_adversarial_verification: latestAttemptSurface.latestAdversarialVerification,
+      latest_adversarial_verification_ref:
+        latestAttemptSurface.latestAdversarialVerificationRef,
+      latest_handoff_bundle: latestAttemptSurface.latestHandoffBundle,
+      latest_handoff_bundle_ref: latestAttemptSurface.latestHandoffBundleRef
     };
   };
 
@@ -1245,9 +1140,10 @@ export async function buildServer(
       const message = error instanceof Error ? error.message : String(error);
       return reply.code(400).send({ message });
     }
-    const runtimeHealthSnapshotRef = relative(
-      workspacePaths.rootDir,
-      resolveRunPaths(workspacePaths, run.id).runtimeHealthSnapshotFile
+    const runtimeHealthSnapshotRef = buildRunRef(
+      workspacePaths,
+      run.id,
+      "runtimeHealthSnapshotFile"
     );
     let runtimeHealthSnapshot;
     try {
