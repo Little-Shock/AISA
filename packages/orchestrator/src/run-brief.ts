@@ -23,7 +23,6 @@ import {
   getRun,
   getRunAutomationControl,
   getRunGovernanceState,
-  getRunWorkingContext,
   listRunJournal,
   listAttempts,
   readRunBriefStrict,
@@ -198,13 +197,14 @@ async function readRunBriefStaleState(input: {
   runBrief: RunBrief;
   runBriefRef: string;
 }): Promise<RunBriefView["run_brief_degraded"] | null> {
-  const [current, automation, governance, workingContext, attempts] = await Promise.all([
+  const [current, automation, governance, workingContextView, attempts] = await Promise.all([
     getCurrentDecision(input.paths, input.runId),
     getRunAutomationControl(input.paths, input.runId),
     getRunGovernanceState(input.paths, input.runId),
-    getRunWorkingContext(input.paths, input.runId),
+    readRunWorkingContextView(input.paths, input.runId),
     listAttempts(input.paths, input.runId)
   ]);
+  const workingContext = workingContextView.working_context;
   const latestAttempt = pickLatestAttempt(attempts, current);
   const {
     evidenceAttempt,
