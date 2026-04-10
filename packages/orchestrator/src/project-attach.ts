@@ -64,6 +64,14 @@ export class ProjectAttachError extends Error {
   }
 }
 
+function isMissingPathError(error: unknown): error is NodeJS.ErrnoException {
+  return (
+    error instanceof Error &&
+    "code" in error &&
+    (error as NodeJS.ErrnoException).code === "ENOENT"
+  );
+}
+
 export async function inspectAttachedProjectWorkspace(input: {
   workspaceRoot: string;
   policy: RunWorkspaceScopePolicy;
@@ -314,8 +322,20 @@ async function listManifestFiles(workspaceRoot: string): Promise<string[]> {
       if (fileStat.isFile()) {
         found.push(file);
       }
-    } catch {
-      // ignore missing manifest
+    } catch (error) {
+      if (isMissingPathError(error)) {
+        continue;
+      }
+
+      throw new ProjectAttachError(
+        "attach_inspection_failed",
+        `Manifest ${file} is unreadable in ${workspaceRoot}.`,
+        {
+          workspace_root: workspaceRoot,
+          manifest: file,
+          reason: error instanceof Error ? error.message : String(error)
+        }
+      );
     }
   }
 

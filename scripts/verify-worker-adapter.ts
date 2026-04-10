@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { constants as fsConstants } from "node:fs";
-import { access, chmod, readFile, readdir, writeFile } from "node:fs/promises";
+import { access, chmod, mkdir, readFile, readdir, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
   createAttempt,
@@ -689,6 +689,76 @@ async function main(): Promise<void> {
   assert.equal(stalledRuntimeState?.running, false);
   assert.equal(stalledRuntimeState?.phase, "failed");
   assert.match(stalledRuntimeState?.error ?? "", /Codex CLI stalled/);
+
+  const blockedOutputFixture = createExecutionAttemptFixture({
+    runId: run.id,
+    workspaceRoot: rootDir,
+    objective: "验证输出文件不可访问时不会被伪装成普通 stall。"
+  });
+  const blockedOutputCodex = await createStalledCodexScript({
+    rootDir,
+    fileName: "fake-codex-blocked-output.mjs",
+    jsonEvents: [
+      JSON.stringify({
+        type: "thread.started",
+        thread_id: "sess_blocked_output_test"
+      })
+    ]
+  });
+  const blockedOutputAdapter = new CodexCliWorkerAdapter({
+    command: blockedOutputCodex,
+    sandbox: "workspace-write",
+    skipGitRepoCheck: true,
+    progressStallMs: 80,
+    stallPollMs: 20,
+    stallKillGraceMs: 20
+  });
+  const blockedOutputPaths = resolveAttemptPaths(
+    workspacePaths,
+    run.id,
+    blockedOutputFixture.attempt.id
+  );
+  const blockedOutputTargetParent = join(rootDir, "blocked-output-target");
+  const blockedOutputTarget = join(blockedOutputTargetParent, "writeback.json");
+  await mkdir(blockedOutputTargetParent, { recursive: true });
+  await mkdir(blockedOutputPaths.attemptDir, { recursive: true });
+  await symlink(blockedOutputTarget, blockedOutputPaths.rawOutputFile);
+  await chmod(blockedOutputTargetParent, 0o000);
+
+  try {
+    await assert.rejects(
+      () =>
+        blockedOutputAdapter.runAttemptTask({
+          run,
+          attempt: blockedOutputFixture.attempt,
+          attemptContract: blockedOutputFixture.attemptContract,
+          context: {},
+          workspacePaths
+        }),
+      (error: unknown) => {
+        const message = error instanceof Error ? error.message : String(error);
+        assert.match(message, /stall watchdog failed/i);
+        assert.match(message, /EACCES|permission denied/i);
+        return true;
+      }
+    );
+  } finally {
+    await chmod(blockedOutputTargetParent, 0o755);
+  }
+
+  const blockedOutputRuntimeState = await getAttemptRuntimeState(
+    workspacePaths,
+    run.id,
+    blockedOutputFixture.attempt.id
+  );
+  assert.ok(
+    blockedOutputRuntimeState,
+    "blocked-output runtime state should be persisted"
+  );
+  assert.equal(blockedOutputRuntimeState?.running, false);
+  assert.equal(blockedOutputRuntimeState?.phase, "failed");
+  assert.match(blockedOutputRuntimeState?.error ?? "", /stall watchdog failed/i);
+  assert.match(blockedOutputRuntimeState?.error ?? "", /EACCES|permission denied/i);
 
   const invalidFindingPayload = JSON.stringify(
     {

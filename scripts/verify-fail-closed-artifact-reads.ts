@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import { chmod, mkdir, symlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import {
@@ -8,6 +9,7 @@ import {
 import { listEvents } from "../packages/event-log/src/index.ts";
 import { assessExecutionVerificationToolchain } from "../packages/orchestrator/src/index.ts";
 import { captureAttachedProjectCapabilitySnapshot } from "../packages/orchestrator/src/project-capability.ts";
+import { inspectAttachedProjectWorkspace } from "../packages/orchestrator/src/project-attach.ts";
 import {
   ensureWorkspace,
   getAttachedProjectBaselineSnapshot,
@@ -48,6 +50,12 @@ type VerifyCaseResult = {
   scope: Scope;
   status: "pass" | "fail";
   error?: string;
+};
+
+type CommandResult = {
+  exitCode: number | null;
+  stdout: string;
+  stderr: string;
 };
 
 const ALL_SCOPES: Scope[] = ["state-store", "event-log", "orchestrator"];
@@ -171,6 +179,69 @@ function formatError(error: unknown): string {
     return error.stack ?? `${error.name}: ${error.message}`;
   }
   return String(error);
+}
+
+async function runCommand(
+  command: string,
+  args: string[],
+  cwd: string
+): Promise<CommandResult> {
+  return await new Promise((resolve, reject) => {
+    const child = spawn(command, args, {
+      cwd,
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+    let stdout = "";
+    let stderr = "";
+
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk;
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk;
+    });
+    child.on("error", reject);
+    child.on("close", (exitCode) => {
+      resolve({
+        exitCode,
+        stdout,
+        stderr
+      });
+    });
+  });
+}
+
+async function runCommandOrThrow(
+  command: string,
+  args: string[],
+  cwd: string
+): Promise<void> {
+  const result = await runCommand(command, args, cwd);
+  if (result.exitCode === 0) {
+    return;
+  }
+
+  throw new Error(
+    `${command} ${args.join(" ")} failed with exit code ${result.exitCode ?? "null"}.\n${(
+      `${result.stdout}\n${result.stderr}`
+    ).trim()}`
+  );
+}
+
+async function initializeGitRepository(repoRoot: string): Promise<void> {
+  await mkdir(repoRoot, { recursive: true });
+  await runCommandOrThrow("git", ["init"], repoRoot);
+  await runCommandOrThrow("git", ["config", "user.name", "AISA Verify"], repoRoot);
+  await runCommandOrThrow(
+    "git",
+    ["config", "user.email", "aisa-verify@example.com"],
+    repoRoot
+  );
+  await writeFile(join(repoRoot, "README.md"), "baseline\n", "utf8");
+  await runCommandOrThrow("git", ["add", "README.md"], repoRoot);
+  await runCommandOrThrow("git", ["commit", "-m", "baseline"], repoRoot);
 }
 
 const cases: VerifyCase[] = [
@@ -637,6 +708,36 @@ const cases: VerifyCase[] = [
           });
         });
       });
+    }
+  },
+  {
+    id: "project_attach_inaccessible_manifest_rejects",
+    scope: "orchestrator",
+    run: async () => {
+      const rootDir = await createTrackedVerifyTempDir(
+        "aisa-fail-closed-project-attach-blocked-manifest-"
+      );
+      const repoRoot = join(rootDir, "repo");
+      const blockedParent = join(rootDir, "blocked-manifest-target");
+      const blockedManifest = join(blockedParent, "pyproject.toml");
+      await initializeGitRepository(repoRoot);
+      await mkdir(blockedParent, { recursive: true });
+      await symlink(blockedManifest, join(repoRoot, "pyproject.toml"));
+      await chmod(blockedParent, 0o000);
+
+      try {
+        await assert.rejects(async () => {
+          await inspectAttachedProjectWorkspace({
+            workspaceRoot: repoRoot,
+            policy: {
+              allowedRoots: [repoRoot],
+              managedWorkspaceRoot: join(rootDir, ".aisa-managed")
+            }
+          });
+        });
+      } finally {
+        await chmod(blockedParent, 0o755);
+      }
     }
   }
 ];

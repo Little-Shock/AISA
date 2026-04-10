@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { readFile, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
   cleanupTrackedVerifyTempDirs,
@@ -27,8 +27,35 @@ async function fileExists(path: string): Promise<boolean> {
   try {
     await readFile(path, "utf8");
     return true;
-  } catch {
-    return false;
+  } catch (error) {
+    if (
+      error instanceof Error &&
+      "code" in error &&
+      (error as NodeJS.ErrnoException).code === "ENOENT"
+    ) {
+      return false;
+    }
+
+    throw error;
+  }
+}
+
+async function verifyFileExistsFailsClosedOnPermissionErrors(): Promise<void> {
+  const tempDir = await createTrackedVerifyTempDir(
+    "aisa-control-supervisor-file-exists-"
+  );
+  const blockedParent = join(tempDir, "blocked");
+  const blockedFile = join(blockedParent, "ready.txt");
+  await mkdir(blockedParent, { recursive: true });
+  await chmod(blockedParent, 0o000);
+
+  try {
+    await assert.rejects(
+      () => fileExists(blockedFile),
+      /EACCES|permission denied/i
+    );
+  } finally {
+    await chmod(blockedParent, 0o755);
   }
 }
 
@@ -38,6 +65,8 @@ async function main(): Promise<void> {
     | null = null;
 
   try {
+    await verifyFileExistsFailsClosedOnPermissionErrors();
+
     const tempDir = await createTrackedVerifyTempDir(
       "aisa-control-supervisor-"
     );

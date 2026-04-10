@@ -27,6 +27,7 @@
     "verify:dashboard-control-surface": "pnpm --filter @autoresearch/dashboard-ui exec tsx --tsconfig tsconfig.verify.json scripts/verify-run-control-surface.tsx",
     "verify:governance": "node --experimental-transform-types --loader ./scripts/ts-runtime-loader.mjs scripts/verify-governance.ts",
     "verify:worker-adapter": "node --experimental-transform-types --loader ./scripts/ts-runtime-loader.mjs scripts/verify-worker-adapter.ts",
+    "verify:control-api-supervisor": "node --experimental-transform-types --loader ./scripts/ts-runtime-loader.mjs scripts/verify-control-api-supervisor.ts",
     "verify:self-bootstrap": "node --experimental-transform-types --loader ./scripts/ts-runtime-loader.mjs scripts/verify-self-bootstrap.ts",
     "seed:working-context-dashboard-fixture": "node --experimental-transform-types --loader ./scripts/ts-runtime-loader.mjs scripts/seed-working-context-dashboard-fixture.ts",
     "bootstrap:self": "node --experimental-transform-types --loader ./scripts/ts-runtime-loader.mjs scripts/bootstrap-self-run.ts",

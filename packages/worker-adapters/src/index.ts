@@ -183,6 +183,14 @@ export interface ExecutionWorkerAdapterConfig extends CodexCliConfig {
   provider: ExecutionWorkerAdapterProvider;
 }
 
+function isMissingPathError(error: unknown): error is NodeJS.ErrnoException {
+  return (
+    error instanceof Error &&
+    "code" in error &&
+    (error as NodeJS.ErrnoException).code === "ENOENT"
+  );
+}
+
 const RUN_HARNESS_SLOT_SUPPORTED_WORKER_ADAPTER_TYPES: Partial<
   Record<RunHarnessSlot, readonly string[]>
 > = {
@@ -2288,7 +2296,11 @@ async function waitForChildExitWithStallGuard(input: {
           try {
             await access(input.outputFile, fsConstants.F_OK);
             return;
-          } catch {
+          } catch (error) {
+            if (!isMissingPathError(error)) {
+              throw error;
+            }
+
             // The current hang pattern leaves no final output file behind.
           }
 
