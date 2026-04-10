@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import { formatScriptFailure } from "../packages/orchestrator/src/script-result.ts";
 
 type HistoryContractDrift = {
   run_id: string;
@@ -221,17 +222,6 @@ function runCommand(
       });
     });
   });
-}
-
-function formatScriptFailure(label: string, result: ScriptResult): string {
-  const stdout = result.stdout.trim();
-  const stderr = result.stderr.trim();
-
-  return [
-    `${label} exit code: ${result.exitCode ?? "null"}`,
-    stdout.length > 0 ? `stdout:\n${stdout}` : "stdout:\n<empty>",
-    stderr.length > 0 ? `stderr:\n${stderr}` : "stderr:\n<empty>"
-  ].join("\n\n");
 }
 
 function parseScriptJsonReport<T>(label: string, stdout: string): T {

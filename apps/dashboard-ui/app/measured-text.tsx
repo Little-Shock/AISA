@@ -3,7 +3,7 @@
 import { Fragment, useEffect, useRef, useState } from "react";
 import type { Ref } from "react";
 import { localizeUiText } from "./copy";
-import { layoutWithLines, prepare } from "./pretext";
+import { layoutWithLines, prepare, supportsTextMeasurement } from "./pretext";
 
 function fallbackLineHeight(computedLineHeight: string, fontSize: string): number {
   const parsedLineHeight = Number.parseFloat(computedLineHeight);
@@ -49,6 +49,12 @@ export function MeasuredText({
         return;
       }
 
+      if (!supportsTextMeasurement()) {
+        setDisplayLines([localizedText]);
+        setMinHeight(null);
+        return;
+      }
+
       const computed = window.getComputedStyle(element);
       const font =
         computed.font ||
@@ -57,11 +63,6 @@ export function MeasuredText({
         text: localizedText,
         font
       });
-      if (!prepared) {
-        setDisplayLines([localizedText]);
-        setMinHeight(null);
-        return;
-      }
 
       const lineHeight = fallbackLineHeight(computed.lineHeight, computed.fontSize);
       const layout = layoutWithLines({

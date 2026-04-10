@@ -52,6 +52,7 @@ import {
   cleanupTrackedVerifyTempDirs,
   createTrackedVerifyTempDir
 } from "./verify-temp.ts";
+import { formatScriptFailure } from "../packages/orchestrator/src/script-result.ts";
 
 class NoopAdapter {
   readonly type = "fake-codex";
@@ -245,17 +246,6 @@ async function createGitWorkspace(rootDir: string): Promise<void> {
   await runCommand(rootDir, "git", ["config", "user.email", "aisa-test@example.com"]);
   await runCommand(rootDir, "git", ["add", "."]);
   await runCommand(rootDir, "git", ["commit", "-m", "test: seed self-bootstrap fixture"]);
-}
-
-function formatScriptFailure(label: string, result: ScriptResult): string {
-  const stdout = result.stdout.trim();
-  const stderr = result.stderr.trim();
-
-  return [
-    `${label} exit code: ${result.exitCode ?? "null"}`,
-    stdout.length > 0 ? `stdout:\n${stdout}` : "stdout:\n<empty>",
-    stderr.length > 0 ? `stderr:\n${stderr}` : "stderr:\n<empty>"
-  ].join("\n\n");
 }
 
 function parseJsonStdout<T>(label: string, stdout: string): T {

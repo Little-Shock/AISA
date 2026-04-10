@@ -73,7 +73,8 @@ class WrappedSchema extends BaseSchema {
   }
 
   parse(input) {
-    return this.parser(input);
+    const parser = this.parser;
+    return parser(input);
   }
 }
 

@@ -54,12 +54,19 @@ import {
   cleanupTrackedVerifyTempDirs,
   createTrackedVerifyTempDir
 } from "./verify-temp.ts";
+import { initializeVerifyGitRepo } from "./verify-git-repo.ts";
 
 type CaseResult = {
   id: string;
   status: "pass" | "fail";
   error?: string;
 };
+const AUTONOMY_GIT_REPO_FIXTURE = {
+  readme: "# autonomy verify\n",
+  userName: "AISA Verify",
+  userEmail: "aisa-verify@example.com",
+  commitMessage: "test: seed autonomy repo"
+} as const;
 
 const REVIEWER_CONFIG_ENV = "AISA_REVIEWERS_JSON";
 const SYNTHESIZER_CONFIG_ENV = "AISA_REVIEW_SYNTHESIZER_JSON";
@@ -583,7 +590,11 @@ async function createDetachedRuntimeLayout(
   const laneRepoRoot = await createTrackedVerifyTempDir(
     `aisa-autonomy-runtime-lane-${title}-`
   );
-  await initializeGitRepo(laneRepoRoot);
+  await initializeVerifyGitRepo({
+    rootDir: laneRepoRoot,
+    ...AUTONOMY_GIT_REPO_FIXTURE,
+    runCommand
+  });
   return resolveRuntimeLayout({
     repositoryRoot: laneRepoRoot,
     devRepoRoot: laneRepoRoot,
@@ -613,20 +624,6 @@ async function createPromotableRuntimeLayout(
     runtimeRepoRoot,
     runtimeDataRoot
   });
-}
-
-async function initializeGitRepo(rootDir: string): Promise<void> {
-  await writeFile(
-    join(rootDir, ".gitignore"),
-    ["runs/", "state/", "events/", "artifacts/", "reports/", "plans/"].join("\n") + "\n",
-    "utf8"
-  );
-  await writeFile(join(rootDir, "README.md"), "# autonomy verify\n", "utf8");
-  await runCommand(rootDir, ["git", "-C", rootDir, "init"]);
-  await runCommand(rootDir, ["git", "-C", rootDir, "config", "user.name", "AISA Verify"]);
-  await runCommand(rootDir, ["git", "-C", rootDir, "config", "user.email", "aisa-verify@example.com"]);
-  await runCommand(rootDir, ["git", "-C", rootDir, "add", "."]);
-  await runCommand(rootDir, ["git", "-C", rootDir, "commit", "-m", "test: seed autonomy repo"]);
 }
 
 async function writeExecutionWorkspacePackage(rootDir: string): Promise<void> {
@@ -771,7 +768,11 @@ async function verifyFailedExecutionAutoResumes(): Promise<void> {
     "failed-execution-auto-resume"
   );
   await writeExecutionWorkspacePackage(rootDir);
-  await initializeGitRepo(rootDir);
+  await initializeVerifyGitRepo({
+    rootDir,
+    ...AUTONOMY_GIT_REPO_FIXTURE,
+    runCommand
+  });
   const failedExecution = updateAttempt(
     createAttempt({
       run_id: run.id,
@@ -868,7 +869,11 @@ async function verifyRunLaunchResetsAutoResumeBudget(): Promise<void> {
     "run-launch-resets-auto-resume-budget"
   );
   await writeExecutionWorkspacePackage(rootDir);
-  await initializeGitRepo(rootDir);
+  await initializeVerifyGitRepo({
+    rootDir,
+    ...AUTONOMY_GIT_REPO_FIXTURE,
+    runCommand
+  });
 
   await appendRunJournal(
     workspacePaths,
@@ -1063,7 +1068,11 @@ async function verifyCheckpointBlockerAutoResumesIntoExecution(): Promise<void> 
   const { run, workspacePaths, rootDir, detachedRuntimeLayout } = await bootstrapRun(
     "checkpoint-blocker-auto-resume"
   );
-  await initializeGitRepo(rootDir);
+  await initializeVerifyGitRepo({
+    rootDir,
+    ...AUTONOMY_GIT_REPO_FIXTURE,
+    runCommand
+  });
   const completedExecution = updateAttempt(
     createAttempt({
       run_id: run.id,
@@ -1187,7 +1196,11 @@ async function verifyNoGitChangesBlocksAutoResume(): Promise<void> {
     "no-git-changes-blocks-auto-resume"
   );
   await writeExecutionWorkspacePackage(rootDir);
-  await initializeGitRepo(rootDir);
+  await initializeVerifyGitRepo({
+    rootDir,
+    ...AUTONOMY_GIT_REPO_FIXTURE,
+    runCommand
+  });
 
   const completedExecution = updateAttempt(
     createAttempt({
@@ -1349,7 +1362,11 @@ async function verifyPreflightBlockedExecutionBlocksAutoResume(): Promise<void> 
     "preflight-blocked-execution-blocks-auto-resume"
   );
   await writeExecutionWorkspacePackageWithoutNodeModules(rootDir);
-  await initializeGitRepo(rootDir);
+  await initializeVerifyGitRepo({
+    rootDir,
+    ...AUTONOMY_GIT_REPO_FIXTURE,
+    runCommand
+  });
 
   const failedExecution = updateAttempt(
     createAttempt({
@@ -1545,7 +1562,11 @@ async function verifyRecoveryAutoResumesExecution(): Promise<void> {
   const { run, workspacePaths, rootDir, detachedRuntimeLayout } = await bootstrapRun(
     "recovery-auto-resume"
   );
-  await initializeGitRepo(rootDir);
+  await initializeVerifyGitRepo({
+    rootDir,
+    ...AUTONOMY_GIT_REPO_FIXTURE,
+    runCommand
+  });
 
   const researchAttempt = updateAttempt(
     createAttempt({
@@ -1960,7 +1981,11 @@ async function verifyRateLimitedExecutionRetriesQuickly(): Promise<void> {
     "rate-limited-execution-retry"
   );
   await writeExecutionWorkspacePackage(rootDir);
-  await initializeGitRepo(rootDir);
+  await initializeVerifyGitRepo({
+    rootDir,
+    ...AUTONOMY_GIT_REPO_FIXTURE,
+    runCommand
+  });
 
   const failedExecution = updateAttempt(
     createAttempt({
@@ -2061,7 +2086,11 @@ async function verifyExecutionRateLimitBudgetDoesNotInheritResearchCycles(): Pro
     "execution-rate-limit-budget-does-not-inherit-research-cycles"
   );
   await writeExecutionWorkspacePackage(rootDir);
-  await initializeGitRepo(rootDir);
+  await initializeVerifyGitRepo({
+    rootDir,
+    ...AUTONOMY_GIT_REPO_FIXTURE,
+    runCommand
+  });
 
   const priorResearch = updateAttempt(
     createAttempt({
@@ -2186,7 +2215,11 @@ async function verifyWorkerStalledExecutionRetriesQuickly(): Promise<void> {
     "worker-stalled-execution-retry"
   );
   await writeExecutionWorkspacePackage(rootDir);
-  await initializeGitRepo(rootDir);
+  await initializeVerifyGitRepo({
+    rootDir,
+    ...AUTONOMY_GIT_REPO_FIXTURE,
+    runCommand
+  });
 
   const failedExecution = updateAttempt(
     createAttempt({
@@ -2717,7 +2750,11 @@ async function verifyRuntimeSourceDriftBlocksAutoResume(): Promise<void> {
     "runtime-source-drift-blocks-auto-resume"
   );
   await writeExecutionWorkspacePackage(rootDir);
-  await initializeGitRepo(rootDir);
+  await initializeVerifyGitRepo({
+    rootDir,
+    ...AUTONOMY_GIT_REPO_FIXTURE,
+    runCommand
+  });
   const promotableRuntimeLayout = await createPromotableRuntimeLayout(
     "runtime-source-drift-blocks-auto-resume",
     rootDir,
@@ -2838,7 +2875,11 @@ async function verifyRuntimeSourceDriftAutoResumesAfterRestart(): Promise<void> 
     "runtime-source-drift-auto-resumes-after-restart"
   );
   await writeExecutionWorkspacePackage(rootDir);
-  await initializeGitRepo(rootDir);
+  await initializeVerifyGitRepo({
+    rootDir,
+    ...AUTONOMY_GIT_REPO_FIXTURE,
+    runCommand
+  });
   const promotableRuntimeLayout = await createPromotableRuntimeLayout(
     "runtime-source-drift-auto-resumes-after-restart",
     rootDir,
@@ -2977,7 +3018,11 @@ async function verifyFailedAdversarialVerificationBlocksAutoResume(): Promise<vo
     "failed-adversarial-verification-blocks-auto-resume"
   );
   await writeExecutionWorkspacePackage(rootDir);
-  await initializeGitRepo(rootDir);
+  await initializeVerifyGitRepo({
+    rootDir,
+    ...AUTONOMY_GIT_REPO_FIXTURE,
+    runCommand
+  });
 
   const completedExecution = updateAttempt(
     createAttempt({
@@ -3226,7 +3271,11 @@ async function verifySchemaInvalidExecutionBlocksAutoResume(): Promise<void> {
     "schema-invalid-execution-blocks-auto-resume"
   );
   await writeExecutionWorkspacePackage(rootDir);
-  await initializeGitRepo(rootDir);
+  await initializeVerifyGitRepo({
+    rootDir,
+    ...AUTONOMY_GIT_REPO_FIXTURE,
+    runCommand
+  });
 
   const failedExecution = updateAttempt(
     createAttempt({
@@ -3324,7 +3373,11 @@ async function verifyVerifiedExecutionContinueDoesNotPauseForHuman(): Promise<vo
     "verified-execution-continue-does-not-pause-for-human"
   );
   await writeExecutionWorkspacePackage(rootDir);
-  await initializeGitRepo(rootDir);
+  await initializeVerifyGitRepo({
+    rootDir,
+    ...AUTONOMY_GIT_REPO_FIXTURE,
+    runCommand
+  });
 
   const previousExecution = updateAttempt(
     createAttempt({
@@ -3427,7 +3480,11 @@ async function verifyCheckpointedRestartResetsAutoResumeBudget(): Promise<void> 
     "checkpointed-restart-resets-auto-resume-budget"
   );
   await writeExecutionWorkspacePackage(rootDir);
-  await initializeGitRepo(rootDir);
+  await initializeVerifyGitRepo({
+    rootDir,
+    ...AUTONOMY_GIT_REPO_FIXTURE,
+    runCommand
+  });
 
   const completedExecution = updateAttempt(
     createAttempt({

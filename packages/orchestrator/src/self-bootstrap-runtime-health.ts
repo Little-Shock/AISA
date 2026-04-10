@@ -3,6 +3,7 @@ import { existsSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { RuntimeHealthSnapshot } from "@autoresearch/domain";
+import { formatScriptFailure } from "./script-result.js";
 
 type ScriptResult = {
   exitCode: number | null;
@@ -115,17 +116,6 @@ function runTypeScriptScript(
       });
     });
   });
-}
-
-function formatScriptFailure(label: string, result: ScriptResult): string {
-  const stdout = result.stdout.trim();
-  const stderr = result.stderr.trim();
-
-  return [
-    `${label} exit code: ${result.exitCode ?? "null"}`,
-    stdout.length > 0 ? `stdout:\n${stdout}` : "stdout:\n<empty>",
-    stderr.length > 0 ? `stderr:\n${stderr}` : "stderr:\n<empty>"
-  ].join("\n\n");
 }
 
 function parseJsonStdout<T>(label: string, stdout: string): T {

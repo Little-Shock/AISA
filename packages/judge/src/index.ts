@@ -418,7 +418,7 @@ export async function runAttemptReviewerPipeline(input: {
   reviewInputPacketRef: string;
   inputRefs: AttemptReviewInputRef[];
 }): Promise<AttemptReviewerOpinion[]> {
-  return await Promise.all(
+  return Promise.all(
     input.reviewers.map(async (reviewerAdapter) => {
       const opinion = await reviewerAdapter.reviewAttempt({
         reviewInputPacket: input.reviewInputPacket

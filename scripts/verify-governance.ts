@@ -44,12 +44,19 @@ import {
   cleanupTrackedVerifyTempDirs,
   createTrackedVerifyTempDir
 } from "./verify-temp.ts";
+import { initializeVerifyGitRepo } from "./verify-git-repo.ts";
 
 type CaseResult = {
   id: string;
   status: "pass" | "fail";
   error?: string;
 };
+const GOVERNANCE_GIT_REPO_FIXTURE = {
+  readme: "# governance verify\n",
+  userName: "AISA Verify",
+  userEmail: "aisa-verify@example.com",
+  commitMessage: "test: seed governance repo"
+} as const;
 
 class GovernanceExecutionAdapter {
   readonly type = "fake-codex";
@@ -124,20 +131,6 @@ async function bootstrapRun(title: string): Promise<{
   );
 
   return { run, workspacePaths, rootDir };
-}
-
-async function initializeGitRepo(rootDir: string): Promise<void> {
-  await writeFile(
-    join(rootDir, ".gitignore"),
-    ["runs/", "state/", "events/", "artifacts/", "reports/", "plans/"].join("\n") + "\n",
-    "utf8"
-  );
-  await writeFile(join(rootDir, "README.md"), "# governance verify\n", "utf8");
-  await runCommand(rootDir, ["git", "-C", rootDir, "init"]);
-  await runCommand(rootDir, ["git", "-C", rootDir, "config", "user.name", "AISA Verify"]);
-  await runCommand(rootDir, ["git", "-C", rootDir, "config", "user.email", "aisa-verify@example.com"]);
-  await runCommand(rootDir, ["git", "-C", rootDir, "add", "."]);
-  await runCommand(rootDir, ["git", "-C", rootDir, "commit", "-m", "test: seed governance repo"]);
 }
 
 async function writeExecutionWorkspacePackage(rootDir: string): Promise<void> {
@@ -245,7 +238,11 @@ function buildContinueResearchObjective(input: {
 async function verifyGovernancePreservesExecutionMainline(): Promise<void> {
   const { run, workspacePaths, rootDir } = await bootstrapRun("mainline");
   await writeExecutionWorkspacePackage(rootDir);
-  await initializeGitRepo(rootDir);
+  await initializeVerifyGitRepo({
+    rootDir,
+    ...GOVERNANCE_GIT_REPO_FIXTURE,
+    runCommand
+  });
 
   const completedExecution = createAttempt({
     run_id: run.id,
@@ -598,7 +595,11 @@ async function verifyFullwidthPunctuationArtifactReferenceIsAccepted(): Promise<
 async function verifyCheckpointIncludesGovernanceContext(): Promise<void> {
   const { run, workspacePaths, rootDir } = await bootstrapRun("checkpoint-context");
   await writeExecutionWorkspacePackage(rootDir);
-  await initializeGitRepo(rootDir);
+  await initializeVerifyGitRepo({
+    rootDir,
+    ...GOVERNANCE_GIT_REPO_FIXTURE,
+    runCommand
+  });
 
   const attempt = createAttempt({
     run_id: run.id,

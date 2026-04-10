@@ -7,18 +7,27 @@ import {
 
 export type PretextPrepared = ReturnType<typeof prepareWithSegments>;
 
+export function supportsTextMeasurement(): boolean {
+  if (typeof OffscreenCanvas === "function") {
+    return true;
+  }
+
+  if (typeof document === "undefined") {
+    return false;
+  }
+
+  const canvas = document.createElement("canvas");
+  return typeof canvas.getContext === "function" && canvas.getContext("2d") !== null;
+}
+
 export function prepare({
   text,
   font
 }: {
   text: string;
   font: string;
-}): PretextPrepared | null {
-  try {
-    return prepareWithSegments(text, font);
-  } catch {
-    return null;
-  }
+}): PretextPrepared {
+  return prepareWithSegments(text, font);
 }
 
 export function layout({

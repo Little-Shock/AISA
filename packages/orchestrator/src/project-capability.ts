@@ -332,7 +332,8 @@ async function describeVerificationCommandCapability(
 }
 
 function usesNodePackageManagerCommand(entrypoint: string): boolean {
-  return ["pnpm", "npm", "yarn", "bun"].includes(entrypoint);
+  const packageManagers = new Set(["pnpm", "npm", "yarn", "bun"]);
+  return packageManagers.has(entrypoint);
 }
 
 function isMissingPathError(error: unknown): error is NodeJS.ErrnoException {

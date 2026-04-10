@@ -902,13 +902,11 @@ function mergeExecutionCodeItems<T extends { code: string }>(
 }
 
 function normalizeExecutionObjective(value: string | null | undefined): string {
-  return (value ?? "")
-    .normalize("NFKC")
-    .toLowerCase()
-    .replace(/[`"'“”‘’]/gu, "")
-    .replace(/[^\p{L}\p{N}\/._-]+/gu, " ")
-    .replace(/\s+/gu, " ")
-    .trim();
+  const normalized = (value ?? "").normalize("NFKC").toLowerCase();
+  const withoutQuotes = normalized.replace(/[`"'“”‘’]/gu, "");
+  const collapsedSymbols = withoutQuotes.replace(/[^\p{L}\p{N}\/._-]+/gu, " ");
+  const collapsedWhitespace = collapsedSymbols.replace(/\s+/gu, " ");
+  return collapsedWhitespace.trim();
 }
 
 function executionObjectivesDescribeSameWork(
@@ -1124,6 +1122,10 @@ export class Orchestrator {
   ) => Promise<void> | void) | null;
   private readonly runtimeLayout: RuntimeLayout;
   private readonly instanceStartedAtMs: number;
+  readonly describeRunHarnessGates = buildRunHarnessGatesView;
+  readonly describeRunHarnessSlots = buildRunHarnessSlotsView;
+  readonly describeRunDefaultVerifierKit = buildRunDefaultVerifierKitView;
+  readonly describeRunEffectivePolicyBundle = buildRunEffectivePolicyBundleView;
 
   constructor(
     private readonly workspacePaths: WorkspacePaths,
@@ -1245,22 +1247,6 @@ export class Orchestrator {
         slot: "synthesizer"
       })
     };
-  }
-
-  describeRunHarnessGates(run: Run): RunHarnessGatesView {
-    return buildRunHarnessGatesView(run);
-  }
-
-  describeRunHarnessSlots(run: Run): RunHarnessSlotsView {
-    return buildRunHarnessSlotsView(run);
-  }
-
-  describeRunDefaultVerifierKit(run: Run): ExecutionVerifierKitView {
-    return buildRunDefaultVerifierKitView(run);
-  }
-
-  describeRunEffectivePolicyBundle(run: Run): RunEffectivePolicyBundleView {
-    return buildRunEffectivePolicyBundleView(run);
   }
 
   describeAttemptEffectiveVerifierKit(input: {
@@ -7233,7 +7219,7 @@ export class Orchestrator {
   }
 
   private async ensureRunWorkspaceReady(run: Run): Promise<Run> {
-    return await ensureRunManagedWorkspace({
+    return ensureRunManagedWorkspace({
       run,
       policy: this.runWorkspaceScopePolicy
     });

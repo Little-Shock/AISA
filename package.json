@@ -25,6 +25,7 @@
     "verify:policy-runtime": "node --experimental-transform-types --loader ./scripts/ts-runtime-loader.mjs scripts/verify-policy-runtime.ts",
     "verify:dashboard-run-steer": "pnpm exec tsx --tsconfig apps/dashboard-ui/tsconfig.verify.json apps/dashboard-ui/scripts/verify-run-steer.tsx",
     "verify:dashboard-control-surface": "pnpm --filter @autoresearch/dashboard-ui exec tsx --tsconfig tsconfig.verify.json scripts/verify-run-control-surface.tsx",
+    "verify:dashboard-error-fallbacks": "pnpm --filter @autoresearch/dashboard-ui exec tsx --tsconfig tsconfig.verify.json scripts/verify-error-fallbacks.ts",
     "verify:governance": "node --experimental-transform-types --loader ./scripts/ts-runtime-loader.mjs scripts/verify-governance.ts",
     "verify:worker-adapter": "node --experimental-transform-types --loader ./scripts/ts-runtime-loader.mjs scripts/verify-worker-adapter.ts",
     "verify:control-api-supervisor": "node --experimental-transform-types --loader ./scripts/ts-runtime-loader.mjs scripts/verify-control-api-supervisor.ts",

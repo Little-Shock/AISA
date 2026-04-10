@@ -365,9 +365,9 @@ const RUNTIME_PROCESS_CONTENT_MAX = 6;
 const RUNTIME_PREVIEW_CHARS = 240;
 
 function normalizeWhitespace(value: unknown): string {
-  return String(value ?? "")
-    .replace(/\s+/g, " ")
-    .trim();
+  const text = String(value ?? "");
+  const collapsedWhitespace = text.replace(/\s+/g, " ");
+  return collapsedWhitespace.trim();
 }
 
 function truncatePreview(value: string, maxChars = RUNTIME_PREVIEW_CHARS): string {
@@ -1338,6 +1338,7 @@ function createAttemptRuntimeTracker(input: {
 
 export class CodexCliWorkerAdapter {
   readonly type = "codex";
+  readonly resolveExecutionEffort = resolveExecutionWorkerEffort;
 
   private readonly config: CodexCliConfig & {
     progressStallMs: number;
@@ -1352,13 +1353,6 @@ export class CodexCliWorkerAdapter {
       stallPollMs: config.stallPollMs ?? 5_000,
       stallKillGraceMs: config.stallKillGraceMs ?? 5_000
     };
-  }
-
-  resolveExecutionEffort(input: {
-    requestedEffort?: WorkerEffortLevel | null;
-    source?: string;
-  } = {}): ExecutionWorkerEffortSetting {
-    return resolveExecutionWorkerEffort(input);
   }
 
   async runBranchTask(input: {
@@ -1755,12 +1749,7 @@ export function resolveCodexCliWorkerEffort(input: {
   };
 }
 
-export function resolveExecutionWorkerEffort(input: {
-  requestedEffort?: WorkerEffortLevel | null;
-  source?: string;
-} = {}): ExecutionWorkerEffortSetting {
-  return resolveCodexCliWorkerEffort(input);
-}
+export const resolveExecutionWorkerEffort = resolveCodexCliWorkerEffort;
 
 function buildCodexWorkerPrompt(
   goal: Goal,

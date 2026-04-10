@@ -65,6 +65,7 @@ import {
   defaultRunSteerAttemptId,
   normalizeRunSteerAttemptId
 } from "./run-steer";
+import { readErrorMessage } from "./error-response";
 
 const apiBaseUrl = "/api/control";
 const controlApiDisplay = "same-origin /api/control";
@@ -73,17 +74,6 @@ const staleDataThresholdMs = 12_000;
 const defaultWorkspace =
   process.env.NEXT_PUBLIC_DEFAULT_WORKSPACE_ROOT ??
   "E:\\00.Lark_Projects\\36_team_research";
-
-async function readErrorMessage(response: Response, fallback: string): Promise<string> {
-  try {
-    const payload = (await response.json()) as { message?: string };
-    if (payload.message) {
-      return payload.message;
-    }
-  } catch {}
-
-  return fallback;
-}
 
 function formatLoadError(fallback: string, cause: unknown): string {
   return cause instanceof Error ? cause.message : fallback;

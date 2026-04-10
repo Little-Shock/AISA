@@ -580,7 +580,8 @@ async function runGit(
 }
 
 function normalizePath(pathValue: string): string {
-  return resolve(pathValue);
+  const resolvedPath = resolve(pathValue);
+  return resolvedPath;
 }
 
 function extractGitError(stderr: string): string {

@@ -69,6 +69,7 @@ import {
   cleanupTrackedVerifyTempDirs,
   createTrackedVerifyTempDir
 } from "./verify-temp.ts";
+import { initializeVerifyGitRepo } from "./verify-git-repo.ts";
 
 const REVIEWER_CONFIG_ENV = "AISA_REVIEWERS_JSON";
 const SYNTHESIZER_CONFIG_ENV = "AISA_REVIEW_SYNTHESIZER_JSON";
@@ -85,6 +86,12 @@ const CLOSED_BASELINE_REVIEWERS_JSON = JSON.stringify([
 const CLOSED_BASELINE_SYNTHESIZER_JSON = JSON.stringify({
   kind: "deterministic"
 });
+const DRIVE_RUN_GIT_REPO_FIXTURE = {
+  readme: "# temp repo\n",
+  userName: "AISA Test",
+  userEmail: "aisa-test@example.com",
+  commitMessage: "test: seed repo"
+} as const;
 
 type HostJudgeConfigSnapshot = {
   reviewersJson: string | undefined;
@@ -553,7 +560,11 @@ async function main(hostJudgeConfig: HostJudgeConfigSnapshot): Promise<void> {
     const rootDir = await createTrackedVerifyTempDir("aisa-drive-run-");
     const workspacePaths = resolveWorkspacePaths(rootDir);
     await ensureWorkspace(workspacePaths);
-    await initializeGitRepo(rootDir);
+    await initializeVerifyGitRepo({
+      rootDir,
+      ...DRIVE_RUN_GIT_REPO_FIXTURE,
+      runCommand
+    });
     await verifyManagedWorkspaceCheckpointCatchesUpDirtyBaseline();
     await verifyExecutionAttemptRuntimeStateTransitionsAcrossVerification();
     await verifyDriveRunDoesNotLeaveRunningAttemptBehind();
@@ -946,7 +957,11 @@ async function verifyManagedWorkspaceCheckpointCatchesUpDirtyBaseline(): Promise
   const rootDir = await createTrackedVerifyTempDir("aisa-managed-checkpoint-");
   const workspacePaths = resolveWorkspacePaths(rootDir);
   await ensureWorkspace(workspacePaths);
-  await initializeGitRepo(rootDir);
+  await initializeVerifyGitRepo({
+    rootDir,
+    ...DRIVE_RUN_GIT_REPO_FIXTURE,
+    runCommand
+  });
   const gitignorePath = join(rootDir, ".gitignore");
   await writeFile(
     gitignorePath,
@@ -1096,7 +1111,11 @@ async function verifyExecutionAttemptRuntimeStateTransitionsAcrossVerification()
   );
   const workspacePaths = resolveWorkspacePaths(rootDir);
   await ensureWorkspace(workspacePaths);
-  await initializeGitRepo(rootDir);
+  await initializeVerifyGitRepo({
+    rootDir,
+    ...DRIVE_RUN_GIT_REPO_FIXTURE,
+    runCommand
+  });
 
   const run = createRun({
     title: "Keep execution runtime state truthful during verification",
@@ -1202,7 +1221,11 @@ async function verifyDriveRunDoesNotLeaveRunningAttemptBehind(): Promise<void> {
   const rootDir = await createTrackedVerifyTempDir("aisa-drive-run-drain-");
   const workspacePaths = resolveWorkspacePaths(rootDir);
   await ensureWorkspace(workspacePaths);
-  await initializeGitRepo(rootDir);
+  await initializeVerifyGitRepo({
+    rootDir,
+    ...DRIVE_RUN_GIT_REPO_FIXTURE,
+    runCommand
+  });
 
   const run = createRun({
     title: "Drain running attempt before returning",
@@ -1260,7 +1283,11 @@ async function assertSteeredExecutionDoesNotReuseMismatchedContract(): Promise<v
   );
   const workspacePaths = resolveWorkspacePaths(rootDir);
   await ensureWorkspace(workspacePaths);
-  await initializeGitRepo(rootDir);
+  await initializeVerifyGitRepo({
+    rootDir,
+    ...DRIVE_RUN_GIT_REPO_FIXTURE,
+    runCommand
+  });
   await writeFile(
     join(rootDir, "package.json"),
     JSON.stringify(
@@ -1647,21 +1674,6 @@ async function resolveProbeShell(): Promise<string> {
 
   cachedProbeShell = "sh";
   return cachedProbeShell;
-}
-
-async function initializeGitRepo(rootDir: string): Promise<void> {
-  await writeFile(
-    join(rootDir, ".gitignore"),
-    ["runs/", "state/", "events/", "artifacts/", "reports/", "plans/"].join("\n") + "\n",
-    "utf8"
-  );
-  await writeFile(join(rootDir, "README.md"), "# temp repo\n", "utf8");
-
-  await runCommand(rootDir, ["git", "-C", rootDir, "init"]);
-  await runCommand(rootDir, ["git", "-C", rootDir, "config", "user.name", "AISA Test"]);
-  await runCommand(rootDir, ["git", "-C", rootDir, "config", "user.email", "aisa-test@example.com"]);
-  await runCommand(rootDir, ["git", "-C", rootDir, "add", "."]);
-  await runCommand(rootDir, ["git", "-C", rootDir, "commit", "-m", "test: seed repo"]);
 }
 
 async function runCommand(

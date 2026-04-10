@@ -231,7 +231,8 @@ function isSelfBootstrapRun(run: Run): boolean {
 }
 
 function nowIso(): string {
-  return new Date().toISOString();
+  const now = new Date();
+  return now.toISOString();
 }
 
 function sleep(ms: number): Promise<void> {
@@ -434,8 +435,8 @@ function normalizeControlApiState(
   return state.control_api;
 }
 
-async function fetchControlApiHealth(apiBaseUrl: string): Promise<ControlApiHealthResponse> {
-  return await getJson<ControlApiHealthResponse>(apiBaseUrl, "/health");
+function fetchControlApiHealth(apiBaseUrl: string): Promise<ControlApiHealthResponse> {
+  return getJson<ControlApiHealthResponse>(apiBaseUrl, "/health");
 }
 
 function describeError(error: unknown): string {
@@ -487,7 +488,7 @@ async function waitForControlApiHealth(
 
   while (Date.now() < deadline) {
     try {
-      return await fetchControlApiHealth(apiBaseUrl);
+      return fetchControlApiHealth(apiBaseUrl);
     } catch (error) {
       lastError = error;
       await sleep(pollMs);

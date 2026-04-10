@@ -960,7 +960,7 @@ async function appendMaintenanceRefreshFailure(input: {
 export async function refreshRunMaintenancePlane(
   paths: WorkspacePaths,
   runId: string,
-  options: RefreshRunMaintenancePlaneOptions
+  options: RefreshRunMaintenancePlaneOptions = { staleAfterMs: 60_000 }
 ): Promise<RunMaintenancePlane> {
   try {
     await refreshRunWorkingContext(paths, runId);
@@ -1047,10 +1047,4 @@ export async function readRunMaintenancePlaneView(
   };
 }
 
-export async function refreshRunOperatorSurface(
-  paths: WorkspacePaths,
-  runId: string,
-  options: RefreshRunMaintenancePlaneOptions = { staleAfterMs: 60_000 }
-): Promise<RunMaintenancePlane> {
-  return await refreshRunMaintenancePlane(paths, runId, options);
-}
+export const refreshRunOperatorSurface = refreshRunMaintenancePlane;

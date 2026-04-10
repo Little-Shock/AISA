@@ -50,13 +50,13 @@ function cleanText(value: string | null | undefined): string | null {
 }
 
 function normalizeText(value: string | null | undefined): string {
-  return (value ?? "")
-    .normalize("NFKC")
-    .toLowerCase()
-    .replace(/[`"'“”‘’]/gu, "")
-    .replace(/[^\p{L}\p{N}\/._-]+/gu, " ")
-    .replace(/\s+/gu, " ")
-    .trim();
+  let normalized = value ?? "";
+  normalized = normalized.normalize("NFKC");
+  normalized = normalized.toLowerCase();
+  normalized = normalized.replace(/[`"'“”‘’]/gu, "");
+  normalized = normalized.replace(/[^\p{L}\p{N}\/._-]+/gu, " ");
+  normalized = normalized.replace(/\s+/gu, " ");
+  return normalized.trim();
 }
 
 export function buildGovernanceSignature(value: string | null | undefined): string | null {

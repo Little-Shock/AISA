@@ -1174,7 +1174,7 @@ async function settle(input: {
 }
 
 function shouldAutoApprovePendingExecution(driver: ScenarioDriver): boolean {
-  return [
+  const autoApprovedDrivers = new Set<ScenarioDriver>([
     "happy_path",
     "attached_project_pack_default_contract",
     "execution_verified_next_step_continues",
@@ -1189,7 +1189,8 @@ function shouldAutoApprovePendingExecution(driver: ScenarioDriver): boolean {
     "execution_unrunnable_verification_command_blocks_dispatch",
     "execution_parse_failure",
     "execution_retry_after_recovery_preserves_contract"
-  ].includes(driver);
+  ]);
+  return autoApprovedDrivers.has(driver);
 }
 
 async function maybeApprovePendingExecutionPolicy(input: {

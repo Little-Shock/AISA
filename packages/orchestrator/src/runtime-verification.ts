@@ -572,7 +572,7 @@ async function buildFailedVerificationArtifact(input: {
   failureCode: RuntimeVerificationFailureCode;
   failureReason: string;
 }): Promise<AttemptRuntimeVerificationOutcome> {
-  return await writeVerificationArtifact(input.attemptPaths, {
+  return writeVerificationArtifact(input.attemptPaths, {
     attempt_id: input.attempt.id,
     run_id: input.run.id,
     attempt_type: input.attempt.attempt_type,
