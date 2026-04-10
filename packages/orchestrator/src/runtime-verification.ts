@@ -34,6 +34,14 @@ export interface AttemptRuntimeVerificationOutcome {
   artifact_path: string;
 }
 
+function isMissingPathError(error: unknown): error is NodeJS.ErrnoException {
+  return (
+    error instanceof Error &&
+    "code" in error &&
+    (error as NodeJS.ErrnoException).code === "ENOENT"
+  );
+}
+
 export type VerificationCommandReadiness =
   | {
       ok: true;
@@ -606,8 +614,12 @@ async function readCheckpointPreflight(
     return await readJsonFile<GitCheckpointPreflightArtifact>(
       join(attemptPaths.artifactsDir, CHECKPOINT_PREFLIGHT_FILE_NAME)
     );
-  } catch {
-    return null;
+  } catch (error) {
+    if (isMissingPathError(error)) {
+      return null;
+    }
+
+    throw error;
   }
 }
 

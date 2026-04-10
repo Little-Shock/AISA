@@ -70,9 +70,11 @@ import {
   AttemptReviewerOpinionSchema,
   AttemptRuntimeVerificationSchema,
   BranchSchema,
+  BranchSpecSchema,
   ContextBoardSchema,
   ContextSnapshotSchema,
   CurrentDecisionSchema,
+  EvalSpecSchema,
   EvalResultSchema,
   GoalSchema,
   RunAutomationControlSchema,
@@ -709,6 +711,77 @@ export async function readJsonFile<T>(filePath: string): Promise<T> {
   return JSON.parse(raw) as T;
 }
 
+function isMissingPathError(error: unknown): error is NodeJS.ErrnoException {
+  return (
+    error instanceof Error &&
+    "code" in error &&
+    (error as NodeJS.ErrnoException).code === "ENOENT"
+  );
+}
+
+async function readOptionalJsonArtifact<T>(
+  filePath: string,
+  parser: (value: unknown) => T
+): Promise<T | null> {
+  try {
+    return parser(await readJsonFile<unknown>(filePath));
+  } catch (error) {
+    if (isMissingPathError(error)) {
+      return null;
+    }
+
+    throw error;
+  }
+}
+
+async function readOptionalJsonValue<T>(filePath: string): Promise<T | null> {
+  try {
+    return await readJsonFile<T>(filePath);
+  } catch (error) {
+    if (isMissingPathError(error)) {
+      return null;
+    }
+
+    throw error;
+  }
+}
+
+async function readOptionalTextFile(filePath: string): Promise<string | null> {
+  try {
+    return await readFile(filePath, "utf8");
+  } catch (error) {
+    if (isMissingPathError(error)) {
+      return null;
+    }
+
+    throw error;
+  }
+}
+
+async function readOptionalLines(filePath: string): Promise<string[]> {
+  const raw = await readOptionalTextFile(filePath);
+  if (raw === null) {
+    return [];
+  }
+
+  return raw
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+}
+
+async function listDirectoryEntries(dirPath: string) {
+  try {
+    return await readdir(dirPath, { withFileTypes: true });
+  } catch (error) {
+    if (isMissingPathError(error)) {
+      return [];
+    }
+
+    throw error;
+  }
+}
+
 async function writeFileAtomically(filePath: string, value: string): Promise<void> {
   const tempFilePath = join(
     dirname(filePath),
@@ -748,7 +821,7 @@ export async function getGoal(
 export async function listGoals(paths: WorkspacePaths): Promise<Goal[]> {
   await ensureWorkspace(paths);
   const goalsRoot = join(paths.stateDir, "goals");
-  const entries = await readdir(goalsRoot, { withFileTypes: true });
+  const entries = await listDirectoryEntries(goalsRoot);
   const goals: Goal[] = [];
 
   for (const entry of entries) {
@@ -759,8 +832,12 @@ export async function listGoals(paths: WorkspacePaths): Promise<Goal[]> {
     try {
       const goal = await getGoal(paths, entry.name);
       goals.push(goal);
-    } catch {
-      // Ignore incomplete directories during early-stage development.
+    } catch (error) {
+      if (isMissingPathError(error)) {
+        continue;
+      }
+
+      throw error;
     }
   }
 
@@ -791,7 +868,7 @@ export async function listAttachedProjectProfiles(
 ): Promise<AttachedProjectProfile[]> {
   await ensureWorkspace(paths);
   const projectsRoot = join(paths.stateDir, "projects");
-  const entries = await readdir(projectsRoot, { withFileTypes: true });
+  const entries = await listDirectoryEntries(projectsRoot);
   const projects: AttachedProjectProfile[] = [];
 
   for (const entry of entries) {
@@ -801,8 +878,12 @@ export async function listAttachedProjectProfiles(
 
     try {
       projects.push(await getAttachedProjectProfile(paths, entry.name));
-    } catch {
-      // Ignore incomplete project directories while attach is still being written.
+    } catch (error) {
+      if (isMissingPathError(error)) {
+        continue;
+      }
+
+      throw error;
     }
   }
 
@@ -825,15 +906,10 @@ export async function getAttachedProjectBaselineSnapshot(
   paths: WorkspacePaths,
   projectId: string
 ): Promise<AttachedProjectBaselineSnapshot | null> {
-  try {
-    const baselineSnapshot =
-      await readJsonFile<AttachedProjectBaselineSnapshot>(
-        resolveProjectPaths(paths, projectId).baselineSnapshotFile
-      );
-    return AttachedProjectBaselineSnapshotSchema.parse(baselineSnapshot);
-  } catch {
-    return null;
-  }
+  return readOptionalJsonArtifact(
+    resolveProjectPaths(paths, projectId).baselineSnapshotFile,
+    (value) => AttachedProjectBaselineSnapshotSchema.parse(value)
+  );
 }
 
 export async function saveAttachedProjectCapabilitySnapshot(
@@ -852,38 +928,29 @@ export async function getAttachedProjectCapabilitySnapshot(
   paths: WorkspacePaths,
   projectId: string
 ): Promise<AttachedProjectCapabilitySnapshot | null> {
-  try {
-    const capabilitySnapshot =
-      await readJsonFile<AttachedProjectCapabilitySnapshot>(
-        resolveProjectPaths(paths, projectId).capabilitySnapshotFile
-      );
-    return AttachedProjectCapabilitySnapshotSchema.parse(capabilitySnapshot);
-  } catch {
-    return null;
-  }
+  return readOptionalJsonArtifact(
+    resolveProjectPaths(paths, projectId).capabilitySnapshotFile,
+    (value) => AttachedProjectCapabilitySnapshotSchema.parse(value)
+  );
 }
 
 async function listJsonFiles<T>(
   dirPath: string,
   parser: (value: unknown) => T
 ): Promise<T[]> {
-  try {
-    const entries = await readdir(dirPath, { withFileTypes: true });
-    const result: T[] = [];
+  const entries = await listDirectoryEntries(dirPath);
+  const result: T[] = [];
 
-    for (const entry of entries) {
-      if (!entry.isFile() || !entry.name.endsWith(".json")) {
-        continue;
-      }
-
-      const value = await readJsonFile<unknown>(join(dirPath, entry.name));
-      result.push(parser(value));
+  for (const entry of entries) {
+    if (!entry.isFile() || !entry.name.endsWith(".json")) {
+      continue;
     }
 
-    return result;
-  } catch {
-    return [];
+    const value = await readJsonFile<unknown>(join(dirPath, entry.name));
+    result.push(parser(value));
   }
+
+  return result;
 }
 
 export async function saveRun(paths: WorkspacePaths, run: Run): Promise<void> {
@@ -899,7 +966,7 @@ export async function getRun(paths: WorkspacePaths, runId: string): Promise<Run>
 
 export async function listRuns(paths: WorkspacePaths): Promise<Run[]> {
   await ensureWorkspace(paths);
-  const entries = await readdir(paths.runsDir, { withFileTypes: true });
+  const entries = await listDirectoryEntries(paths.runsDir);
   const runs: Run[] = [];
 
   for (const entry of entries) {
@@ -909,8 +976,12 @@ export async function listRuns(paths: WorkspacePaths): Promise<Run[]> {
 
     try {
       runs.push(await getRun(paths, entry.name));
-    } catch {
-      // Ignore incomplete run directories while the new storage is being introduced.
+    } catch (error) {
+      if (isMissingPathError(error)) {
+        continue;
+      }
+
+      throw error;
     }
   }
 
@@ -929,14 +1000,10 @@ export async function getCurrentDecision(
   paths: WorkspacePaths,
   runId: string
 ): Promise<CurrentDecision | null> {
-  try {
-    const currentDecision = await readJsonFile<CurrentDecision>(
-      resolveRunPaths(paths, runId).currentFile
-    );
-    return CurrentDecisionSchema.parse(currentDecision);
-  } catch {
-    return null;
-  }
+  return readOptionalJsonArtifact(
+    resolveRunPaths(paths, runId).currentFile,
+    (value) => CurrentDecisionSchema.parse(value)
+  );
 }
 
 export async function saveRunAutomationControl(
@@ -951,14 +1018,10 @@ export async function getRunAutomationControl(
   paths: WorkspacePaths,
   runId: string
 ): Promise<RunAutomationControl | null> {
-  try {
-    const automationControl = await readJsonFile<RunAutomationControl>(
-      resolveRunPaths(paths, runId).automationFile
-    );
-    return RunAutomationControlSchema.parse(automationControl);
-  } catch {
-    return null;
-  }
+  return readOptionalJsonArtifact(
+    resolveRunPaths(paths, runId).automationFile,
+    (value) => RunAutomationControlSchema.parse(value)
+  );
 }
 
 export async function saveRunWorkingContext(
@@ -981,12 +1044,10 @@ export async function getRunBrief(
   paths: WorkspacePaths,
   runId: string
 ): Promise<RunBrief | null> {
-  try {
-    const runBrief = await readJsonFile<RunBrief>(resolveRunPaths(paths, runId).runBriefFile);
-    return RunBriefSchema.parse(runBrief);
-  } catch {
-    return null;
-  }
+  return readOptionalJsonArtifact(
+    resolveRunPaths(paths, runId).runBriefFile,
+    (value) => RunBriefSchema.parse(value)
+  );
 }
 
 export async function readRunBriefStrict(
@@ -1001,14 +1062,10 @@ export async function getRunWorkingContext(
   paths: WorkspacePaths,
   runId: string
 ): Promise<RunWorkingContext | null> {
-  try {
-    const workingContext = await readJsonFile<RunWorkingContext>(
-      resolveRunPaths(paths, runId).workingContextFile
-    );
-    return RunWorkingContextSchema.parse(workingContext);
-  } catch {
-    return null;
-  }
+  return readOptionalJsonArtifact(
+    resolveRunPaths(paths, runId).workingContextFile,
+    (value) => RunWorkingContextSchema.parse(value)
+  );
 }
 
 export async function saveRunGovernanceState(
@@ -1039,26 +1096,20 @@ export async function getRunPolicyRuntime(
   paths: WorkspacePaths,
   runId: string
 ): Promise<RunPolicyRuntime | null> {
-  try {
-    const policyRuntime = await readJsonFile<RunPolicyRuntime>(
-      resolveRunPaths(paths, runId).policyFile
-    );
-    return RunPolicyRuntimeSchema.parse(policyRuntime);
-  } catch {
-    return null;
-  }
+  return readOptionalJsonArtifact(
+    resolveRunPaths(paths, runId).policyFile,
+    (value) => RunPolicyRuntimeSchema.parse(value)
+  );
 }
 
 export async function getRunMailbox(
   paths: WorkspacePaths,
   runId: string
 ): Promise<RunMailbox | null> {
-  try {
-    const mailbox = await readJsonFile<RunMailbox>(resolveRunPaths(paths, runId).mailboxFile);
-    return RunMailboxSchema.parse(mailbox);
-  } catch {
-    return null;
-  }
+  return readOptionalJsonArtifact(
+    resolveRunPaths(paths, runId).mailboxFile,
+    (value) => RunMailboxSchema.parse(value)
+  );
 }
 
 export async function readRunMailboxStrict(
@@ -1083,14 +1134,10 @@ export async function getRunGovernanceState(
   paths: WorkspacePaths,
   runId: string
 ): Promise<RunGovernanceState | null> {
-  try {
-    const governanceState = await readJsonFile<RunGovernanceState>(
-      resolveRunPaths(paths, runId).governanceFile
-    );
-    return RunGovernanceStateSchema.parse(governanceState);
-  } catch {
-    return null;
-  }
+  return readOptionalJsonArtifact(
+    resolveRunPaths(paths, runId).governanceFile,
+    (value) => RunGovernanceStateSchema.parse(value)
+  );
 }
 
 export async function saveRunMaintenancePlane(
@@ -1105,14 +1152,10 @@ export async function getRunMaintenancePlane(
   paths: WorkspacePaths,
   runId: string
 ): Promise<RunMaintenancePlane | null> {
-  try {
-    const maintenancePlane = await readJsonFile<RunMaintenancePlane>(
-      resolveRunPaths(paths, runId).maintenancePlaneFile
-    );
-    return RunMaintenancePlaneSchema.parse(maintenancePlane);
-  } catch {
-    return null;
-  }
+  return readOptionalJsonArtifact(
+    resolveRunPaths(paths, runId).maintenancePlaneFile,
+    (value) => RunMaintenancePlaneSchema.parse(value)
+  );
 }
 
 export async function saveAttempt(
@@ -1149,14 +1192,10 @@ export async function getAttemptContract(
   runId: string,
   attemptId: string
 ): Promise<AttemptContract | null> {
-  try {
-    const contract = await readJsonFile<AttemptContract>(
-      resolveAttemptPaths(paths, runId, attemptId).contractFile
-    );
-    return AttemptContractSchema.parse(contract);
-  } catch {
-    return null;
-  }
+  return readOptionalJsonArtifact(
+    resolveAttemptPaths(paths, runId, attemptId).contractFile,
+    (value) => AttemptContractSchema.parse(value)
+  );
 }
 
 export async function listAttempts(
@@ -1165,23 +1204,22 @@ export async function listAttempts(
 ): Promise<Attempt[]> {
   const attemptsDir = resolveRunPaths(paths, runId).attemptsDir;
   const attempts: Attempt[] = [];
+  const entries = await listDirectoryEntries(attemptsDir);
 
-  try {
-    const entries = await readdir(attemptsDir, { withFileTypes: true });
+  for (const entry of entries) {
+    if (!entry.isDirectory()) {
+      continue;
+    }
 
-    for (const entry of entries) {
-      if (!entry.isDirectory()) {
+    try {
+      attempts.push(await getAttempt(paths, runId, entry.name));
+    } catch (error) {
+      if (isMissingPathError(error)) {
         continue;
       }
 
-      try {
-        attempts.push(await getAttempt(paths, runId, entry.name));
-      } catch {
-        // Ignore incomplete attempt directories during writes.
-      }
+      throw error;
     }
-  } catch {
-    return [];
   }
 
   return attempts.sort((a, b) => a.created_at.localeCompare(b.created_at));
@@ -1202,11 +1240,9 @@ export async function getAttemptContext(
   runId: string,
   attemptId: string
 ): Promise<unknown | null> {
-  try {
-    return await readJsonFile<unknown>(resolveAttemptPaths(paths, runId, attemptId).contextFile);
-  } catch {
-    return null;
-  }
+  return readOptionalJsonValue(
+    resolveAttemptPaths(paths, runId, attemptId).contextFile
+  );
 }
 
 export async function saveAttemptHeartbeat(
@@ -1226,14 +1262,10 @@ export async function getAttemptHeartbeat(
   runId: string,
   attemptId: string
 ): Promise<AttemptHeartbeat | null> {
-  try {
-    const heartbeat = await readJsonFile<AttemptHeartbeat>(
-      resolveAttemptPaths(paths, runId, attemptId).heartbeatFile
-    );
-    return AttemptHeartbeatSchema.parse(heartbeat);
-  } catch {
-    return null;
-  }
+  return readOptionalJsonArtifact(
+    resolveAttemptPaths(paths, runId, attemptId).heartbeatFile,
+    (value) => AttemptHeartbeatSchema.parse(value)
+  );
 }
 
 export async function saveAttemptRuntimeState(
@@ -1249,14 +1281,10 @@ export async function getAttemptRuntimeState(
   runId: string,
   attemptId: string
 ): Promise<AttemptRuntimeState | null> {
-  try {
-    const state = await readJsonFile<AttemptRuntimeState>(
-      resolveAttemptPaths(paths, runId, attemptId).runtimeStateFile
-    );
-    return AttemptRuntimeStateSchema.parse(state);
-  } catch {
-    return null;
-  }
+  return readOptionalJsonArtifact(
+    resolveAttemptPaths(paths, runId, attemptId).runtimeStateFile,
+    (value) => AttemptRuntimeStateSchema.parse(value)
+  );
 }
 
 export async function appendAttemptRuntimeEvent(
@@ -1273,26 +1301,25 @@ export async function listAttemptRuntimeEvents(
   attemptId: string,
   limit?: number
 ): Promise<AttemptRuntimeEvent[]> {
-  try {
-    const raw = await readFile(
-      resolveAttemptPaths(paths, runId, attemptId).runtimeEventsFile,
-      "utf8"
-    );
-    const parsed = raw
-      .split("\n")
-      .map((line) => line.trim())
-      .filter(Boolean)
-      .map((line) => AttemptRuntimeEventSchema.parse(JSON.parse(line)))
-      .sort((a, b) => a.seq - b.seq);
-
-    if (typeof limit === "number" && limit > 0 && parsed.length > limit) {
-      return parsed.slice(-limit);
-    }
-
-    return parsed;
-  } catch {
+  const raw = await readOptionalTextFile(
+    resolveAttemptPaths(paths, runId, attemptId).runtimeEventsFile
+  );
+  if (raw === null) {
     return [];
   }
+
+  const parsed = raw
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => AttemptRuntimeEventSchema.parse(JSON.parse(line)))
+    .sort((a, b) => a.seq - b.seq);
+
+  if (typeof limit === "number" && limit > 0 && parsed.length > limit) {
+    return parsed.slice(-limit);
+  }
+
+  return parsed;
 }
 
 export async function saveAttemptResult(
@@ -1310,14 +1337,10 @@ export async function getAttemptResult(
   runId: string,
   attemptId: string
 ): Promise<WorkerWriteback | null> {
-  try {
-    const result = await readJsonFile<WorkerWriteback>(
-      resolveAttemptPaths(paths, runId, attemptId).resultFile
-    );
-    return WorkerWritebackSchema.parse(result);
-  } catch {
-    return null;
-  }
+  return readOptionalJsonArtifact(
+    resolveAttemptPaths(paths, runId, attemptId).resultFile,
+    (value) => WorkerWritebackSchema.parse(value)
+  );
 }
 
 export async function saveAttemptEvaluation(
@@ -1445,14 +1468,10 @@ export async function getAttemptEvaluation(
   runId: string,
   attemptId: string
 ): Promise<AttemptEvaluation | null> {
-  try {
-    const evaluation = await readJsonFile<AttemptEvaluation>(
-      resolveAttemptPaths(paths, runId, attemptId).evaluationFile
-    );
-    return AttemptEvaluationSchema.parse(evaluation);
-  } catch {
-    return null;
-  }
+  return readOptionalJsonArtifact(
+    resolveAttemptPaths(paths, runId, attemptId).evaluationFile,
+    (value) => AttemptEvaluationSchema.parse(value)
+  );
 }
 
 export async function getAttemptEvaluationSynthesisRecord(
@@ -1460,14 +1479,10 @@ export async function getAttemptEvaluationSynthesisRecord(
   runId: string,
   attemptId: string
 ): Promise<AttemptEvaluationSynthesisRecord | null> {
-  try {
-    const synthesisRecord = await readJsonFile<AttemptEvaluationSynthesisRecord>(
-      resolveAttemptPaths(paths, runId, attemptId).evaluationSynthesisFile
-    );
-    return AttemptEvaluationSynthesisRecordSchema.parse(synthesisRecord);
-  } catch {
-    return null;
-  }
+  return readOptionalJsonArtifact(
+    resolveAttemptPaths(paths, runId, attemptId).evaluationSynthesisFile,
+    (value) => AttemptEvaluationSynthesisRecordSchema.parse(value)
+  );
 }
 
 export async function getAttemptReviewInputPacket(
@@ -1475,14 +1490,10 @@ export async function getAttemptReviewInputPacket(
   runId: string,
   attemptId: string
 ): Promise<AttemptReviewInputPacket | null> {
-  try {
-    const reviewInputPacket = await readJsonFile<AttemptReviewInputPacket>(
-      resolveAttemptPaths(paths, runId, attemptId).reviewInputPacketFile
-    );
-    return AttemptReviewInputPacketSchema.parse(reviewInputPacket);
-  } catch {
-    return null;
-  }
+  return readOptionalJsonArtifact(
+    resolveAttemptPaths(paths, runId, attemptId).reviewInputPacketFile,
+    (value) => AttemptReviewInputPacketSchema.parse(value)
+  );
 }
 
 export async function getAttemptReviewPacket(
@@ -1490,14 +1501,10 @@ export async function getAttemptReviewPacket(
   runId: string,
   attemptId: string
 ): Promise<AttemptReviewPacket | null> {
-  try {
-    const reviewPacket = await readJsonFile<AttemptReviewPacket>(
-      resolveAttemptPaths(paths, runId, attemptId).reviewPacketFile
-    );
-    return AttemptReviewPacketSchema.parse(reviewPacket);
-  } catch {
-    return null;
-  }
+  return readOptionalJsonArtifact(
+    resolveAttemptPaths(paths, runId, attemptId).reviewPacketFile,
+    (value) => AttemptReviewPacketSchema.parse(value)
+  );
 }
 
 export async function getAttemptHandoffBundle(
@@ -1505,14 +1512,10 @@ export async function getAttemptHandoffBundle(
   runId: string,
   attemptId: string
 ): Promise<AttemptHandoffBundle | null> {
-  try {
-    const handoffBundle = await readJsonFile<AttemptHandoffBundle>(
-      resolveAttemptPaths(paths, runId, attemptId).handoffBundleFile
-    );
-    return AttemptHandoffBundleSchema.parse(handoffBundle);
-  } catch {
-    return null;
-  }
+  return readOptionalJsonArtifact(
+    resolveAttemptPaths(paths, runId, attemptId).handoffBundleFile,
+    (value) => AttemptHandoffBundleSchema.parse(value)
+  );
 }
 
 export async function getAttemptEvaluatorCalibrationSample(
@@ -1520,14 +1523,10 @@ export async function getAttemptEvaluatorCalibrationSample(
   runId: string,
   attemptId: string
 ): Promise<AttemptEvaluatorCalibrationSample | null> {
-  try {
-    const sample = await readJsonFile<AttemptEvaluatorCalibrationSample>(
-      resolveAttemptPaths(paths, runId, attemptId).evaluatorCalibrationSampleFile
-    );
-    return AttemptEvaluatorCalibrationSampleSchema.parse(sample);
-  } catch {
-    return null;
-  }
+  return readOptionalJsonArtifact(
+    resolveAttemptPaths(paths, runId, attemptId).evaluatorCalibrationSampleFile,
+    (value) => AttemptEvaluatorCalibrationSampleSchema.parse(value)
+  );
 }
 
 export async function listAttemptReviewOpinions(
@@ -1548,14 +1547,10 @@ export async function getAttemptPreflightEvaluation(
   runId: string,
   attemptId: string
 ): Promise<AttemptPreflightEvaluation | null> {
-  try {
-    const evaluation = await readJsonFile<AttemptPreflightEvaluation>(
-      resolveAttemptPaths(paths, runId, attemptId).preflightEvaluationFile
-    );
-    return AttemptPreflightEvaluationSchema.parse(evaluation);
-  } catch {
-    return null;
-  }
+  return readOptionalJsonArtifact(
+    resolveAttemptPaths(paths, runId, attemptId).preflightEvaluationFile,
+    (value) => AttemptPreflightEvaluationSchema.parse(value)
+  );
 }
 
 export async function getAttemptRuntimeVerification(
@@ -1563,14 +1558,10 @@ export async function getAttemptRuntimeVerification(
   runId: string,
   attemptId: string
 ): Promise<AttemptRuntimeVerification | null> {
-  try {
-    const verification = await readJsonFile<AttemptRuntimeVerification>(
-      resolveAttemptPaths(paths, runId, attemptId).runtimeVerificationFile
-    );
-    return AttemptRuntimeVerificationSchema.parse(verification);
-  } catch {
-    return null;
-  }
+  return readOptionalJsonArtifact(
+    resolveAttemptPaths(paths, runId, attemptId).runtimeVerificationFile,
+    (value) => AttemptRuntimeVerificationSchema.parse(value)
+  );
 }
 
 export async function getAttemptAdversarialVerification(
@@ -1578,14 +1569,10 @@ export async function getAttemptAdversarialVerification(
   runId: string,
   attemptId: string
 ): Promise<AttemptAdversarialVerification | null> {
-  try {
-    const verification = await readJsonFile<AttemptAdversarialVerification>(
-      resolveAttemptPaths(paths, runId, attemptId).adversarialVerificationFile
-    );
-    return AttemptAdversarialVerificationSchema.parse(verification);
-  } catch {
-    return null;
-  }
+  return readOptionalJsonArtifact(
+    resolveAttemptPaths(paths, runId, attemptId).adversarialVerificationFile,
+    (value) => AttemptAdversarialVerificationSchema.parse(value)
+  );
 }
 
 export async function getAttemptLogExcerpt(
@@ -1597,18 +1584,17 @@ export async function getAttemptLogExcerpt(
 ): Promise<string> {
   const attemptPaths = resolveAttemptPaths(paths, runId, attemptId);
   const filePath = stream === "stdout" ? attemptPaths.stdoutFile : attemptPaths.stderrFile;
-
-  try {
-    const raw = await readFile(filePath, "utf8");
-    const trimmed = raw.trimEnd();
-    if (trimmed.length <= maxChars) {
-      return trimmed;
-    }
-
-    return trimmed.slice(-maxChars);
-  } catch {
+  const raw = await readOptionalTextFile(filePath);
+  if (raw === null) {
     return "";
   }
+
+  const trimmed = raw.trimEnd();
+  if (trimmed.length <= maxChars) {
+    return trimmed;
+  }
+
+  return trimmed.slice(-maxChars);
 }
 
 export async function saveRunSteer(
@@ -1642,17 +1628,17 @@ export async function listRunJournal(
   paths: WorkspacePaths,
   runId: string
 ): Promise<RunJournalEntry[]> {
-  try {
-    const raw = await readFile(resolveRunPaths(paths, runId).journalFile, "utf8");
-    return raw
-      .split("\n")
-      .map((line) => line.trim())
-      .filter(Boolean)
-      .map((line) => RunJournalEntrySchema.parse(JSON.parse(line)))
-      .sort((a, b) => a.ts.localeCompare(b.ts));
-  } catch {
+  const raw = await readOptionalTextFile(resolveRunPaths(paths, runId).journalFile);
+  if (raw === null) {
     return [];
   }
+
+  return raw
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => RunJournalEntrySchema.parse(JSON.parse(line)))
+    .sort((a, b) => a.ts.localeCompare(b.ts));
 }
 
 export async function saveRunReport(
@@ -1668,11 +1654,7 @@ export async function getRunReport(
   paths: WorkspacePaths,
   runId: string
 ): Promise<string> {
-  try {
-    return await readFile(resolveRunPaths(paths, runId).reportFile, "utf8");
-  } catch {
-    return "";
-  }
+  return (await readOptionalTextFile(resolveRunPaths(paths, runId).reportFile)) ?? "";
 }
 
 export async function saveRunRuntimeHealthSnapshot(
@@ -1687,14 +1669,10 @@ export async function getRunRuntimeHealthSnapshot(
   paths: WorkspacePaths,
   runId: string
 ): Promise<RuntimeHealthSnapshot | null> {
-  try {
-    const snapshot = await readJsonFile<RuntimeHealthSnapshot>(
-      resolveRunPaths(paths, runId).runtimeHealthSnapshotFile
-    );
-    return RuntimeHealthSnapshotSchema.parse(snapshot);
-  } catch {
-    return null;
-  }
+  return readOptionalJsonArtifact(
+    resolveRunPaths(paths, runId).runtimeHealthSnapshotFile,
+    (value) => RuntimeHealthSnapshotSchema.parse(value)
+  );
 }
 
 export async function savePlanArtifacts(
@@ -1721,18 +1699,32 @@ export async function getPlanArtifacts(
   evalSpec: EvalSpec;
 } | null> {
   const goalPaths = resolveGoalPaths(paths, goalId);
-
-  try {
-    const [planMarkdown, branchSpecs, evalSpec] = await Promise.all([
-      readFile(join(goalPaths.planDir, "plan.md"), "utf8"),
-      readJsonFile<BranchSpec[]>(join(goalPaths.planDir, "branch_specs.json")),
-      readJsonFile<EvalSpec>(join(goalPaths.planDir, "eval_spec.json"))
-    ]);
-
-    return { planMarkdown, branchSpecs, evalSpec };
-  } catch {
+  const planMarkdown = await readOptionalTextFile(join(goalPaths.planDir, "plan.md"));
+  if (planMarkdown === null) {
     return null;
   }
+
+  const branchSpecs = await readOptionalJsonArtifact(
+    join(goalPaths.planDir, "branch_specs.json"),
+    (value) => BranchSpecSchema.array().parse(value)
+  );
+  if (branchSpecs === null) {
+    return null;
+  }
+
+  const evalSpec = await readOptionalJsonArtifact(
+    join(goalPaths.planDir, "eval_spec.json"),
+    (value) => EvalSpecSchema.parse(value)
+  );
+  if (evalSpec === null) {
+    return null;
+  }
+
+  return {
+    planMarkdown,
+    branchSpecs,
+    evalSpec
+  };
 }
 
 export async function saveBranch(
@@ -1820,39 +1812,26 @@ export async function getContextBoard(
 ): Promise<ContextBoard> {
   const goalPaths = resolveGoalPaths(paths, goalId);
 
-  const readLines = async (filePath: string) => {
-    try {
-      return (await readFile(filePath, "utf8"))
-        .split("\n")
-        .map((line) => line.trim())
-        .filter(Boolean);
-    } catch {
-      return [];
-    }
-  };
-
   const notesDir = join(goalPaths.contextDir, "branch_notes");
   const branchNotes: Record<string, string> = {};
 
-  try {
-    const entries = await readdir(notesDir, { withFileTypes: true });
-    for (const entry of entries) {
-      if (!entry.isFile() || !entry.name.endsWith(".md")) {
-        continue;
-      }
-      branchNotes[entry.name.replace(/\.md$/, "")] = await readFile(
-        join(notesDir, entry.name),
-        "utf8"
-      );
+  for (const entry of await listDirectoryEntries(notesDir)) {
+    if (!entry.isFile() || !entry.name.endsWith(".md")) {
+      continue;
     }
-  } catch {
-    // ignore
+
+    const note = await readOptionalTextFile(join(notesDir, entry.name));
+    if (note === null) {
+      continue;
+    }
+
+    branchNotes[entry.name.replace(/\.md$/, "")] = note;
   }
 
   return ContextBoardSchema.parse({
-    shared_facts: await readLines(goalPaths.sharedFactsFile),
-    open_questions: await readLines(goalPaths.openQuestionsFile),
-    constraints: await readLines(goalPaths.constraintsFile),
+    shared_facts: await readOptionalLines(goalPaths.sharedFactsFile),
+    open_questions: await readOptionalLines(goalPaths.openQuestionsFile),
+    constraints: await readOptionalLines(goalPaths.constraintsFile),
     branch_notes: branchNotes
   });
 }
@@ -1885,12 +1864,10 @@ export async function getWriteback(
   branchId: string
 ): Promise<WorkerWriteback | null> {
   const branchPaths = resolveBranchArtifactPaths(paths, goalId, branchId);
-  try {
-    const writeback = await readJsonFile<WorkerWriteback>(branchPaths.writebackFile);
-    return WorkerWritebackSchema.parse(writeback);
-  } catch {
-    return null;
-  }
+  return readOptionalJsonArtifact(
+    branchPaths.writebackFile,
+    (value) => WorkerWritebackSchema.parse(value)
+  );
 }
 
 export async function saveEvalResult(
@@ -1911,12 +1888,10 @@ export async function getEvalResult(
   branchId: string
 ): Promise<EvalResult | null> {
   const branchPaths = resolveBranchArtifactPaths(paths, goalId, branchId);
-  try {
-    const evalResult = await readJsonFile<EvalResult>(branchPaths.evalFile);
-    return EvalResultSchema.parse(evalResult);
-  } catch {
-    return null;
-  }
+  return readOptionalJsonArtifact(
+    branchPaths.evalFile,
+    (value) => EvalResultSchema.parse(value)
+  );
 }
 
 export async function saveReport(
@@ -1937,9 +1912,5 @@ export async function getReport(
   goalId: string
 ): Promise<string> {
   const goalPaths = resolveGoalPaths(paths, goalId);
-  try {
-    return await readFile(goalPaths.currentReportFile, "utf8");
-  } catch {
-    return "";
-  }
+  return (await readOptionalTextFile(goalPaths.currentReportFile)) ?? "";
 }

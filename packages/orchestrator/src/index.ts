@@ -532,6 +532,14 @@ type AttemptDispatchPreflightOutcome = {
   checkpointPreflight: GitCheckpointPreflight | null;
 };
 
+function isMissingPathError(error: unknown): error is NodeJS.ErrnoException {
+  return (
+    error instanceof Error &&
+    "code" in error &&
+    (error as NodeJS.ErrnoException).code === "ENOENT"
+  );
+}
+
 async function readWorkspacePackageScripts(
   workspaceRoot: string
 ): Promise<Record<string, string> | null> {
@@ -542,8 +550,12 @@ async function readWorkspacePackageScripts(
       scripts?: Record<string, string>;
     };
     return packageJson.scripts ?? {};
-  } catch {
-    return null;
+  } catch (error) {
+    if (isMissingPathError(error)) {
+      return null;
+    }
+
+    throw error;
   }
 }
 
@@ -582,8 +594,12 @@ function buildDefaultExecutionVerificationCommandsFromScripts(
 async function workspaceHasLocalNodeModules(workspaceRoot: string): Promise<boolean> {
   try {
     return (await stat(resolve(workspaceRoot, "node_modules"))).isDirectory();
-  } catch {
-    return false;
+  } catch (error) {
+    if (isMissingPathError(error)) {
+      return false;
+    }
+
+    throw error;
   }
 }
 

@@ -335,12 +335,24 @@ function usesNodePackageManagerCommand(entrypoint: string): boolean {
   return ["pnpm", "npm", "yarn", "bun"].includes(entrypoint);
 }
 
+function isMissingPathError(error: unknown): error is NodeJS.ErrnoException {
+  return (
+    error instanceof Error &&
+    "code" in error &&
+    (error as NodeJS.ErrnoException).code === "ENOENT"
+  );
+}
+
 async function directoryExists(path: string): Promise<boolean> {
   try {
     const fileStat = await stat(path);
     return fileStat.isDirectory();
-  } catch {
-    return false;
+  } catch (error) {
+    if (isMissingPathError(error)) {
+      return false;
+    }
+
+    throw error;
   }
 }
 

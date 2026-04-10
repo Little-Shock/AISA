@@ -5,6 +5,14 @@ import { EventSchema } from "@autoresearch/domain";
 import type { WorkspacePaths } from "@autoresearch/state-store";
 import { ensureWorkspace } from "@autoresearch/state-store";
 
+function isMissingPathError(error: unknown): error is NodeJS.ErrnoException {
+  return (
+    error instanceof Error &&
+    "code" in error &&
+    (error as NodeJS.ErrnoException).code === "ENOENT"
+  );
+}
+
 export async function appendEvent(
   paths: WorkspacePaths,
   event: Event
@@ -27,7 +35,11 @@ export async function listEvents(
       .split("\n")
       .filter(Boolean)
       .map((line) => EventSchema.parse(JSON.parse(line)));
-  } catch {
-    return [];
+  } catch (error) {
+    if (isMissingPathError(error)) {
+      return [];
+    }
+
+    throw error;
   }
 }

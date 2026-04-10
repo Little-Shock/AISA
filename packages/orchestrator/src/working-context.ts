@@ -366,6 +366,7 @@ function buildDegradedState(input: {
   paths: WorkspacePaths;
   runId: string;
   workingContext: RunWorkingContext | null;
+  workingContextReadFailure: string | null;
   current: CurrentDecision | null;
   automation: RunAutomationControl | null;
   governance: RunGovernanceState | null;
@@ -379,6 +380,15 @@ function buildDegradedState(input: {
 }): RunWorkingContextDegradedState {
   const workingContextUpdatedAt = toTimestamp(input.workingContext?.updated_at);
   const latestRefreshFailureAt = toTimestamp(input.latestRefreshFailure?.ts);
+
+  if (input.workingContextReadFailure && !input.workingContext) {
+    return createRunWorkingContextDegradedState({
+      is_degraded: true,
+      reason_code: "context_write_failed",
+      summary:
+        `working context 写入失败或工件损坏，当前现场不可信。${input.workingContextReadFailure}`
+    });
+  }
 
   if (
     input.latestRefreshFailure &&
@@ -677,16 +687,33 @@ export async function readRunWorkingContextView(
   paths: WorkspacePaths,
   runId: string
 ): Promise<RunWorkingContextView> {
-  const [workingContext, current, automationControl, governanceState, attempts, steers, journal] =
-    await Promise.all([
-      getRunWorkingContext(paths, runId),
-      getCurrentDecision(paths, runId),
-      getRunAutomationControl(paths, runId),
-      getRunGovernanceState(paths, runId),
-      listAttempts(paths, runId),
-      listRunSteers(paths, runId),
-      listRunJournal(paths, runId)
-    ]);
+  const [
+    workingContextResult,
+    current,
+    automationControl,
+    governanceState,
+    attempts,
+    steers,
+    journal
+  ] = await Promise.all([
+    getRunWorkingContext(paths, runId)
+      .then((workingContext) => ({
+        workingContext,
+        readFailure: null
+      }))
+      .catch((error: unknown) => ({
+        workingContext: null,
+        readFailure: error instanceof Error ? error.message : String(error)
+      })),
+    getCurrentDecision(paths, runId),
+    getRunAutomationControl(paths, runId),
+    getRunGovernanceState(paths, runId),
+    listAttempts(paths, runId),
+    listRunSteers(paths, runId),
+    listRunJournal(paths, runId)
+  ]);
+  const { workingContext, readFailure: workingContextReadFailure } =
+    workingContextResult;
   const latestAttempt = pickLatestAttempt(attempts, current);
   const latestSteer = pickLatestSteer(steers);
   const latestRefreshFailure = journal
@@ -698,6 +725,7 @@ export async function readRunWorkingContextView(
     paths,
     runId,
     workingContext,
+    workingContextReadFailure,
     current,
     automation: automationControl,
     governance: governanceState,
