@@ -1049,7 +1049,7 @@ type DangerousVerificationCommandFinding = {
 };
 
 const DANGEROUS_VERIFICATION_COMMAND_PATTERNS: Array<{
-  rule: DangerousVerificationCommandFinding["rule"];
+  rule: Exclude<DangerousVerificationCommandFinding["rule"], "destructive_rm">;
   pattern: RegExp;
 }> = [
   {
@@ -1063,10 +1063,6 @@ const DANGEROUS_VERIFICATION_COMMAND_PATTERNS: Array<{
   {
     rule: "destructive_git_clean",
     pattern: /(^|[;&|]\s*)git\s+clean\s+-[^\n]*f/i
-  },
-  {
-    rule: "destructive_rm",
-    pattern: /(^|[;&|]\s*)rm\s+-rf(\s|$)/i
   }
 ];
 
@@ -1083,9 +1079,104 @@ function findDangerousVerificationCommand(
         };
       }
     }
+
+    for (const segment of splitShellSegments(normalized)) {
+      if (!isRecursiveForceRmSegment(segment)) continue;
+      if (isReplaySafeTemporaryRmSegment(segment)) continue;
+      return {
+        command: segment,
+        rule: "destructive_rm"
+      };
+    }
   }
 
   return null;
+}
+
+function splitShellSegments(command: string): string[] {
+  return command
+    .split(/&&|\|\||[;&]/)
+    .map((segment) => segment.trim())
+    .filter((segment) => segment !== "");
+}
+
+function parseSimpleShellWords(segment: string): string[] | null {
+  const words: string[] = [];
+  let current = "";
+  let quote: "'" | "\"" | null = null;
+
+  const pushCurrent = () => {
+    if (current !== "") {
+      words.push(current);
+      current = "";
+    }
+  };
+
+  for (let index = 0; index < segment.length; index += 1) {
+    const char = segment[index];
+    if (quote) {
+      if (char === quote) {
+        quote = null;
+      } else if (char === "\\") {
+        return null;
+      } else {
+        current += char;
+      }
+      continue;
+    }
+
+    if (char === "'" || char === "\"") {
+      quote = char;
+      continue;
+    }
+    if (char === "\\") return null;
+    if (/\s/.test(char)) {
+      pushCurrent();
+      continue;
+    }
+    current += char;
+  }
+
+  if (quote) return null;
+  pushCurrent();
+  return words;
+}
+
+function isRecursiveForceRmSegment(segment: string): boolean {
+  const words = parseSimpleShellWords(segment);
+  if (!words) {
+    return /^rm\s+/i.test(segment) && /\s-[^\s]*r/i.test(segment) && /\s-[^\s]*f/i.test(segment);
+  }
+  if (!words || words[0] !== "rm") return false;
+
+  const optionTokens = words.slice(1).filter((word) => word.startsWith("-"));
+  return optionTokens.some((word) => {
+    if (word.startsWith("--")) {
+      return word === "--recursive" || word === "--force";
+    }
+    return word.includes("r") && word.includes("f");
+  }) || (
+    optionTokens.some((word) => word === "-r" || word === "-R" || word === "--recursive") &&
+    optionTokens.some((word) => word === "-f" || word === "--force")
+  );
+}
+
+function isReplaySafeTemporaryRmSegment(segment: string): boolean {
+  const words = parseSimpleShellWords(segment);
+  if (!words || words[0] !== "rm") return false;
+  if (!isRecursiveForceRmSegment(segment)) return false;
+
+  const targets = words.slice(1).filter((word) => !word.startsWith("-"));
+  return targets.length > 0 && targets.every(isReplaySafeTemporaryPath);
+}
+
+function isReplaySafeTemporaryPath(target: string): boolean {
+  if (!target.startsWith("/tmp/")) return false;
+  if (target.length <= "/tmp/".length) return false;
+  if (/[$*?[\]{}~`\\!;|&<>]/.test(target)) return false;
+
+  const segments = target.slice("/tmp/".length).split("/");
+  return segments.every((segment) => segment !== "" && segment !== "." && segment !== "..");
 }
 
 function buildDangerousVerificationCommandMessage(input: {

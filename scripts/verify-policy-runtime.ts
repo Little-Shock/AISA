@@ -688,6 +688,86 @@ async function verifyDangerousVerificationCommandsFailClosed(): Promise<void> {
   );
 }
 
+async function verifyReplaySafeTmpCleanupCanEnterApproval(): Promise<void> {
+  const { runtimeDataRoot, workspaceRoot, workspacePaths, run } =
+    await bootstrapExecutionApprovalRun("tmp-cleanup-approval", {
+      verificationPurpose: "clean deterministic replay temp dirs before checking output",
+      verificationCommand:
+        "rm -rf /tmp/aisa-policy-runtime-replay-a /tmp/aisa-policy-runtime-replay-b && test -f approved-execution.txt"
+    });
+  const orchestrator = await createScenarioOrchestrator({
+    runtimeDataRoot,
+    workspaceRoot,
+    workspacePaths
+  });
+  await waitForPendingApproval(orchestrator, workspacePaths, run.id);
+
+  const [attempts, current, policy, journal] = await Promise.all([
+    listAttempts(workspacePaths, run.id),
+    getCurrentDecision(workspacePaths, run.id),
+    readRunPolicyRuntimeStrict(workspacePaths, run.id),
+    listRunJournal(workspacePaths, run.id)
+  ]);
+  assert.equal(attempts.length, 1, "safe temp cleanup should still stop before approval");
+  assert.equal(current?.waiting_for_human, true);
+  assert.equal(policy.stage, "approval");
+  assert.equal(policy.approval_status, "pending");
+  assert.ok(
+    journal.some(
+      (entry) =>
+        entry.type === "run.policy.hook_evaluated" &&
+        entry.payload.hook_status === "passed" &&
+        entry.payload.hook_key === "dangerous_verification_commands"
+    ),
+    "safe temp cleanup should leave a passed dangerous-command hook"
+  );
+}
+
+async function verifyUnsafeRmCleanupStillFailsClosed(): Promise<void> {
+  const unsafeCommands = [
+    "rm -rf /tmp && test -f approved-execution.txt",
+    "rm -rf /tmp/aisa-policy-runtime-replay-* && test -f approved-execution.txt",
+    "rm -rf /tmp/aisa-policy-runtime-replay-a /Users/atou/not-owned-by-run && test -f approved-execution.txt",
+    "rm -rf /tmp/../Users/atou/not-owned-by-run && test -f approved-execution.txt",
+    "rm -rf /tmp/aisa-policy-runtime-replay\\-a && test -f approved-execution.txt"
+  ];
+
+  for (const [index, verificationCommand] of unsafeCommands.entries()) {
+    const {
+      runtimeDataRoot,
+      workspaceRoot,
+      workspacePaths,
+      run
+    } = await bootstrapExecutionApprovalRun(`unsafe-rm-${index}`, {
+      verificationPurpose: "unsafe cleanup must be blocked",
+      verificationCommand
+    });
+    const orchestrator = await createScenarioOrchestrator({
+      runtimeDataRoot,
+      workspaceRoot,
+      workspacePaths
+    });
+    await driveOrchestratorUntil({
+      orchestrator,
+      predicate: async () => {
+        const policy = await getRunPolicyRuntime(workspacePaths, run.id);
+        return policy?.last_decision === "dangerous_rule_blocked";
+      }
+    });
+
+    const [attempts, current, policy] = await Promise.all([
+      listAttempts(workspacePaths, run.id),
+      getCurrentDecision(workspacePaths, run.id),
+      readRunPolicyRuntimeStrict(workspacePaths, run.id)
+    ]);
+    assert.equal(attempts.length, 1, "unsafe rm cleanup should stop before execution attempt");
+    assert.equal(current?.waiting_for_human, true);
+    assert.equal(policy.approval_status, "rejected");
+    assert.equal(policy.last_decision, "dangerous_rule_blocked");
+    assert.match(policy.blocking_reason ?? "", /destructive command/i);
+  }
+}
+
 async function verifyKillswitchRoutesGateLaunch(): Promise<void> {
   const { runtimeDataRoot, workspaceRoot, workspacePaths, run } =
     await bootstrapExecutionApprovalRun("killswitch-routes");
@@ -1020,6 +1100,14 @@ async function main(): Promise<void> {
       [
         "dangerous_verification_commands_fail_closed",
         verifyDangerousVerificationCommandsFailClosed
+      ],
+      [
+        "replay_safe_tmp_cleanup_can_enter_approval",
+        verifyReplaySafeTmpCleanupCanEnterApproval
+      ],
+      [
+        "unsafe_rm_cleanup_still_fails_closed",
+        verifyUnsafeRmCleanupStillFailsClosed
       ],
       ["killswitch_routes_gate_launch", verifyKillswitchRoutesGateLaunch],
       [
