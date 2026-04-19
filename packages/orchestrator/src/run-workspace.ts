@@ -333,10 +333,16 @@ async function synchronizeManagedWorkspaceWithSource(input: {
     return;
   }
 
-  const [managedIsBehindSource, sourceIsBehindManaged] = await Promise.all([
-    isAncestorCommit(input.managedRepoRoot, managedHead, sourceHead),
-    isAncestorCommit(input.managedRepoRoot, sourceHead, managedHead)
-  ]);
+  const managedIsBehindSource = await isAncestorCommit(
+    input.managedRepoRoot,
+    managedHead,
+    sourceHead
+  );
+  const sourceIsBehindManaged = await isAncestorCommit(
+    input.managedRepoRoot,
+    sourceHead,
+    managedHead
+  );
 
   if (managedIsBehindSource) {
     const managedStatus = await readGitStatus(input.managedRepoRoot);
@@ -775,23 +781,45 @@ async function runGit(
   stdin = ""
 ): Promise<GitCommandResult> {
   return await new Promise<GitCommandResult>((resolvePromise, reject) => {
-    const child = spawn("git", ["-C", cwd, ...args], {
-      env: {
-        ...process.env,
-        ...env
-      },
-      stdio: ["pipe", "pipe", "pipe"]
-    });
+    let child: ReturnType<typeof spawn>;
+    try {
+      child = spawn("git", args, {
+        cwd,
+        env: {
+          ...process.env,
+          ...env
+        },
+        stdio: [stdin.length > 0 ? "pipe" : "ignore", "pipe", "pipe"]
+      });
+    } catch (error) {
+      resolvePromise({
+        stdout: "",
+        stderr: error instanceof Error ? error.message : String(error),
+        exitCode: 1
+      });
+      return;
+    }
 
     let stdout = "";
     let stderr = "";
+    if (!child.stdout || !child.stderr) {
+      reject(new Error(`git ${args.join(" ")} output pipe unavailable`));
+      return;
+    }
+
     child.stdout.on("data", (chunk) => {
       stdout += String(chunk);
     });
     child.stderr.on("data", (chunk) => {
       stderr += String(chunk);
     });
-    child.on("error", reject);
+    child.on("error", (error) => {
+      resolvePromise({
+        stdout,
+        stderr: error.message,
+        exitCode: 1
+      });
+    });
     child.on("close", (code) => {
       resolvePromise({
         stdout,
@@ -801,9 +829,13 @@ async function runGit(
     });
 
     if (stdin.length > 0) {
+      if (!child.stdin) {
+        reject(new Error(`git ${args.join(" ")} stdin pipe unavailable`));
+        return;
+      }
       child.stdin.write(stdin);
+      child.stdin.end();
     }
-    child.stdin.end();
   });
 }
 
