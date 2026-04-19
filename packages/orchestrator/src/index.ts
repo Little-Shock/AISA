@@ -394,6 +394,10 @@ export interface OrchestratorOptions {
   runtimeLayout?: RuntimeLayout | null;
 }
 
+export type OrchestratorTickOptions = {
+  runId?: string;
+};
+
 export type RuntimeRestartRequest = {
   runId: string;
   attemptId: string;
@@ -1370,19 +1374,19 @@ export class Orchestrator {
     }
   }
 
-  async tick(): Promise<void> {
+  async tick(options: OrchestratorTickOptions = {}): Promise<void> {
     if (this.tickPromise) {
       return await this.tickPromise;
     }
 
-    this.tickPromise = this.tickInternal().finally(() => {
+    this.tickPromise = this.tickInternal(options).finally(() => {
       this.tickPromise = null;
     });
 
     return await this.tickPromise;
   }
 
-  private async tickInternal(): Promise<void> {
+  private async tickInternal(options: OrchestratorTickOptions): Promise<void> {
     const goals = await listGoals(this.workspacePaths);
 
     for (const goal of goals) {
@@ -1409,7 +1413,7 @@ export class Orchestrator {
       }
     }
 
-    await this.tickRuns();
+    await this.tickRuns(options.runId);
   }
 
   private buildJudgeEffortView(input: {
@@ -1745,8 +1749,10 @@ export class Orchestrator {
     await refreshRunOperatorSurface(this.workspacePaths, runId);
   }
 
-  private async tickRuns(): Promise<void> {
-    const runs = await listRuns(this.workspacePaths);
+  private async tickRuns(focusRunId?: string): Promise<void> {
+    const runs = focusRunId
+      ? [await getRun(this.workspacePaths, focusRunId)]
+      : await listRuns(this.workspacePaths);
 
     for (const persistedRun of runs) {
       let run = persistedRun;

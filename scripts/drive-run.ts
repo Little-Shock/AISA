@@ -139,7 +139,7 @@ export async function driveRun(input: {
       }
     }
 
-    await orchestrator.tick();
+    await orchestrator.tick({ runId: input.runId });
     await sleep(input.pollIntervalMs ?? 1500);
     latestSnapshot = await readRunSnapshot(workspacePaths, input.runId);
     if (
@@ -193,7 +193,7 @@ export async function driveRun(input: {
     ))
   ) {
     drainPollCount += 1;
-    await orchestrator.tick();
+    await orchestrator.tick({ runId: input.runId });
     await sleep(input.pollIntervalMs ?? 1500);
     latestSnapshotAfterDrain = await readRunSnapshot(workspacePaths, input.runId);
     const hasActiveHeartbeats = await hasActiveAttemptHeartbeats(
