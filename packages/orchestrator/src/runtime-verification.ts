@@ -69,6 +69,10 @@ interface GitStatusDelta {
   changedFiles: string[];
 }
 
+interface GitExecutionDelta extends GitStatusDelta {
+  committedFiles: string[];
+}
+
 type SyncedSelfBootstrapArtifacts = NonNullable<
   AttemptRuntimeVerification["synced_self_bootstrap_artifacts"]
 >;
@@ -353,9 +357,12 @@ export async function runAttemptRuntimeVerification(input: {
   }
 
   const gitStatusAfterExecution = await readGitStatus(repoRoot);
-  const gitStatusDelta = buildGitStatusDelta({
+  const gitStatusDelta = await buildGitExecutionDelta({
+    repoRoot,
     statusBefore: checkpointPreflight.status_before,
-    statusAfter: gitStatusAfterExecution
+    statusAfter: gitStatusAfterExecution,
+    headBefore: checkpointPreflight.head_before,
+    headAfter: gitHead
   });
 
   if (gitStatusDelta.changedFiles.length === 0) {
@@ -440,9 +447,12 @@ export async function runAttemptRuntimeVerification(input: {
 
     if (!commandResult.passed) {
       const currentGitStatus = await readGitStatus(repoRoot);
-      const currentGitStatusDelta = buildGitStatusDelta({
+      const currentGitStatusDelta = await buildGitExecutionDelta({
+        repoRoot,
         statusBefore: checkpointPreflight.status_before,
-        statusAfter: currentGitStatus
+        statusAfter: currentGitStatus,
+        headBefore: checkpointPreflight.head_before,
+        headAfter: await readGitHead(repoRoot)
       });
 
       return await writeVerificationArtifact(input.attemptPaths, {
@@ -483,9 +493,12 @@ export async function runAttemptRuntimeVerification(input: {
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
       const currentGitStatus = await readGitStatus(repoRoot);
-      const currentGitStatusDelta = buildGitStatusDelta({
+      const currentGitStatusDelta = await buildGitExecutionDelta({
+        repoRoot,
         statusBefore: checkpointPreflight.status_before,
-        statusAfter: currentGitStatus
+        statusAfter: currentGitStatus,
+        headBefore: checkpointPreflight.head_before,
+        headAfter: await readGitHead(repoRoot)
       });
 
       return await writeVerificationArtifact(input.attemptPaths, {
@@ -513,9 +526,12 @@ export async function runAttemptRuntimeVerification(input: {
   }
 
   const finalGitStatus = await readGitStatus(repoRoot);
-  const finalGitStatusDelta = buildGitStatusDelta({
+  const finalGitStatusDelta = await buildGitExecutionDelta({
+    repoRoot,
     statusBefore: checkpointPreflight.status_before,
-    statusAfter: finalGitStatus
+    statusAfter: finalGitStatus,
+    headBefore: checkpointPreflight.head_before,
+    headAfter: await readGitHead(repoRoot)
   });
   const runtimeKitAssessment = buildVerifierKitRuntimeChecks({
     verifierKit,
@@ -648,6 +664,64 @@ function buildGitStatusDelta(input: {
     newGitStatus,
     changedFiles: extractChangedFiles(newGitStatus)
   };
+}
+
+async function buildGitExecutionDelta(input: {
+  repoRoot: string;
+  statusBefore: string[];
+  statusAfter: string[];
+  headBefore: string | null;
+  headAfter: string | null;
+}): Promise<GitExecutionDelta> {
+  const statusDelta = buildGitStatusDelta({
+    statusBefore: input.statusBefore,
+    statusAfter: input.statusAfter
+  });
+  const committedFiles = await readCommittedChangedFiles({
+    repoRoot: input.repoRoot,
+    headBefore: input.headBefore,
+    headAfter: input.headAfter
+  });
+
+  return {
+    ...statusDelta,
+    committedFiles,
+    changedFiles: mergeChangedFiles(statusDelta.changedFiles, committedFiles)
+  };
+}
+
+async function readCommittedChangedFiles(input: {
+  repoRoot: string;
+  headBefore: string | null;
+  headAfter: string | null;
+}): Promise<string[]> {
+  if (!input.headBefore || !input.headAfter || input.headBefore === input.headAfter) {
+    return [];
+  }
+
+  const result = await runGit(input.repoRoot, [
+    "diff",
+    "--name-only",
+    `${input.headBefore}..${input.headAfter}`
+  ]);
+  if (result.exitCode !== 0) {
+    throw new Error(
+      `Runtime verification could not inspect committed changes from ${input.headBefore} to ${input.headAfter}.`
+    );
+  }
+
+  return result.stdout
+    .split(/\r?\n/u)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .sort();
+}
+
+function mergeChangedFiles(
+  statusChangedFiles: string[],
+  committedFiles: string[]
+): string[] {
+  return [...new Set([...statusChangedFiles, ...committedFiles])].sort();
 }
 
 export async function probeVerificationCommandReadiness(input: {

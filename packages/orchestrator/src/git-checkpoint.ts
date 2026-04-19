@@ -152,6 +152,26 @@ export async function maybeCreateVerifiedExecutionCheckpoint(input: {
     transientExcludePathspecs
   );
   if (statusAfter.length === 0) {
+    const headAfter = await readGitHead(input.preflight.repo_root);
+    const committedFiles = await readCommittedChangedFiles({
+      repoRoot: input.preflight.repo_root,
+      headBefore: input.preflight.head_before,
+      headAfter
+    });
+    if (headAfter && committedFiles.length > 0) {
+      return await writeCheckpointArtifact(input.attemptPaths, {
+        status: "created",
+        message: `Execution already created verified checkpoint ${headAfter}.`,
+        commit: {
+          sha: headAfter,
+          message: await readGitCommitSubject(input.preflight.repo_root, headAfter),
+          changed_files: committedFiles
+        },
+        includes_preexisting_changes: canAbsorbPreexistingManagedWorkspaceChanges,
+        preexisting_status_before: input.preflight.status_before
+      });
+    }
+
     return await writeCheckpointArtifact(input.attemptPaths, {
       status: "skipped",
       reason: "no_changes",
@@ -353,6 +373,50 @@ async function readGitCommitFiles(repoRoot: string, revision: string): Promise<s
     .split(/\r?\n/u)
     .map((line) => line.trim())
     .filter(Boolean);
+}
+
+async function readCommittedChangedFiles(input: {
+  repoRoot: string;
+  headBefore: string | null;
+  headAfter: string | null;
+}): Promise<string[]> {
+  if (!input.headBefore || !input.headAfter || input.headBefore === input.headAfter) {
+    return [];
+  }
+
+  const result = await runGit(
+    input.repoRoot,
+    ["diff", "--name-only", `${input.headBefore}..${input.headAfter}`],
+    {},
+    true
+  );
+
+  if (result.exit_code !== 0) {
+    throw new Error(
+      `Execution checkpoint could not inspect committed changes from ${input.headBefore} to ${input.headAfter}.`
+    );
+  }
+
+  return result.stdout
+    .split(/\r?\n/u)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .sort();
+}
+
+async function readGitCommitSubject(repoRoot: string, revision: string): Promise<string> {
+  const result = await runGit(
+    repoRoot,
+    ["log", "-1", "--format=%s", revision],
+    {},
+    true
+  );
+
+  if (result.exit_code !== 0) {
+    return `Verified execution checkpoint ${revision}`;
+  }
+
+  return result.stdout.trim() || `Verified execution checkpoint ${revision}`;
 }
 
 async function writeCheckpointArtifact(

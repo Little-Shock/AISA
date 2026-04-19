@@ -48,6 +48,7 @@ import {
   captureAttemptCheckpointPreflight,
   maybeCreateVerifiedExecutionCheckpoint
 } from "../packages/orchestrator/src/git-checkpoint.ts";
+import { runAttemptRuntimeVerification } from "../packages/orchestrator/src/runtime-verification.ts";
 import { syncRuntimeLayoutHint } from "../packages/orchestrator/src/runtime-layout.ts";
 import { ensureRunManagedWorkspace } from "../packages/orchestrator/src/run-workspace.ts";
 import { createDefaultRunWorkspaceScopePolicy } from "../packages/orchestrator/src/workspace-scope.ts";
@@ -566,6 +567,7 @@ async function main(hostJudgeConfig: HostJudgeConfigSnapshot): Promise<void> {
       runCommand
     });
     await verifyManagedWorkspaceCheckpointCatchesUpDirtyBaseline();
+    await verifyCommittedExecutionCheckpointIsAccepted();
     await verifyExecutionAttemptRuntimeStateTransitionsAcrossVerification();
     await verifyDriveRunDoesNotLeaveRunningAttemptBehind();
     await assertSteeredExecutionDoesNotReuseMismatchedContract();
@@ -1103,6 +1105,146 @@ async function verifyManagedWorkspaceCheckpointCatchesUpDirtyBaseline(): Promise
     ["execution-note.md", "preexisting-note.md"],
     "catch-up checkpoint should commit both the carried-over dirty file and the new execution delta"
   );
+}
+
+async function verifyCommittedExecutionCheckpointIsAccepted(): Promise<void> {
+  const rootDir = await createTrackedVerifyTempDir("aisa-committed-checkpoint-");
+  const workspacePaths = resolveWorkspacePaths(rootDir);
+  await ensureWorkspace(workspacePaths);
+  await initializeVerifyGitRepo({
+    rootDir,
+    ...DRIVE_RUN_GIT_REPO_FIXTURE,
+    runCommand
+  });
+
+  const run = createRun({
+    title: "Accept worker-created execution checkpoint",
+    description:
+      "Verify runtime verification treats a new execution commit as real progress.",
+    success_criteria: ["Accept a verified worker-created commit as the checkpoint."],
+    constraints: [],
+    owner_id: "test-owner",
+    workspace_root: rootDir
+  });
+  const attempt = createAttempt({
+    run_id: run.id,
+    attempt_type: "execution",
+    worker: "fake-codex",
+    objective: "Commit the execution note before runtime replay.",
+    success_criteria: ["Runtime replay sees the committed execution note."],
+    workspace_root: rootDir
+  });
+  const attemptContract = createAttemptContract({
+    attempt_id: attempt.id,
+    run_id: run.id,
+    attempt_type: "execution",
+    objective: attempt.objective,
+    success_criteria: attempt.success_criteria,
+    required_evidence: [
+      "Leave a committed execution checkpoint tied to the objective.",
+      "Replay the locked verification command before accepting the checkpoint."
+    ],
+    expected_artifacts: ["committed-note.md"],
+    verification_plan: {
+      commands: [
+        {
+          purpose: "confirm committed note is present",
+          command: 'test -f committed-note.md && rg -n "^committed by att_" committed-note.md'
+        }
+      ]
+    }
+  });
+
+  await saveRun(workspacePaths, run);
+  await saveAttempt(workspacePaths, attempt);
+  await saveAttemptContract(workspacePaths, attemptContract);
+
+  const attemptPaths = resolveAttemptPaths(workspacePaths, run.id, attempt.id);
+  const preflight = await captureAttemptCheckpointPreflight({
+    run,
+    attempt,
+    attemptPaths
+  });
+  assert.equal(preflight?.status, "ready");
+  assert.deepEqual(preflight?.status_before, []);
+
+  await writeFile(
+    join(rootDir, "committed-note.md"),
+    `committed by ${attempt.id}\n`,
+    "utf8"
+  );
+  await runCommand(rootDir, ["git", "-C", rootDir, "add", "committed-note.md"]);
+  await runCommand(rootDir, [
+    "git",
+    "-C",
+    rootDir,
+    "commit",
+    "-m",
+    "test: committed execution note"
+  ]);
+  const committedHead = (
+    await runCommand(rootDir, ["git", "-C", rootDir, "rev-parse", "HEAD"])
+  ).stdout.trim();
+
+  const runtimeVerification = await runAttemptRuntimeVerification({
+    run,
+    attempt,
+    attemptContract,
+    result: {
+      summary: "Committed the execution note before runtime replay.",
+      findings: [
+        {
+          type: "fact",
+          content: "The execution note is committed.",
+          evidence: ["committed-note.md"]
+        }
+      ],
+      questions: [],
+      recommended_next_steps: ["Promote the verified checkpoint."],
+      confidence: 0.9,
+      artifacts: []
+    },
+    attemptPaths
+  });
+
+  assert.equal(runtimeVerification.verification.status, "passed");
+  assert.deepEqual(runtimeVerification.verification.new_git_status, []);
+  assert.deepEqual(runtimeVerification.verification.changed_files, [
+    "committed-note.md"
+  ]);
+
+  const checkpointOutcome = await maybeCreateVerifiedExecutionCheckpoint({
+    run,
+    attempt,
+    evaluation: {
+      attempt_id: attempt.id,
+      run_id: run.id,
+      goal_progress: 0.9,
+      evidence_quality: 0.9,
+      verification_status: "passed",
+      recommendation: "continue",
+      suggested_attempt_type: "execution",
+      rationale: "Verification passed and the worker already committed progress.",
+      missing_evidence: [],
+      review_input_packet_ref: null,
+      opinion_refs: [],
+      evaluation_synthesis_ref: null,
+      synthesis_strategy: "legacy_single_judge",
+      synthesizer: null,
+      reviewer_count: 0,
+      created_at: new Date().toISOString()
+    },
+    attemptPaths,
+    preflight
+  });
+  assert.equal(checkpointOutcome.status, "created");
+  assert.equal(checkpointOutcome.commit.sha, committedHead);
+  assert.deepEqual(checkpointOutcome.commit.changed_files, ["committed-note.md"]);
+
+  const gitStatusAfterCheckpoint = (
+    await runCommand(rootDir, ["git", "-C", rootDir, "status", "--porcelain=v1"])
+  ).stdout.trim();
+  assert.equal(gitStatusAfterCheckpoint, "");
 }
 
 async function verifyExecutionAttemptRuntimeStateTransitionsAcrossVerification(): Promise<void> {
