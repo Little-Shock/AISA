@@ -1283,6 +1283,7 @@ export const AttemptAdversarialVerificationSchema = z.object({
   attempt_type: AttemptTypeSchema,
   status: z.enum(["passed", "failed", "not_applicable"]),
   verifier_kit: ExecutionVerifierKitSchema.nullable().default(null),
+  target_surface: ExecutionVerifierKitSchema.nullable().default(null),
   failure_class: RunFailureClassSchema.nullable().default(null),
   failure_policy_mode: RunFailurePolicyModeSchema.nullable().default(null),
   verdict: AttemptAdversarialVerificationVerdictSchema.nullable().default(null),
@@ -2298,6 +2299,7 @@ export function createAttemptAdversarialVerification(input: {
   attempt_type: AttemptType;
   status: "passed" | "failed" | "not_applicable";
   verifier_kit?: ExecutionVerifierKit | null;
+  target_surface?: ExecutionVerifierKit | null;
   verdict?: AttemptAdversarialVerificationVerdict | null;
   summary?: string | null;
   failure_code?: AttemptAdversarialVerificationFailureCode | null;
@@ -2329,6 +2331,7 @@ export function createAttemptAdversarialVerification(input: {
       input.attempt_type === "execution"
         ? input.verifier_kit ?? DEFAULT_EXECUTION_VERIFIER_KIT
         : null,
+    target_surface: input.target_surface ?? null,
     failure_class: failureSignal?.failure_class ?? null,
     failure_policy_mode: failureSignal?.policy_mode ?? null,
     verdict: input.verdict ?? null,

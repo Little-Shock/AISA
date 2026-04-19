@@ -4,6 +4,8 @@
 
 - `smoke-plan.ts`: 从 fixture goal 生成状态、事件和计划工件
 - `verify-runtime.ts`: 回放 runtime 主套件，覆盖 run loop、run detail API、control-api supervisor、self-bootstrap 主链，并要求历史 contract 漂移已修复为零
+- `verify-adversarial-dry-run.ts`: 用历史卡点抽象出的 adversarial probes 比较多套治理方案，确认推荐组合能挡住坏输入且不误杀正常路径；可用 `AISA_ADVERSARIAL_REPLAY_RUN_DIR` 指向真实 run 目录补充观测计数
+- `verify-adversarial-evidence-surface.ts`: 验证对抗验证可以用结构化 `target_surface` 证明验证面，不再只靠 repo/git/workspace/replay/change 这类文案关键词
 - `verify-judge-evals.ts`: 单跑 judge/evals 小矩阵，覆盖 `evaluateBranch`、`evaluateAttempt`、CLI reviewer/synthesizer 接线，以及 failed runtime / failed-or-missing adversarial verification 的 hard-gate 回归
 - `verify-evaluator-calibration.ts`: 验证 settled attempt 会产出 evaluator calibration sample，maintenance plane 能读到它，export 脚本会刷新 online samples manifest，固定 false positive 和 false negative 回归位齐全
 - `verify-control-api-supervisor.ts`: 验证 control-api supervisor 会在子进程请求重启后自动拉起新实例

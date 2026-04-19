@@ -108,6 +108,29 @@ pnpm verify:judge-evals
 
 - 改了 judge、evals、adversarial-verification、verify matrix
 
+### Adversarial dry-run strategy comparison
+
+```bash
+pnpm verify:adversarial-dry-run
+```
+
+适用场景：
+
+- 比较 AISA 治理方案是否能挡住历史卡点
+- 改 worker 写回、verification contract、artifact refs、promotion、governance reuse、roadmap boundary 或 worker liveness 前先做方案 dry-run
+- 需要把真实 run 观测纳入报告时，设置 `AISA_ADVERSARIAL_REPLAY_RUN_DIR=/path/to/run`
+
+### Adversarial evidence surface
+
+```bash
+pnpm verify:adversarial-evidence-surface
+```
+
+适用场景：
+
+- 改 adversarial verification artifact schema 或 focus gate
+- 想确认结构化 `target_surface` 可以替代 repo/git/workspace/replay/change 这类魔法词
+
 ## 按改动范围选命令
 
 ### 改了 control-api / summary surface
@@ -149,6 +172,14 @@ pnpm verify:judge-evals
 
 1. `pnpm verify:judge-evals`
 2. `pnpm verify:evaluator-calibration`
+
+### 改了 governance / verification / promotion 策略
+
+建议顺序：
+
+1. `pnpm verify:adversarial-dry-run`
+2. 与改动最贴近的 focused verifier，例如 `pnpm verify:adversarial-evidence-surface`
+3. `pnpm verify:run-loop`
 
 ## Review 前的最小建议
 

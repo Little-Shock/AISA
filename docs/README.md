@@ -97,6 +97,8 @@
 - `decisions/0003-reviewer-pipeline-artifacts.md`
 - `decisions/0004-model-synthesizer-finalizes-attempt-evaluation.md`
 - `decisions/0005-run-working-context-v1.md`
+- `decisions/0006-fail-closed-artifact-reads.md`
+- `decisions/0007-adversarial-dry-run-replay.md`
 
 ## 维护约定
 

@@ -439,8 +439,27 @@ function buildVerifierKitFocusKeywords(verifierKit: ExecutionVerifierKit): strin
   }
 }
 
-function assessVerifierKitAdversarialFocus(input: {
+function parseAdversarialTargetSurface(value: unknown):
+  | { ok: true; value: ExecutionVerifierKit | null }
+  | { ok: false; failure_reason: string } {
+  if (value === undefined || value === null) {
+    return { ok: true, value: null };
+  }
+
+  if (value === "repo" || value === "web" || value === "api" || value === "cli") {
+    return { ok: true, value };
+  }
+
+  return {
+    ok: false,
+    failure_reason:
+      'Adversarial verification artifact field target_surface must be one of "repo", "web", "api", or "cli".'
+  };
+}
+
+export function assessVerifierKitAdversarialFocus(input: {
   verifierKit: ExecutionVerifierKit;
+  targetSurface: ExecutionVerifierKit | null;
   summary: string | null;
   checks: AttemptAdversarialVerification["checks"];
   commands: AttemptAdversarialVerification["commands"];
@@ -449,6 +468,28 @@ function assessVerifierKitAdversarialFocus(input: {
   check: AttemptAdversarialVerification["checks"][number];
 } {
   const registryEntry = getExecutionVerifierKitRegistryEntry(input.verifierKit);
+  if (input.targetSurface === input.verifierKit) {
+    return {
+      ok: true,
+      check: {
+        code: "verifier_kit_focus_present",
+        status: "passed",
+        message: `${registryEntry.title} adversarial focus is grounded by structured target_surface ${input.targetSurface}.`
+      }
+    };
+  }
+
+  if (input.targetSurface !== null) {
+    return {
+      ok: false,
+      check: {
+        code: "verifier_kit_focus_present",
+        status: "failed",
+        message: `${registryEntry.title} adversarial focus declared target_surface "${input.targetSurface}", but expected "${input.verifierKit}".`
+      }
+    };
+  }
+
   const keywords = buildVerifierKitFocusKeywords(input.verifierKit);
   const haystacks = [
     input.summary ?? "",
@@ -480,7 +521,7 @@ function assessVerifierKitAdversarialFocus(input: {
     check: {
       code: "verifier_kit_focus_present",
       status: "failed",
-      message: `${registryEntry.title} adversarial focus must mention one of: ${keywords.join(", ")}.`
+      message: `${registryEntry.title} adversarial focus must declare target_surface "${input.verifierKit}" or mention one of: ${keywords.join(", ")}.`
     }
   };
 }
@@ -3782,6 +3823,24 @@ export class Orchestrator {
         string,
         unknown
       >;
+      const parsedTargetSurface = parseAdversarialTargetSurface(raw.target_surface);
+      if (!parsedTargetSurface.ok) {
+        return await persist(
+          createAttemptAdversarialVerification({
+            run_id: input.run.id,
+            attempt_id: input.attempt.id,
+            attempt_type: input.attempt.attempt_type,
+            status: "failed",
+            verifier_kit: verifierKit,
+            verdict: "fail",
+            summary: "Execution left an invalid adversarial verification artifact.",
+            failure_code: "invalid_artifact",
+            failure_reason: parsedTargetSurface.failure_reason,
+            source_artifact_path: resolvedSourceArtifactPath
+          })
+        );
+      }
+
       const normalized = createAttemptAdversarialVerification({
         run_id: input.run.id,
         attempt_id: input.attempt.id,
@@ -3793,8 +3852,9 @@ export class Orchestrator {
               ? "passed"
               : raw.verdict === "fail" || raw.verdict === "partial"
                 ? "failed"
-              : "failed",
+                : "failed",
         verifier_kit: verifierKit,
+        target_surface: parsedTargetSurface.value,
         verdict:
           raw.verdict === "pass" || raw.verdict === "fail" || raw.verdict === "partial"
             ? raw.verdict
@@ -3855,6 +3915,7 @@ export class Orchestrator {
       const uniqueOutputRefs = [...new Set(effectiveOutputRefs)];
       const kitFocusAssessment = assessVerifierKitAdversarialFocus({
         verifierKit,
+        targetSurface: normalized.target_surface,
         summary: normalized.summary,
         checks: normalized.checks,
         commands: normalized.commands
@@ -3865,6 +3926,7 @@ export class Orchestrator {
         attempt_id: normalized.attempt_id,
         attempt_type: normalized.attempt_type,
         verifier_kit: normalized.verifier_kit,
+        target_surface: normalized.target_surface,
         verdict: normalized.verdict,
         summary: normalized.summary,
         checks: checksWithHarnessFocus,
