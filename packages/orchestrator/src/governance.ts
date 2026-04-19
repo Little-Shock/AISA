@@ -410,6 +410,7 @@ export async function validateGovernedAttemptCandidate(input: {
     governance.status !== "blocked" &&
     governance.mainline_attempt_type === "execution" &&
     governance.mainline_summary &&
+    candidate.nextAction !== "apply_steer" &&
     candidate.attemptType === "research"
   ) {
     candidate = {

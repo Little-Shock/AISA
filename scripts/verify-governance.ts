@@ -592,6 +592,41 @@ async function verifyFullwidthPunctuationArtifactReferenceIsAccepted(): Promise<
   assert.deepEqual(decision.invalidRefs, []);
 }
 
+async function verifyApplySteerCanOpenResearchAfterExecutionMainline(): Promise<void> {
+  const { run, rootDir } = await bootstrapRun("apply-steer-research");
+  const governance = createRunGovernanceState({
+    run_id: run.id,
+    status: "ready_to_commit",
+    mainline_signature: buildGovernanceSignature("Continue the verified execution mainline."),
+    mainline_summary: "Continue the verified execution mainline.",
+    mainline_attempt_type: "execution",
+    context_summary: {
+      headline: "Execution mainline is already verified.",
+      progress_summary: "Execution succeeded and should keep moving unless the operator steers.",
+      blocker_summary: null,
+      avoid_summary: []
+    }
+  });
+
+  const decision = await validateGovernedAttemptCandidate({
+    governance,
+    candidate: {
+      attemptType: "research",
+      objective: "Research the next milestone from an explicit operator steer.",
+      nextAction: "apply_steer",
+      nextExecutionDraft: null
+    },
+    rootDir
+  });
+
+  assert.equal(decision.status, "ok", "explicit apply_steer should not be redirected to execution");
+  assert.equal(decision.candidate.attemptType, "research");
+  assert.equal(
+    decision.candidate.objective,
+    "Research the next milestone from an explicit operator steer."
+  );
+}
+
 async function verifyCheckpointIncludesGovernanceContext(): Promise<void> {
   const { run, workspacePaths, rootDir } = await bootstrapRun("checkpoint-context");
   await writeExecutionWorkspacePackage(rootDir);
@@ -694,6 +729,10 @@ async function main(): Promise<void> {
       {
         id: "fullwidth_punctuation_artifact_reference_is_accepted",
         run: verifyFullwidthPunctuationArtifactReferenceIsAccepted
+      },
+      {
+        id: "apply_steer_can_open_research_after_execution_mainline",
+        run: verifyApplySteerCanOpenResearchAfterExecutionMainline
       },
       {
         id: "checkpoint_includes_governance_context",
