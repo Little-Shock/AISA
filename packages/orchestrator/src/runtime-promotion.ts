@@ -270,9 +270,12 @@ export async function maybePromoteVerifiedCheckpoint(input: {
   }
 
   const runtimeSharesRepo = normalizePath(devRepoRoot) === normalizePath(runtimeRepoRoot);
+  const attachedProjectUsesSeparateRuntime =
+    input.run.attached_project_id !== null && !runtimeSharesRepo;
   const runtimeRepoSharesDevHistoryBefore =
     runtimeSharesRepo ||
-    ((await gitCommitExists(runtimeRepoRoot, devRepoHeadBefore)) &&
+    (!attachedProjectUsesSeparateRuntime &&
+      (await gitCommitExists(runtimeRepoRoot, devRepoHeadBefore)) &&
       (await gitIsAncestor(runtimeRepoRoot, runtimeRepoHeadBefore, devRepoHeadBefore)));
 
   if (!runtimeSharesRepo && runtimeRepoSharesDevHistoryBefore) {

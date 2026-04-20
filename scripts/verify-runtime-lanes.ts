@@ -758,18 +758,16 @@ async function verifyAttachedProjectPromotionSkipsUnrelatedRuntimeRepo(): Promis
   promoted_attempt_id: string;
 }> {
   const baseDir = await createTrackedVerifyTempDir("aisa-attached-project-promotion-");
-  const productSeedRoot = join(baseDir, "product-seed");
-  const runtimeSeedRoot = join(baseDir, "runtime-seed");
+  const sharedSeedRoot = join(baseDir, "shared-seed");
   const devRepoRoot = join(baseDir, "product-dev");
   const runtimeRepoRoot = join(baseDir, "runtime-repo");
   const runtimeDataRoot = join(baseDir, "runtime-data");
   const attemptWorktreeRoot = join(baseDir, "attempt-worktree");
   const managedWorkspaceRoot = join(baseDir, ".aisa-run-worktrees");
 
-  await createSeedRepo(productSeedRoot);
-  await createSeedRepo(runtimeSeedRoot);
-  await cloneRepo(productSeedRoot, devRepoRoot);
-  await cloneRepo(runtimeSeedRoot, runtimeRepoRoot);
+  await createSeedRepo(sharedSeedRoot);
+  await cloneRepo(sharedSeedRoot, devRepoRoot);
+  await cloneRepo(sharedSeedRoot, runtimeRepoRoot);
   await mkdir(runtimeDataRoot, { recursive: true });
   await mkdir(managedWorkspaceRoot, { recursive: true });
   await runCommand(devRepoRoot, [
@@ -793,11 +791,13 @@ async function verifyAttachedProjectPromotionSkipsUnrelatedRuntimeRepo(): Promis
 
   const run = createRun({
     title: "Promote attached project checkpoint",
-    description: "External product work should update the attached dev repo without rewriting AISA runtime.",
+    description:
+      "External product work should update the attached dev repo without rewriting AISA runtime, even when histories overlap.",
     success_criteria: ["Promote product checkpoint only."],
     constraints: [],
     owner_id: "test-owner",
-    workspace_root: devRepoRoot
+    workspace_root: devRepoRoot,
+    attached_project_id: "project_attached_promotion"
   });
   const attempt = createAttempt({
     run_id: run.id,
@@ -824,8 +824,14 @@ async function verifyAttachedProjectPromotionSkipsUnrelatedRuntimeRepo(): Promis
 
   const checkpointSha = await readGitHead(attemptWorktreeRoot);
   const runtimeHeadBefore = await readGitHead(runtimeRepoRoot);
+  const devHeadBefore = await readGitHead(devRepoRoot);
   assert.ok(checkpointSha, "checkpoint sha should be readable from attached attempt worktree");
   assert.ok(runtimeHeadBefore, "runtime head should be readable before attached promotion");
+  assert.equal(
+    runtimeHeadBefore,
+    devHeadBefore,
+    "attached promotion fixture should prove attached_project_id wins over overlapping history"
+  );
 
   const outcome = await maybePromoteVerifiedCheckpoint({
     layout: runtimeLayout,
