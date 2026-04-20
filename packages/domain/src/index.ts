@@ -128,10 +128,14 @@ const RUN_HARNESS_SLOT_BINDING_CANONICAL_MAP: Record<
   attempt_evaluation_synthesizer: "attempt_evaluation_synthesizer"
 } as const;
 
+const DEFAULT_EXECUTION_WORKER_EFFORT = "high" as const;
+const DEFAULT_JUDGE_EFFORT = "medium" as const;
+
 export const RunHarnessEffortPreferenceSchema = z.object({
-  effort: WorkerEffortLevelSchema.default("medium")
+  effort: WorkerEffortLevelSchema.default(DEFAULT_JUDGE_EFFORT)
 });
-export const RunHarnessExecutionPreferenceSchema = RunHarnessEffortPreferenceSchema.extend({
+export const RunHarnessExecutionPreferenceSchema = z.object({
+  effort: WorkerEffortLevelSchema.default(DEFAULT_EXECUTION_WORKER_EFFORT),
   default_verifier_kit: ExecutionVerifierKitSchema.default(
     DEFAULT_EXECUTION_VERIFIER_KIT
   )
@@ -204,7 +208,7 @@ export const RunHarnessGatesSchema = z.object({
 const DEFAULT_RUN_HARNESS_PROFILE = {
   version: 3 as const,
   execution: {
-    effort: "medium" as const,
+    effort: DEFAULT_EXECUTION_WORKER_EFFORT,
     default_verifier_kit: DEFAULT_EXECUTION_VERIFIER_KIT
   },
   reviewer: {

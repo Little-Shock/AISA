@@ -92,6 +92,7 @@ export function isWorkerWritebackParseError(
 }
 
 export const CODEX_CLI_EXECUTION_EFFORT_CONFIG_KEY = "model_reasoning_effort";
+export const DEFAULT_CODEX_CLI_EXECUTION_EFFORT = "high" as const;
 export const CODEX_CLI_EXECUTION_EFFORT_APPLIED_DETAIL =
   `当前 execution 入口会通过 Codex CLI 配置键 ${CODEX_CLI_EXECUTION_EFFORT_CONFIG_KEY} 原生透传 effort。`;
 export const EXECUTION_WORKER_EFFORT_APPLIED_DETAIL =
@@ -99,7 +100,7 @@ export const EXECUTION_WORKER_EFFORT_APPLIED_DETAIL =
 
 export type CodexCliWorkerEffortSetting = {
   requested_effort: WorkerEffortLevel;
-  default_effort: "medium";
+  default_effort: typeof DEFAULT_CODEX_CLI_EXECUTION_EFFORT;
   source: string;
   status: "applied" | "unsupported";
   applied: boolean;
@@ -2017,8 +2018,9 @@ export function resolveCodexCliWorkerEffort(input: {
   source?: string;
 } = {}): CodexCliWorkerEffortSetting {
   return {
-    requested_effort: input.requestedEffort ?? "medium",
-    default_effort: "medium",
+    requested_effort:
+      input.requestedEffort ?? DEFAULT_CODEX_CLI_EXECUTION_EFFORT,
+    default_effort: DEFAULT_CODEX_CLI_EXECUTION_EFFORT,
     source: input.source ?? "run.harness_profile.execution.effort",
     status: "applied",
     applied: true,

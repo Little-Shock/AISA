@@ -428,7 +428,7 @@ async function main(): Promise<void> {
     worker_effort: {
       execution: {
         requested_effort: "high",
-        default_effort: "medium",
+        default_effort: "high",
         source: "run.harness_profile.execution.effort",
         status: "applied",
         applied: true,

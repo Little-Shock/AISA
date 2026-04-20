@@ -1807,6 +1807,13 @@ async function assertMissingRuntimeHealthSnapshotDoesNotFabricateContext(): Prom
 }
 
 async function assertExecutionHarnessEffortFlowsToDispatchContext(): Promise<void> {
+  const defaultProfile = createDefaultRunHarnessProfile();
+  assert.equal(
+    defaultProfile.execution.effort,
+    "high",
+    "execution_harness_effort_context: default execution effort should be high"
+  );
+
   const rootDir = await createVerifyTempDir("aisa-execution-effort-context-");
   const workspacePaths = resolveWorkspacePaths(rootDir);
   await ensureWorkspace(workspacePaths);
@@ -1938,7 +1945,7 @@ async function assertExecutionHarnessEffortFlowsToDispatchContext(): Promise<voi
   );
   assert.deepEqual(adapter.capturedCalls[0]?.worker_effort, {
     requested_effort: "high",
-    default_effort: "medium",
+    default_effort: "high",
     source: "run.harness_profile.execution.effort",
     status: "applied",
     applied: true,
@@ -1957,7 +1964,7 @@ async function assertExecutionHarnessEffortFlowsToDispatchContext(): Promise<voi
   assert.deepEqual(context?.worker_effort, {
     execution: {
       requested_effort: "high",
-      default_effort: "medium",
+      default_effort: "high",
       source: "run.harness_profile.execution.effort",
       status: "applied",
       applied: true,
@@ -1983,6 +1990,18 @@ async function assertExecutionHarnessEffortFlowsToDispatchContext(): Promise<voi
 }
 
 async function assertExecutionEffortNativeConfigReachesCodexCli(): Promise<void> {
+  const defaultWorkerEffort = resolveCodexCliWorkerEffort();
+  assert.equal(
+    defaultWorkerEffort.requested_effort,
+    "high",
+    "execution_effort_native_config: default Codex worker effort should be high"
+  );
+  assert.equal(
+    defaultWorkerEffort.default_effort,
+    "high",
+    "execution_effort_native_config: default Codex worker effort label should be high"
+  );
+
   const rootDir = await createVerifyTempDir("aisa-execution-effort-native-");
   const workspacePaths = resolveWorkspacePaths(rootDir);
   await ensureWorkspace(workspacePaths);
