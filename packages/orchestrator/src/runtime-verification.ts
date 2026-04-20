@@ -90,6 +90,7 @@ const LIVE_RUNTIME_SOURCE_PREFIXES = [
   "packages/state-store/src/",
   "packages/worker-adapters/src/"
 ] as const;
+const DEFAULT_RUNTIME_VERIFICATION_TIMEOUT_MS = 600_000;
 
 let cachedVerificationShell: string | null = null;
 
@@ -430,7 +431,7 @@ export async function runAttemptRuntimeVerification(input: {
       cwd: resolvedCwd.cwd,
       stdoutFile,
       stderrFile,
-      timeoutMs: input.timeoutMs ?? 300_000
+      timeoutMs: input.timeoutMs ?? DEFAULT_RUNTIME_VERIFICATION_TIMEOUT_MS
     });
 
     const commandResult: VerificationCommandResult = {
