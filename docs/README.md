@@ -72,6 +72,8 @@
   - 单 run 核心收敛路线
 - `aisa-common-dev-scenarios-roadmap.md`
   - 面向常见外部开发场景的接入与采用路线
+- `project-isolated-runtime-requirement.md`
+  - AISA 作为 runtime 管理多个外部项目时的项目隔离需求与对抗性验收方案
 
 ### 专项计划与历史材料
 
