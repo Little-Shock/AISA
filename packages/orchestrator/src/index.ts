@@ -1994,6 +1994,7 @@ export class Orchestrator {
           approval_decided_at: null,
           approval_actor: null,
           approval_note: null,
+          source_attempt_id: null,
           source_ref: null
         })
       : createRunPolicyRuntime({
@@ -2003,6 +2004,49 @@ export class Orchestrator {
         });
 
     await saveRunPolicyRuntime(this.workspacePaths, nextPolicy);
+  }
+
+  private async consumeApprovedExecutionPolicy(input: {
+    runId: string;
+    attempt: Attempt;
+  }): Promise<void> {
+    if (input.attempt.attempt_type !== "execution") {
+      return;
+    }
+
+    const existingPolicy = await getRunPolicyRuntime(this.workspacePaths, input.runId);
+    if (
+      existingPolicy?.approval_required !== true ||
+      existingPolicy.approval_status !== "approved" ||
+      existingPolicy.proposed_attempt_type !== "execution" ||
+      existingPolicy.proposed_objective !== input.attempt.objective
+    ) {
+      return;
+    }
+
+    await saveRunPolicyRuntime(
+      this.workspacePaths,
+      updateRunPolicyRuntime(existingPolicy, {
+        stage: "planning",
+        approval_status: "not_required",
+        approval_required: false,
+        proposed_signature: null,
+        proposed_attempt_type: null,
+        proposed_objective: null,
+        proposed_success_criteria: [],
+        permission_profile: "read_only",
+        hook_policy: "not_required",
+        danger_mode: "forbid",
+        blocking_reason: null,
+        last_decision: "execution_consumed",
+        approval_requested_at: null,
+        approval_decided_at: null,
+        approval_actor: null,
+        approval_note: null,
+        source_attempt_id: input.attempt.id,
+        source_ref: input.attempt.result_ref
+      })
+    );
   }
 
   private buildRunPolicySourceRef(
@@ -3294,6 +3338,10 @@ export class Orchestrator {
           })
         );
       }
+      await this.consumeApprovedExecutionPolicy({
+        runId,
+        attempt
+      });
 
       await appendRunJournal(
         this.workspacePaths,

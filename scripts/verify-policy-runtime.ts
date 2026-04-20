@@ -492,12 +492,32 @@ async function verifyApproveRouteUnlocksExecution(): Promise<void> {
   });
   await driveOrchestratorUntil({
     orchestrator: resumedOrchestrator,
-    predicate: async () => (await listAttempts(workspacePaths, run.id)).length >= 2
+    predicate: async () =>
+      (await listAttempts(workspacePaths, run.id)).some(
+        (attempt) => attempt.attempt_type === "execution" && attempt.status === "completed"
+      )
   });
 
   const attempts = await listAttempts(workspacePaths, run.id);
   const latestAttempt = attempts.at(-1) ?? null;
   assert.equal(latestAttempt?.attempt_type, "execution");
+  assert.equal(latestAttempt?.status, "completed");
+
+  const consumedPolicy = await readRunPolicyRuntimeStrict(workspacePaths, run.id);
+  assert.equal(consumedPolicy.stage, "planning");
+  assert.equal(consumedPolicy.approval_status, "not_required");
+  assert.equal(consumedPolicy.approval_required, false);
+  assert.equal(consumedPolicy.proposed_attempt_type, null);
+  assert.equal(consumedPolicy.last_decision, "execution_consumed");
+  assert.equal(consumedPolicy.source_attempt_id, latestAttempt?.id);
+
+  await resumedOrchestrator.tick();
+  const attemptsAfterExtraTick = await listAttempts(workspacePaths, run.id);
+  assert.equal(
+    attemptsAfterExtraTick.length,
+    attempts.length,
+    "consumed approved execution policy should not dispatch a duplicate execution attempt"
+  );
 }
 
 async function verifyRejectRouteForcesResearchReplan(): Promise<void> {
