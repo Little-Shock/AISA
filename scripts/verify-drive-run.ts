@@ -568,6 +568,7 @@ async function main(hostJudgeConfig: HostJudgeConfigSnapshot): Promise<void> {
     });
     await verifyManagedWorkspaceCheckpointCatchesUpDirtyBaseline();
     await verifyCommittedExecutionCheckpointIsAccepted();
+    await verifyVerificationOnlyRecoveryCanReplayWithoutNewDelta();
     await verifyExecutionAttemptRuntimeStateTransitionsAcrossVerification();
     await verifyDriveRunDoesNotLeaveRunningAttemptBehind();
     await assertSteeredExecutionDoesNotReuseMismatchedContract();
@@ -1245,6 +1246,106 @@ async function verifyCommittedExecutionCheckpointIsAccepted(): Promise<void> {
     await runCommand(rootDir, ["git", "-C", rootDir, "status", "--porcelain=v1"])
   ).stdout.trim();
   assert.equal(gitStatusAfterCheckpoint, "");
+}
+
+async function verifyVerificationOnlyRecoveryCanReplayWithoutNewDelta(): Promise<void> {
+  const rootDir = await createTrackedVerifyTempDir(
+    "aisa-verification-only-recovery-"
+  );
+  const workspacePaths = resolveWorkspacePaths(rootDir);
+  await ensureWorkspace(workspacePaths);
+  await initializeVerifyGitRepo({
+    rootDir,
+    ...DRIVE_RUN_GIT_REPO_FIXTURE,
+    runCommand
+  });
+
+  const run = createRun({
+    title: "Accept verification-only recovery",
+    description:
+      "Verify a recovery attempt can replay locked gates without inventing a commit.",
+    success_criteria: ["Replay postflight gates without changing project content."],
+    constraints: [],
+    owner_id: "test-owner",
+    workspace_root: rootDir
+  });
+  const attempt = createAttempt({
+    run_id: run.id,
+    attempt_type: "execution",
+    worker: "fake-codex",
+    objective:
+      "M32C adversarial recovery only. Do not change content or add a second product commit; rerun postflight verification.",
+    success_criteria: ["Runtime replay accepts the explicit no-change recovery."],
+    workspace_root: rootDir
+  });
+  const attemptContract = createAttemptContract({
+    attempt_id: attempt.id,
+    run_id: run.id,
+    attempt_type: "execution",
+    objective: attempt.objective,
+    success_criteria: attempt.success_criteria,
+    required_evidence: [
+      "Replay the locked verification command for the existing accepted commit.",
+      "Do not change content or add a second product commit during recovery."
+    ],
+    forbidden_shortcuts: [
+      "Do not create a meaningless git commit just to satisfy runtime verification."
+    ],
+    expected_artifacts: ["fresh postflight command output"],
+    verification_plan: {
+      commands: [
+        {
+          purpose: "confirm recovery workspace is clean",
+          command: "git status --short"
+        }
+      ]
+    }
+  });
+
+  await saveRun(workspacePaths, run);
+  await saveAttempt(workspacePaths, attempt);
+  await saveAttemptContract(workspacePaths, attemptContract);
+
+  const attemptPaths = resolveAttemptPaths(workspacePaths, run.id, attempt.id);
+  const preflight = await captureAttemptCheckpointPreflight({
+    run,
+    attempt,
+    attemptPaths
+  });
+  assert.equal(preflight?.status, "ready");
+  assert.deepEqual(preflight?.status_before, []);
+
+  const runtimeVerification = await runAttemptRuntimeVerification({
+    run,
+    attempt,
+    attemptContract,
+    result: {
+      summary:
+        "Verified the existing commit state and intentionally left no new git delta.",
+      findings: [
+        {
+          type: "fact",
+          content: "The recovery replay ran against the existing clean workspace.",
+          evidence: ["git status --short"]
+        }
+      ],
+      questions: [],
+      recommended_next_steps: [],
+      confidence: 0.95,
+      artifacts: []
+    },
+    attemptPaths
+  });
+
+  assert.equal(runtimeVerification.verification.status, "passed");
+  assert.deepEqual(runtimeVerification.verification.changed_files, []);
+  assert.equal(runtimeVerification.verification.command_results.length, 1);
+  assert.ok(
+    runtimeVerification.verification.checks.some(
+      (check) => check.code === "verification_only_recovery_replayed"
+    ),
+    "verification-only recovery should leave an explicit runtime check"
+  );
 }
 
 async function verifyExecutionAttemptRuntimeStateTransitionsAcrossVerification(): Promise<void> {

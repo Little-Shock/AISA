@@ -77,6 +77,8 @@ type SyncedSelfBootstrapArtifacts = NonNullable<
   AttemptRuntimeVerification["synced_self_bootstrap_artifacts"]
 >;
 
+type RuntimeVerificationCheck = AttemptRuntimeVerification["checks"][number];
+
 const CHECKPOINT_PREFLIGHT_FILE_NAME = "git-checkpoint-preflight.json";
 const LIVE_RUNTIME_SOURCE_PREFIXES = [
   "apps/control-api/src/",
@@ -365,8 +367,12 @@ export async function runAttemptRuntimeVerification(input: {
     headBefore: checkpointPreflight.head_before,
     headAfter: gitHead
   });
+  const verificationOnlyRecovery = isVerificationOnlyRecoveryAttempt({
+    attempt: input.attempt,
+    attemptContract
+  });
 
-  if (gitStatusDelta.changedFiles.length === 0) {
+  if (gitStatusDelta.changedFiles.length === 0 && !verificationOnlyRecovery) {
     return await writeVerificationArtifact(input.attemptPaths, {
       attempt_id: input.attempt.id,
       run_id: input.run.id,
@@ -538,6 +544,14 @@ export async function runAttemptRuntimeVerification(input: {
     verifierKit,
     result: input.result
   });
+  const verificationOnlyRecoveryChecks = buildVerificationOnlyRecoveryChecks(
+    verificationOnlyRecovery,
+    finalGitStatusDelta.changedFiles
+  );
+  const runtimeChecks = [
+    ...verificationOnlyRecoveryChecks,
+    ...runtimeKitAssessment.checks
+  ];
   if (runtimeKitAssessment.failureReason) {
     return await writeVerificationArtifact(input.attemptPaths, {
       attempt_id: input.attempt.id,
@@ -553,7 +567,7 @@ export async function runAttemptRuntimeVerification(input: {
       changed_files: finalGitStatusDelta.changedFiles,
       failure_code: runtimeKitAssessment.failureCode,
       failure_reason: runtimeKitAssessment.failureReason,
-      checks: runtimeKitAssessment.checks,
+      checks: runtimeChecks,
       command_results: commandResults,
       synced_self_bootstrap_artifacts: syncedSelfBootstrapArtifacts,
       created_at: new Date().toISOString()
@@ -574,11 +588,81 @@ export async function runAttemptRuntimeVerification(input: {
     changed_files: finalGitStatusDelta.changedFiles,
     failure_code: null,
     failure_reason: null,
-    checks: runtimeKitAssessment.checks,
+    checks: runtimeChecks,
     command_results: commandResults,
     synced_self_bootstrap_artifacts: syncedSelfBootstrapArtifacts,
     created_at: new Date().toISOString()
   });
+}
+
+function isVerificationOnlyRecoveryAttempt(input: {
+  attempt: Attempt;
+  attemptContract: AttemptContract;
+}): boolean {
+  if (input.attempt.attempt_type !== "execution") {
+    return false;
+  }
+
+  const contract = input.attemptContract;
+  if ((contract.verification_plan?.commands.length ?? 0) === 0) {
+    return false;
+  }
+
+  const text = [
+    input.attempt.objective,
+    contract.objective,
+    ...contract.required_evidence,
+    ...contract.forbidden_shortcuts,
+    ...contract.expected_artifacts,
+    ...contract.done_rubric.map(
+      (item: AttemptContract["done_rubric"][number]) =>
+        `${item.code} ${item.description}`
+    ),
+    ...contract.failure_modes.map(
+      (item: AttemptContract["failure_modes"][number]) =>
+        `${item.code} ${item.description}`
+    )
+  ]
+    .join("\n")
+    .toLowerCase();
+
+  const saysRecovery =
+    text.includes("recovery only") ||
+    text.includes("verification-only") ||
+    text.includes("verification only") ||
+    text.includes("postflight") ||
+    text.includes("恢复") ||
+    text.includes("复核") ||
+    text.includes("重跑");
+  const saysNoContentChange =
+    text.includes("do not change") ||
+    text.includes("do not add a second") ||
+    text.includes("no new product commit") ||
+    text.includes("不要改") ||
+    text.includes("不要新增") ||
+    text.includes("未改");
+
+  return saysRecovery && saysNoContentChange;
+}
+
+function buildVerificationOnlyRecoveryChecks(
+  verificationOnlyRecovery: boolean,
+  changedFiles: string[]
+): RuntimeVerificationCheck[] {
+  if (!verificationOnlyRecovery) {
+    return [];
+  }
+
+  return [
+    {
+      code: "verification_only_recovery_replayed",
+      status: "passed",
+      message:
+        changedFiles.length === 0
+          ? "Explicit verification-only recovery left no new git delta and replayed the locked verification commands."
+          : "Explicit verification-only recovery replayed the locked verification commands after a git delta appeared."
+    }
+  ];
 }
 
 async function buildFailedVerificationArtifact(input: {
