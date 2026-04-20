@@ -17,8 +17,11 @@ import {
 } from "../packages/state-store/src/index.ts";
 import {
   CodexCliWorkerAdapter,
+  CodexCliAdversarialVerifierAdapter,
+  createAdversarialVerifierAdapter,
   createExecutionWorkerAdapter,
   isWorkerWritebackParseError,
+  loadAdversarialVerifierAdapterConfig,
   loadExecutionWorkerAdapterConfig,
   loadCodexCliConfig,
   prepareResearchShellGuard,
@@ -397,6 +400,32 @@ async function main(): Promise<void> {
     stallKillGraceMs: 17
   });
   assert.equal(createExecutionWorkerAdapter(genericLoadedConfig).type, "codex");
+
+  const adversarialVerifierConfig = loadAdversarialVerifierAdapterConfig({
+    AISA_EXECUTION_COMMAND: "aisa-exec",
+    AISA_EXECUTION_SANDBOX: "danger-full-access",
+    AISA_ADVERSARIAL_VERIFIER_COMMAND: "aisa-clean-verifier",
+    AISA_ADVERSARIAL_VERIFIER_MODEL: "gpt-5.4",
+    AISA_ADVERSARIAL_VERIFIER_PROFILE: "clean-postflight",
+    AISA_ADVERSARIAL_VERIFIER_PROGRESS_STALL_MS: "19",
+    AISA_ADVERSARIAL_VERIFIER_STALL_POLL_MS: "23",
+    AISA_ADVERSARIAL_VERIFIER_STALL_KILL_GRACE_MS: "29"
+  });
+  assert.deepEqual(adversarialVerifierConfig, {
+    provider: "codex_cli",
+    command: "aisa-clean-verifier",
+    model: "gpt-5.4",
+    profile: "clean-postflight",
+    sandbox: "read-only",
+    skipGitRepoCheck: true,
+    progressStallMs: 19,
+    stallPollMs: 23,
+    stallKillGraceMs: 29
+  });
+  assert.equal(
+    createAdversarialVerifierAdapter(adversarialVerifierConfig).type,
+    "codex-clean-adversarial-verifier"
+  );
   assert.equal(
     supportsRunHarnessSlotWorkerAdapterType({
       slot: "execution",
@@ -613,6 +642,108 @@ async function main(): Promise<void> {
   assert.equal(runtimeEvents[2]?.summary, "计划更新：1/2 已完成");
   assert.equal(runtimeEvents[3]?.summary, "执行命令：pnpm verify:runtime");
   assert.equal(runtimeEvents[4]?.summary, "命令完成：pnpm verify:runtime");
+
+  const cleanVerifierFixture = createExecutionAttemptFixture({
+    runId: run.id,
+    workspaceRoot: rootDir,
+    objective: "验证 postflight adversarial verifier 使用干净上下文。"
+  });
+  const cleanVerifierPaths = resolveAttemptPaths(
+    workspacePaths,
+    run.id,
+    cleanVerifierFixture.attempt.id
+  );
+  const cleanVerifierCodex = await createFakeCodexScript({
+    rootDir,
+    fileName: "fake-codex-clean-verifier.sh",
+    jsonPayload: JSON.stringify(
+      {
+        target_surface: "repo",
+        summary: "干净 verifier 独立完成验证。",
+        verdict: "pass",
+        checks: [
+          {
+            code: "clean_context_probe",
+            status: "passed",
+            message: "没有复用 execution worker 的 adversarial 结论。"
+          }
+        ],
+        commands: [
+          {
+            purpose: "clean postflight adversarial probe",
+            command: "test -n clean-verifier",
+            cwd: rootDir,
+            exit_code: 0,
+            status: "passed",
+            output_ref: join(cleanVerifierPaths.artifactsDir, "adversarial-verifier", "stdout.ndjson")
+          }
+        ],
+        output_refs: [
+          join(cleanVerifierPaths.artifactsDir, "adversarial-verifier", "stdout.ndjson")
+        ]
+      },
+      null,
+      2
+    ),
+    jsonEvents: [
+      JSON.stringify({
+        type: "thread.started",
+        thread_id: "sess_clean_verifier_test"
+      })
+    ]
+  });
+  const cleanVerifier = new CodexCliAdversarialVerifierAdapter({
+    command: cleanVerifierCodex,
+    sandbox: "read-only",
+    skipGitRepoCheck: true
+  });
+  const cleanVerifierResult = await cleanVerifier.runAttemptAdversarialVerification({
+    run,
+    attempt: cleanVerifierFixture.attempt,
+    attemptContract: cleanVerifierFixture.attemptContract,
+    result: runtimeResult.writeback,
+    runtimeVerification: {
+      attempt_id: cleanVerifierFixture.attempt.id,
+      run_id: run.id,
+      attempt_type: "execution",
+      status: "passed",
+      verifier_kit: "repo",
+      failure_class: null,
+      failure_policy_mode: null,
+      repo_root: rootDir,
+      git_head: "abc123",
+      git_status: [" M execution-change.md"],
+      preexisting_git_status: [],
+      new_git_status: [" M execution-change.md"],
+      changed_files: ["execution-change.md"],
+      failure_code: null,
+      failure_reason: null,
+      checks: [],
+      command_results: [],
+      synced_self_bootstrap_artifacts: null,
+      created_at: new Date().toISOString()
+    },
+    attemptPaths: cleanVerifierPaths,
+    workspacePaths
+  });
+  assert.equal(
+    cleanVerifierResult.artifact.summary,
+    "干净 verifier 独立完成验证。"
+  );
+  assert.ok(
+    cleanVerifierResult.sourceArtifactPath.endsWith("adversarial-verifier/artifact.json")
+  );
+  const runtimeAttemptPrompt = await readFile(
+    resolveAttemptPaths(workspacePaths, run.id, runtimeFixture.attempt.id).promptFile,
+    "utf8"
+  );
+  assert.match(
+    runtimeAttemptPrompt,
+    /Do not create or cite artifacts\/adversarial-verification\.json as execution-worker proof/
+  );
+  const cleanPostflightPrompt = await readFile(cleanVerifierResult.promptFile, "utf8");
+  assert.match(cleanPostflightPrompt, /fresh verifier context/);
+  assert.match(cleanPostflightPrompt, /Do not trust an execution-worker-written artifacts\/adversarial-verification\.json as proof/);
 
   const stalledFixture = createExecutionAttemptFixture({
     runId: run.id,

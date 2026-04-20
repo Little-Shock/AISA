@@ -52,7 +52,7 @@ const RUN_HARNESS_GATE_REGISTRY: Record<RunHarnessGate, RunHarnessGateRegistryEn
     title: "Postflight Adversarial Gate",
     default_mode: "required",
     detail:
-      "Read-only second gate after deterministic replay that expects a machine-readable adversarial verification artifact.",
+      "Clean read-only second gate after deterministic replay that produces a machine-readable adversarial verification artifact.",
     phase: "postflight",
     artifact_ref: "artifacts/adversarial-verification.json"
   }

@@ -913,7 +913,7 @@ function buildMissingEvidence(input: {
   ) {
     if (!input.adversarialVerification) {
       missing.push(
-        "Need a machine-readable adversarial verification artifact after deterministic replay passes."
+        "Need a clean postflight adversarial verification artifact after deterministic replay passes."
       );
     } else if (input.adversarialVerification.status !== "passed") {
       missing.push(

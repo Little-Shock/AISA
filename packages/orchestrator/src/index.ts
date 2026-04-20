@@ -147,6 +147,7 @@ import {
 } from "@autoresearch/state-store";
 import { ContextManager } from "@autoresearch/context-manager";
 import {
+  type AdversarialVerifierAdapter,
   type WorkerAdapter,
   isWorkerWritebackParseError,
   resolveExecutionWorkerEffort,
@@ -390,6 +391,7 @@ export interface OrchestratorOptions {
   synthesizer?: AttemptEvaluationSynthesizerAdapter | null;
   synthesizerConfig?: AttemptEvaluationSynthesizerConfig | null;
   synthesizerConfigEnv?: NodeJS.ProcessEnv;
+  adversarialVerifier?: AdversarialVerifierAdapter | null;
   requestRuntimeRestart?: (request: RuntimeRestartRequest) => Promise<void> | void;
   runtimeLayout?: RuntimeLayout | null;
 }
@@ -725,7 +727,7 @@ function buildDefaultExecutionRequiredEvidence(
 
   if (postflightAdversarialGateRequired) {
     requiredEvidence.push(
-      "Leave a machine-readable adversarial verification artifact after deterministic replay passes."
+      "Pass the clean postflight adversarial verifier after deterministic replay passes."
     );
   }
 
@@ -752,13 +754,7 @@ function buildDefaultExecutionForbiddenShortcuts(
 function buildDefaultExecutionExpectedArtifacts(
   postflightAdversarialGateRequired: boolean
 ): string[] {
-  const expectedArtifacts = ["changed files visible in git status"];
-
-  if (postflightAdversarialGateRequired) {
-    expectedArtifacts.push("artifacts/adversarial-verification.json");
-  }
-
-  return expectedArtifacts;
+  return ["changed files visible in git status"];
 }
 
 function normalizeExecutionRequiredEvidence(
@@ -766,8 +762,12 @@ function normalizeExecutionRequiredEvidence(
   postflightAdversarialGateRequired: boolean
 ): string[] {
   const adversarialEvidence =
+    "Pass the clean postflight adversarial verifier after deterministic replay passes.";
+  const legacyAdversarialEvidence =
     "Leave a machine-readable adversarial verification artifact after deterministic replay passes.";
-  const normalized = requiredEvidence.filter((item) => item !== adversarialEvidence);
+  const normalized = requiredEvidence.filter(
+    (item) => item !== adversarialEvidence && item !== legacyAdversarialEvidence
+  );
 
   return postflightAdversarialGateRequired
     ? [...normalized, adversarialEvidence]
@@ -792,11 +792,7 @@ function normalizeExecutionExpectedArtifacts(
   postflightAdversarialGateRequired: boolean
 ): string[] {
   const adversarialArtifact = "artifacts/adversarial-verification.json";
-  const normalized = expectedArtifacts.filter((item) => item !== adversarialArtifact);
-
-  return postflightAdversarialGateRequired
-    ? [...normalized, adversarialArtifact]
-    : normalized;
+  return expectedArtifacts.filter((item) => item !== adversarialArtifact);
 }
 
 function mergeExecutionStringValues(
@@ -839,7 +835,7 @@ function buildDefaultExecutionDoneRubric(
     doneRubric.push({
       code: "adversarial_verification_passed",
       description:
-        "Leave a machine-readable adversarial verification artifact after deterministic replay passes."
+        "Pass the clean postflight adversarial verifier after deterministic replay passes."
     });
   }
 
@@ -894,7 +890,7 @@ function buildDefaultExecutionFailureModes(
       {
         code: "missing_adversarial_verification_artifact",
         description:
-          "Do not treat execution as complete without a machine-readable adversarial verification artifact."
+          "Do not treat execution as complete until the clean postflight adversarial verifier produces a machine-readable artifact."
       }
     );
   }
@@ -1253,6 +1249,7 @@ export class Orchestrator {
   private readonly runWorkspaceScopePolicy: RunWorkspaceScopePolicy;
   private readonly reviewers: AttemptReviewerAdapter[];
   private readonly synthesizer: AttemptEvaluationSynthesizerAdapter;
+  private readonly adversarialVerifier: AdversarialVerifierAdapter | null;
   private readonly requestRuntimeRestart: ((
     request: RuntimeRestartRequest
   ) => Promise<void> | void) | null;
@@ -1324,6 +1321,7 @@ export class Orchestrator {
         config: options.synthesizerConfig,
         env: options.synthesizerConfigEnv ?? process.env
       });
+    this.adversarialVerifier = options.adversarialVerifier ?? null;
     this.requestRuntimeRestart = options.requestRuntimeRestart ?? null;
     this.runtimeLayout =
       options.runtimeLayout ?? {
@@ -3725,38 +3723,6 @@ export class Orchestrator {
       );
     }
 
-    if (postflightAdversarialGateMode === "disabled") {
-      if (input.attemptContract?.adversarial_verification_required) {
-        return await persist(
-          createAttemptAdversarialVerification({
-            run_id: input.run.id,
-            attempt_id: input.attempt.id,
-            attempt_type: input.attempt.attempt_type,
-            status: "failed",
-            verifier_kit: verifierKit,
-            verdict: "fail",
-            summary:
-              "Execution contract still requires postflight adversarial verification after the run harness profile disabled that gate.",
-            failure_code: "gate_profile_mismatch",
-            failure_reason:
-              "run.harness_profile.gates.postflight_adversarial.mode is disabled, but attempt_contract.json still requires postflight adversarial verification."
-          })
-        );
-      }
-
-      return await persist(
-        createAttemptAdversarialVerification({
-          run_id: input.run.id,
-          attempt_id: input.attempt.id,
-          attempt_type: input.attempt.attempt_type,
-          status: "not_applicable",
-          verifier_kit: verifierKit,
-          summary:
-            "Adversarial verification was skipped because the run harness profile disabled the postflight adversarial gate."
-        })
-      );
-    }
-
     if (!postflightSlotResolution.ok) {
       return await persist(
         createAttemptAdversarialVerification({
@@ -3790,39 +3756,58 @@ export class Orchestrator {
       );
     }
 
-    const sourceArtifactPath =
-      input.result.artifacts.find(
-        (artifact: WorkerWriteback["artifacts"][number]) =>
-          artifact.path === ADVERSARIAL_VERIFICATION_ARTIFACT_RELATIVE_PATH
-      )?.path ??
-      input.result.artifacts.find((artifact: WorkerWriteback["artifacts"][number]) =>
-        artifact.path.endsWith("/adversarial-verification.json")
-      )?.path ??
-      null;
-    if (!sourceArtifactPath) {
-      return await persist(
-        createAttemptAdversarialVerification({
-          run_id: input.run.id,
-          attempt_id: input.attempt.id,
-          attempt_type: input.attempt.attempt_type,
-          status: "failed",
-          verifier_kit: verifierKit,
-          verdict: "fail",
-          summary: "Execution finished without a machine-readable adversarial verification artifact.",
-          failure_code: "missing_artifact",
-          failure_reason:
-            "Execution must leave artifacts/adversarial-verification.json and include it in writeback.artifacts."
-        })
-      );
-    }
-
-    const resolvedSourceArtifactPath = resolve(input.attempt.workspace_root, sourceArtifactPath);
+    let sourceArtifactPath: string | null = null;
+    let resolvedSourceArtifactPath: string | null = null;
 
     try {
-      const raw = JSON.parse(await readFile(resolvedSourceArtifactPath, "utf8")) as Record<
-        string,
-        unknown
-      >;
+      let raw: Record<string, unknown>;
+      if (this.adversarialVerifier) {
+        const verifierResult =
+          await this.adversarialVerifier.runAttemptAdversarialVerification({
+            run: input.run,
+            attempt: input.attempt,
+            attemptContract: input.attemptContract,
+            result: input.result,
+            runtimeVerification: input.runtimeVerification,
+            attemptPaths: input.attemptPaths,
+            workspacePaths: this.workspacePaths
+          });
+        raw = verifierResult.artifact;
+        sourceArtifactPath = verifierResult.sourceArtifactPath;
+        resolvedSourceArtifactPath = verifierResult.sourceArtifactPath;
+      } else {
+        sourceArtifactPath =
+          input.result.artifacts.find(
+            (artifact: WorkerWriteback["artifacts"][number]) =>
+              artifact.path === ADVERSARIAL_VERIFICATION_ARTIFACT_RELATIVE_PATH
+          )?.path ??
+          input.result.artifacts.find((artifact: WorkerWriteback["artifacts"][number]) =>
+            artifact.path.endsWith("/adversarial-verification.json")
+          )?.path ??
+          null;
+        if (!sourceArtifactPath) {
+          return await persist(
+            createAttemptAdversarialVerification({
+              run_id: input.run.id,
+              attempt_id: input.attempt.id,
+              attempt_type: input.attempt.attempt_type,
+              status: "failed",
+              verifier_kit: verifierKit,
+              verdict: "fail",
+              summary:
+                "Execution finished without a machine-readable adversarial verification artifact.",
+              failure_code: "missing_artifact",
+              failure_reason:
+                "Legacy postflight mode requires execution to leave artifacts/adversarial-verification.json and include it in writeback.artifacts."
+            })
+          );
+        }
+        resolvedSourceArtifactPath = resolve(input.attempt.workspace_root, sourceArtifactPath);
+        raw = JSON.parse(await readFile(resolvedSourceArtifactPath, "utf8")) as Record<
+          string,
+          unknown
+        >;
+      }
       const parsedTargetSurface = parseAdversarialTargetSurface(raw.target_surface);
       if (!parsedTargetSurface.ok) {
         return await persist(
@@ -3864,6 +3849,7 @@ export class Orchestrator {
           raw.failure_code === "gate_profile_mismatch" ||
           raw.failure_code === "missing_requirement" ||
           raw.failure_code === "missing_artifact" ||
+          raw.failure_code === "verifier_failed" ||
           raw.failure_code === "invalid_artifact" ||
           raw.failure_code === "missing_checks" ||
           raw.failure_code === "missing_commands" ||
@@ -4029,6 +4015,7 @@ export class Orchestrator {
       );
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
+      const cleanVerifierEnabled = this.adversarialVerifier !== null;
       return await persist(
         createAttemptAdversarialVerification({
           run_id: input.run.id,
@@ -4037,9 +4024,13 @@ export class Orchestrator {
           status: "failed",
           verifier_kit: verifierKit,
           verdict: "fail",
-          summary: "Execution left an unreadable adversarial verification artifact.",
-          failure_code: "invalid_artifact",
-          failure_reason: `Failed to parse ${sourceArtifactPath}: ${reason}`,
+          summary: cleanVerifierEnabled
+            ? "Clean postflight adversarial verifier failed before producing a valid artifact."
+            : "Execution left an unreadable adversarial verification artifact.",
+          failure_code: cleanVerifierEnabled ? "verifier_failed" : "invalid_artifact",
+          failure_reason: cleanVerifierEnabled
+            ? `Clean postflight adversarial verifier failed: ${reason}`
+            : `Failed to parse ${sourceArtifactPath}: ${reason}`,
           source_artifact_path: resolvedSourceArtifactPath
         })
       );

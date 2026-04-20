@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmod, lstat, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { access, chmod, lstat, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -32,7 +32,8 @@ import {
   buildCodexCliExecutionEffortConfigOverride,
   CODEX_CLI_EXECUTION_EFFORT_APPLIED_DETAIL,
   CodexCliWorkerAdapter,
-  resolveCodexCliWorkerEffort
+  resolveCodexCliWorkerEffort,
+  type AdversarialVerifierAdapter
 } from "../packages/worker-adapters/src/index.js";
 import { synthesizeAttemptEvaluation } from "../packages/judge/src/index.js";
 import {
@@ -825,7 +826,7 @@ class ScenarioAdapter {
             },
             {
               code: "adversarial_verification_passed",
-              description: "Leave a machine-readable adversarial verification artifact."
+              description: "Pass the clean postflight adversarial verifier."
             }
           ],
           failure_modes: [
@@ -839,7 +840,7 @@ class ScenarioAdapter {
             },
             {
               code: "missing_adversarial_verification_artifact",
-              description: "Do not treat execution as complete without adversarial verification."
+              description: "Do not treat execution as complete before clean postflight verification."
             }
           ],
           forbidden_shortcuts: [
@@ -1088,6 +1089,100 @@ class VerifierKitFixtureAdapter {
         artifacts: this.input.workerArtifacts
       },
       reportMarkdown: "# verifier kit fixture",
+      exitCode: 0
+    };
+  }
+}
+
+class CleanPostflightVerifierFixture implements AdversarialVerifierAdapter {
+  readonly type = "fixture-clean-adversarial-verifier";
+
+  async runAttemptAdversarialVerification(
+    input: Parameters<AdversarialVerifierAdapter["runAttemptAdversarialVerification"]>[0]
+  ): Promise<
+    Awaited<ReturnType<AdversarialVerifierAdapter["runAttemptAdversarialVerification"]>>
+  > {
+    const verifierDir = join(input.attemptPaths.artifactsDir, "clean-postflight-fixture");
+    await mkdir(verifierDir, { recursive: true });
+    const stdoutFile = join(verifierDir, "stdout.log");
+    const stderrFile = join(verifierDir, "stderr.log");
+    const promptFile = join(verifierDir, "prompt.md");
+    const rawOutputFile = join(verifierDir, "output.json");
+    const sourceArtifactPath = join(verifierDir, "artifact.json");
+    await Promise.all([
+      writeFile(stdoutFile, `clean verifier checked ${input.attempt.id}\n`, "utf8"),
+      writeFile(stderrFile, "", "utf8"),
+      writeFile(promptFile, "fixture clean postflight verifier\n", "utf8")
+    ]);
+    const artifact = {
+      target_surface: input.attemptContract.verifier_kit ?? "repo",
+      summary: "Clean postflight verifier passed without using execution worker self-certification.",
+      verdict: "pass",
+      checks: [
+        {
+          code: "clean_context_probe",
+          status: "passed",
+          message: "The verifier used its own clean postflight artifact."
+        }
+      ],
+      commands: [
+        {
+          purpose: "probe repo replay output from a clean verifier context",
+          command: "test -n clean-postflight-verifier",
+          cwd: input.attempt.workspace_root,
+          exit_code: 0,
+          status: "passed",
+          output_ref: stdoutFile
+        }
+      ],
+      output_refs: [stdoutFile]
+    };
+    await Promise.all([
+      writeFile(sourceArtifactPath, JSON.stringify(artifact, null, 2) + "\n", "utf8"),
+      writeFile(rawOutputFile, JSON.stringify(artifact, null, 2) + "\n", "utf8")
+    ]);
+
+    return {
+      artifact,
+      sourceArtifactPath,
+      promptFile,
+      rawOutputFile,
+      stdoutFile,
+      stderrFile
+    };
+  }
+}
+
+class NoSelfAdversarialExecutionFixtureAdapter {
+  readonly type = "fake-codex";
+
+  async runAttemptTask(input: { attempt: Attempt }): Promise<{
+    writeback: WorkerWriteback;
+    reportMarkdown: string;
+    exitCode: number;
+  }> {
+    await writeFile(
+      join(input.attempt.workspace_root, "repo-change.md"),
+      `execution change from ${input.attempt.id}\n`,
+      "utf8"
+    );
+
+    return {
+      writeback: {
+        summary: "Executed the change without self-certifying adversarial verification.",
+        findings: [
+          {
+            type: "fact",
+            content: "Left the deterministic execution change.",
+            evidence: ["repo-change.md"]
+          }
+        ],
+        questions: [],
+        recommended_next_steps: [],
+        confidence: 0.9,
+        artifacts: [{ type: "patch", path: "artifacts/diff.patch" }]
+      },
+      reportMarkdown: "# no self adversarial",
       exitCode: 0
     };
   }
@@ -2763,6 +2858,59 @@ async function assertVerifierKitRuntimeAndPostflightMatrix(): Promise<void> {
       `verifier_kit_runtime_and_postflight_matrix: ${scenario.verifierKit} handoff should carry the adversarial verifier kit`
     );
   }
+}
+
+async function assertCleanPostflightVerifierDoesNotDependOnExecutionWorkerArtifact(): Promise<void> {
+  const rootDir = await createVerifyTempDir("aisa-clean-postflight-verifier-");
+  const bootstrapped = await bootstrapRun(rootDir, "clean-postflight-verifier");
+  await initializeGitRepo(rootDir, false);
+  const attempt = await seedCreatedExecutionAttempt({
+    run: bootstrapped.run,
+    workspacePaths: bootstrapped.workspacePaths,
+    verifierKit: "repo"
+  });
+  const orchestrator = new Orchestrator(
+    bootstrapped.workspacePaths,
+    new NoSelfAdversarialExecutionFixtureAdapter() as never,
+    undefined,
+    60_000,
+    {
+      adversarialVerifier: new CleanPostflightVerifierFixture()
+    }
+  );
+  await orchestrator.tick();
+  await waitForAttemptActivityToDrain({
+    workspacePaths: bootstrapped.workspacePaths,
+    runId: bootstrapped.run.id,
+    failureMessage: "clean postflight verifier: attempt activity did not settle"
+  });
+
+  const [result, adversarialVerification] = await Promise.all([
+    getAttemptReviewInputPacket(bootstrapped.workspacePaths, bootstrapped.run.id, attempt.id),
+    getAttemptAdversarialVerification(bootstrapped.workspacePaths, bootstrapped.run.id, attempt.id)
+  ]);
+
+  assert.equal(
+    adversarialVerification?.status,
+    "passed",
+    "clean_postflight_verifier_independent: clean verifier should pass the postflight gate"
+  );
+  assert.match(
+    adversarialVerification?.source_artifact_path ?? "",
+    /clean-postflight-fixture\/artifact\.json$/,
+    "clean_postflight_verifier_independent: source artifact should come from the clean verifier"
+  );
+  assert.ok(
+    !result?.result?.artifacts.some((artifact) =>
+      artifact.path.endsWith("adversarial-verification.json")
+    ),
+    "clean_postflight_verifier_independent: execution worker writeback should not self-certify adversarial verification"
+  );
+  await assert.rejects(
+    () => access(join(rootDir, "artifacts", "adversarial-verification.json")),
+    /ENOENT/,
+    "clean_postflight_verifier_independent: execution workspace should not contain a self-written adversarial artifact"
+  );
 }
 
 async function assertVerifierKitSpecificFailuresFailClosed(): Promise<void> {
@@ -6608,6 +6756,20 @@ async function main(): Promise<void> {
     } catch (error) {
       results.push({
         id: "verifier_kit_runtime_and_postflight_matrix",
+        status: "fail",
+        error: error instanceof Error ? error.message : String(error)
+      });
+    }
+
+    try {
+      await assertCleanPostflightVerifierDoesNotDependOnExecutionWorkerArtifact();
+      results.push({
+        id: "clean_postflight_verifier_does_not_depend_on_execution_worker_artifact",
+        status: "pass"
+      });
+    } catch (error) {
+      results.push({
+        id: "clean_postflight_verifier_does_not_depend_on_execution_worker_artifact",
         status: "fail",
         error: error instanceof Error ? error.message : String(error)
       });

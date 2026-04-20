@@ -123,7 +123,10 @@ import {
   saveRunSteer,
   saveSteer
 } from "@autoresearch/state-store";
-import { loadExecutionWorkerAdapter } from "@autoresearch/worker-adapters";
+import {
+  loadAdversarialVerifierAdapter,
+  loadExecutionWorkerAdapter
+} from "@autoresearch/worker-adapters";
 
 const currentDir = dirname(fileURLToPath(import.meta.url));
 const repositoryRoot = join(currentDir, "..", "..", "..");
@@ -970,6 +973,10 @@ export async function buildServer(
   const defaultRunWorkspaceRoot = runtimeLayout.devRepoRoot;
   const contextManager = new ContextManager();
   const { adapter, config: adapterConfig } = loadExecutionWorkerAdapter(process.env);
+  const {
+    adapter: adversarialVerifier,
+    config: adversarialVerifierConfig
+  } = loadAdversarialVerifierAdapter(process.env);
   const app = Fastify({
     logger: true
   });
@@ -1023,6 +1030,7 @@ export async function buildServer(
   };
   orchestrator = new Orchestrator(workspacePaths, adapter, undefined, undefined, {
     runWorkspaceScopePolicy,
+    adversarialVerifier,
     requestRuntimeRestart,
     runtimeLayout,
     maxConcurrentAttempts: readPositiveIntegerEnv("AISA_MAX_CONCURRENT_ATTEMPTS", 3)
@@ -1787,6 +1795,12 @@ export async function buildServer(
         type: adapter.type,
         command: adapterConfig.command,
         model: adapterConfig.model ?? null
+      },
+      adversarial_verifier: {
+        type: adversarialVerifier.type,
+        command: adversarialVerifierConfig.command,
+        model: adversarialVerifierConfig.model ?? null,
+        sandbox: adversarialVerifierConfig.sandbox
       },
       runtime_layout: {
         repository_root: runtimeLayout.repositoryRoot,

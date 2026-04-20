@@ -75,7 +75,7 @@ const BASE_EXECUTION_DONE_RUBRIC: AttemptDoneRubricItem[] = [
   {
     code: "adversarial_verification_passed",
     description:
-      "Leave a machine-readable adversarial verification artifact after deterministic replay passes."
+      "Pass the clean postflight adversarial verifier after deterministic replay passes."
   }
 ];
 
@@ -109,7 +109,7 @@ const BASE_EXECUTION_FAILURE_MODES: AttemptFailureMode[] = [
   {
     code: "missing_adversarial_verification_artifact",
     description:
-      "Do not treat execution as complete without a machine-readable adversarial verification artifact."
+      "Do not treat execution as complete until the clean postflight adversarial verifier produces a machine-readable artifact."
   }
 ];
 
@@ -579,7 +579,7 @@ function buildPreviewSuccessCriteria(
 const BASE_EXECUTION_REQUIRED_EVIDENCE = [
   "Leave git-visible workspace changes tied to the execution objective.",
   "Keep replay commands machine-readable so runtime can verify the change.",
-  "Leave a machine-readable adversarial verification artifact after deterministic replay passes."
+  "Pass the clean postflight adversarial verifier after deterministic replay passes."
 ] as const;
 
 const BASE_EXECUTION_FORBIDDEN_SHORTCUTS = [
@@ -587,9 +587,7 @@ const BASE_EXECUTION_FORBIDDEN_SHORTCUTS = [
   "Do not skip adversarial verification for non-trivial execution."
 ] as const;
 
-const BASE_EXECUTION_EXPECTED_ARTIFACTS = [
-  "artifacts/adversarial-verification.json"
-] as const;
+const BASE_EXECUTION_EXPECTED_ARTIFACTS = [] as const;
 
 function dedupeStrings(...values: string[]): string[] {
   return [...new Set(values)];

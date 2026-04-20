@@ -529,7 +529,7 @@ async function verifyMissingAdversarialArtifactStaysHardGated(): Promise<void> {
   assert.ok(evaluation.goal_progress <= 0.74);
   assert.ok(
     evaluation.missing_evidence.some((entry) =>
-      entry.includes("Need a machine-readable adversarial verification artifact")
+      entry.includes("Need a clean postflight adversarial verification artifact")
     )
   );
 }

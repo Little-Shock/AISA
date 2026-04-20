@@ -119,11 +119,11 @@ const RUN_HARNESS_SLOT_REGISTRY: Record<RunHarnessSlot, RunHarnessSlotRegistryEn
     slot: "postflight_review",
     title: "Postflight Review",
     default_binding: "attempt_adversarial_verification",
-    detail: "Read-only adversarial gate after deterministic runtime verification passes.",
+    detail: "Clean read-only adversarial verifier after deterministic runtime verification passes.",
     input_contract: [
       "attempt_contract.json",
       "artifacts/runtime-verification.json",
-      "worker-declared adversarial verification artifact"
+      "execution worker result and declared artifacts"
     ],
     permission_boundary: "read_only",
     output_artifacts: ["artifacts/adversarial-verification.json"],

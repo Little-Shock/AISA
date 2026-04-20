@@ -1253,6 +1253,7 @@ export const AttemptAdversarialVerificationFailureCodeSchema = z.enum([
   "gate_profile_mismatch",
   "slot_binding_mismatch",
   "missing_artifact",
+  "verifier_failed",
   "invalid_artifact",
   "missing_checks",
   "missing_kit_focus",
@@ -1932,7 +1933,7 @@ function buildDefaultExecutionDoneRubric(): AttemptDoneRubricItem[] {
     {
       code: "adversarial_verification_passed",
       description:
-        "Leave a machine-readable adversarial verification artifact after deterministic replay passes."
+        "Pass the clean postflight adversarial verifier after deterministic replay passes."
     }
   ];
 }
@@ -1967,7 +1968,7 @@ function buildDefaultExecutionFailureModes(): AttemptFailureMode[] {
     {
       code: "missing_adversarial_verification_artifact",
       description:
-        "Do not treat execution as complete without a machine-readable adversarial verification artifact."
+        "Do not treat execution as complete until the clean postflight adversarial verifier produces a machine-readable artifact."
     }
   ];
 }

@@ -15,6 +15,7 @@ import { join, relative } from "node:path";
 import type {
   Attempt,
   AttemptContract,
+  AttemptRuntimeVerification,
   AttemptRuntimeState,
   Branch,
   ContextSnapshot,
@@ -36,6 +37,7 @@ import {
 import type { WorkspacePaths } from "@autoresearch/state-store";
 import {
   appendAttemptRuntimeEvent,
+  type AttemptPaths,
   resolveAttemptPaths,
   resolveBranchArtifactPaths,
   saveAttemptRuntimeState,
@@ -178,9 +180,36 @@ export interface WorkerAdapter {
 }
 
 export type ExecutionWorkerAdapterProvider = "codex_cli";
+export type AdversarialVerifierAdapterProvider = "codex_cli";
 
 export interface ExecutionWorkerAdapterConfig extends CodexCliConfig {
   provider: ExecutionWorkerAdapterProvider;
+}
+
+export interface AdversarialVerifierAdapterConfig extends CodexCliConfig {
+  provider: AdversarialVerifierAdapterProvider;
+}
+
+export interface AdversarialVerifierResult {
+  artifact: Record<string, unknown>;
+  sourceArtifactPath: string;
+  promptFile: string;
+  rawOutputFile: string;
+  stdoutFile: string;
+  stderrFile: string;
+}
+
+export interface AdversarialVerifierAdapter {
+  readonly type: string;
+  runAttemptAdversarialVerification(input: {
+    run: Run;
+    attempt: Attempt;
+    attemptContract: AttemptContract;
+    result: WorkerWriteback;
+    runtimeVerification: AttemptRuntimeVerification;
+    attemptPaths: AttemptPaths;
+    workspacePaths: WorkspacePaths;
+  }): Promise<AdversarialVerifierResult>;
 }
 
 function isMissingPathError(error: unknown): error is NodeJS.ErrnoException {
@@ -1659,6 +1688,169 @@ export class CodexCliWorkerAdapter {
   }
 }
 
+export class CodexCliAdversarialVerifierAdapter implements AdversarialVerifierAdapter {
+  readonly type = "codex-clean-adversarial-verifier";
+
+  private readonly config: CodexCliConfig & {
+    progressStallMs: number;
+    stallPollMs: number;
+    stallKillGraceMs: number;
+  };
+
+  constructor(config: CodexCliConfig) {
+    this.config = {
+      ...config,
+      sandbox: config.sandbox,
+      progressStallMs: config.progressStallMs ?? 180_000,
+      stallPollMs: config.stallPollMs ?? 5_000,
+      stallKillGraceMs: config.stallKillGraceMs ?? 5_000
+    };
+  }
+
+  async runAttemptAdversarialVerification(input: {
+    run: Run;
+    attempt: Attempt;
+    attemptContract: AttemptContract;
+    result: WorkerWriteback;
+    runtimeVerification: AttemptRuntimeVerification;
+    attemptPaths: AttemptPaths;
+    workspacePaths: WorkspacePaths;
+  }): Promise<AdversarialVerifierResult> {
+    const verifierDir = join(input.attemptPaths.artifactsDir, "adversarial-verifier");
+    const promptFile = join(verifierDir, "prompt.md");
+    const inputPacketFile = join(verifierDir, "input-packet.json");
+    const rawOutputFile = join(verifierDir, "output.json");
+    const stdoutFile = join(verifierDir, "stdout.ndjson");
+    const stderrFile = join(verifierDir, "stderr.log");
+    const sourceArtifactPath = join(verifierDir, "artifact.json");
+
+    await mkdir(verifierDir, { recursive: true });
+
+    const prompt = buildCodexAdversarialVerifierPrompt({
+      run: input.run,
+      attempt: input.attempt,
+      attemptContract: input.attemptContract,
+      result: input.result,
+      runtimeVerification: input.runtimeVerification,
+      stdoutFile,
+      stderrFile
+    });
+
+    await Promise.all([
+      writeJsonFile(inputPacketFile, {
+        run: input.run,
+        attempt: input.attempt,
+        attempt_contract: input.attemptContract,
+        worker_result: input.result,
+        runtime_verification: input.runtimeVerification,
+        verifier_process: {
+          type: this.type,
+          sandbox: this.config.sandbox,
+          stdout_file: stdoutFile,
+          stderr_file: stderrFile
+        }
+      }),
+      writeTextFile(promptFile, prompt)
+    ]);
+
+    const args = [
+      "exec",
+      "-C",
+      input.attempt.workspace_root,
+      "-s",
+      this.config.sandbox,
+      "--json",
+      "--output-last-message",
+      rawOutputFile
+    ];
+
+    if (this.config.skipGitRepoCheck) {
+      args.push("--skip-git-repo-check");
+    }
+
+    if (this.config.profile) {
+      args.push("-p", this.config.profile);
+    }
+
+    if (this.config.model) {
+      args.push("-m", this.config.model);
+    }
+
+    args.push("-");
+
+    const stdoutStream = createWriteStream(stdoutFile, { flags: "a" });
+    const stderrStream = createWriteStream(stderrFile, { flags: "a" });
+    let lastActivityAt = Date.now();
+    const markVerifierActivity = (): void => {
+      lastActivityAt = Date.now();
+    };
+
+    let exitCode: number;
+    try {
+      exitCode = await new Promise<number>((resolve, reject) => {
+        const child = spawn(this.config.command, args, {
+          cwd: input.workspacePaths.rootDir,
+          env: {
+            ...process.env,
+            AISA_ATTEMPT_MODE: "postflight_adversarial_verifier"
+          },
+          stdio: ["pipe", "pipe", "pipe"],
+          shell: false
+        });
+
+        child.stdout.on("data", (chunk) => {
+          markVerifierActivity();
+          stdoutStream.write(chunk);
+        });
+
+        child.stderr.on("data", (chunk) => {
+          markVerifierActivity();
+          stderrStream.write(chunk);
+        });
+
+        child.stdin.write(prompt);
+        child.stdin.end();
+
+        void waitForChildExitWithStallGuard({
+          child,
+          outputFile: rawOutputFile,
+          progressStallMs: this.config.progressStallMs,
+          stallPollMs: this.config.stallPollMs,
+          stallKillGraceMs: this.config.stallKillGraceMs,
+          getLastActivityAt: () => lastActivityAt
+        }).then(resolve, reject);
+      });
+
+      await Promise.all([closeStream(stdoutStream), closeStream(stderrStream)]);
+    } catch (error) {
+      await Promise.allSettled([closeStream(stdoutStream), closeStream(stderrStream)]);
+      throw error;
+    }
+
+    if (exitCode !== 0) {
+      throw new Error(
+        await buildCodexFailureMessage({
+          stderrFile,
+          defaultMessage: `Clean adversarial verifier exited with code ${exitCode} for attempt ${input.attempt.id}`
+        })
+      );
+    }
+
+    const rawOutput = await readFile(rawOutputFile, "utf8");
+    const artifact = parseJsonObjectFromText(rawOutput, "Clean adversarial verifier");
+    await writeJsonFile(sourceArtifactPath, artifact);
+
+    return {
+      artifact,
+      sourceArtifactPath,
+      promptFile,
+      rawOutputFile,
+      stdoutFile,
+      stderrFile
+    };
+  }
+}
+
 export function loadCodexCliConfig(env: NodeJS.ProcessEnv): CodexCliConfig {
   return {
     command: env.AISA_EXECUTION_COMMAND ?? env.CODEX_CLI_COMMAND ?? "codex",
@@ -1710,6 +1902,66 @@ export function loadExecutionWorkerAdapterConfig(
   }
 }
 
+export function loadAdversarialVerifierAdapterConfig(
+  env: NodeJS.ProcessEnv
+): AdversarialVerifierAdapterConfig {
+  const provider =
+    (env.AISA_ADVERSARIAL_VERIFIER_ADAPTER?.trim() as
+      | AdversarialVerifierAdapterProvider
+      | undefined) ?? "codex_cli";
+
+  switch (provider) {
+    case "codex_cli":
+      return {
+        provider,
+        command:
+          env.AISA_ADVERSARIAL_VERIFIER_COMMAND ??
+          env.AISA_EXECUTION_COMMAND ??
+          env.CODEX_CLI_COMMAND ??
+          "codex",
+        model:
+          env.AISA_ADVERSARIAL_VERIFIER_MODEL ??
+          env.AISA_EXECUTION_MODEL ??
+          env.CODEX_MODEL,
+        profile:
+          env.AISA_ADVERSARIAL_VERIFIER_PROFILE ??
+          env.AISA_EXECUTION_PROFILE ??
+          env.CODEX_PROFILE,
+        sandbox:
+          ((env.AISA_ADVERSARIAL_VERIFIER_SANDBOX ?? "read-only") as
+            | CodexCliConfig["sandbox"]
+            | undefined) ?? "read-only",
+        skipGitRepoCheck:
+          (env.AISA_ADVERSARIAL_VERIFIER_SKIP_GIT_REPO_CHECK ??
+            env.AISA_EXECUTION_SKIP_GIT_REPO_CHECK ??
+            env.CODEX_SKIP_GIT_REPO_CHECK) !== "false",
+        progressStallMs: readPositiveInteger(
+          env.AISA_ADVERSARIAL_VERIFIER_PROGRESS_STALL_MS ??
+            env.AISA_EXECUTION_PROGRESS_STALL_MS ??
+            env.AISA_CODEX_PROGRESS_STALL_MS ??
+            env.CODEX_PROGRESS_STALL_MS,
+          180_000
+        ),
+        stallPollMs: readPositiveInteger(
+          env.AISA_ADVERSARIAL_VERIFIER_STALL_POLL_MS ??
+            env.AISA_EXECUTION_STALL_POLL_MS ??
+            env.AISA_CODEX_STALL_POLL_MS ??
+            env.CODEX_STALL_POLL_MS,
+          5_000
+        ),
+        stallKillGraceMs: readPositiveInteger(
+          env.AISA_ADVERSARIAL_VERIFIER_STALL_KILL_GRACE_MS ??
+            env.AISA_EXECUTION_STALL_KILL_GRACE_MS ??
+            env.AISA_CODEX_STALL_KILL_GRACE_MS ??
+            env.CODEX_STALL_KILL_GRACE_MS,
+          5_000
+        )
+      };
+    default:
+      throw new Error(`Unsupported AISA adversarial verifier adapter provider: ${provider}`);
+  }
+}
+
 export function createExecutionWorkerAdapter(
   config: ExecutionWorkerAdapterConfig
 ): WorkerAdapter {
@@ -1731,6 +1983,31 @@ export function loadExecutionWorkerAdapter(env: NodeJS.ProcessEnv): {
 
   return {
     adapter: createExecutionWorkerAdapter(config),
+    config
+  };
+}
+
+export function createAdversarialVerifierAdapter(
+  config: AdversarialVerifierAdapterConfig
+): AdversarialVerifierAdapter {
+  switch (config.provider) {
+    case "codex_cli":
+      return new CodexCliAdversarialVerifierAdapter(config);
+    default:
+      throw new Error(
+        `Unsupported AISA adversarial verifier adapter provider: ${config.provider}`
+      );
+  }
+}
+
+export function loadAdversarialVerifierAdapter(env: NodeJS.ProcessEnv): {
+  adapter: AdversarialVerifierAdapter;
+  config: AdversarialVerifierAdapterConfig;
+} {
+  const config = loadAdversarialVerifierAdapterConfig(env);
+
+  return {
+    adapter: createAdversarialVerifierAdapter(config),
     config
   };
 }
@@ -1823,10 +2100,6 @@ function buildCodexAttemptPrompt(
     type: "patch",
     path: "runs/<run_id>/attempts/<attempt_id>/artifacts/diff.patch"
   };
-  const adversarialArtifactExample = {
-    type: "test_result",
-    path: "artifacts/adversarial-verification.json"
-  };
 
   return [
     "You are a Codex CLI worker inside AISA.",
@@ -1872,23 +2145,11 @@ function buildCodexAttemptPrompt(
       : null,
     attempt.attempt_type === "execution" &&
     attemptContract.adversarial_verification_required === true
-      ? "After the contract replay commands pass, run a separate adversarial verification pass and save a machine-readable JSON artifact at artifacts/adversarial-verification.json in the workspace root."
-      : null,
-    attempt.attempt_type === "execution" &&
-    attemptContract.adversarial_verification_required === true
-      ? "That adversarial artifact must include checks, commands, output_refs, and a verdict of pass, fail, or partial. Deterministic replay and adversarial verification are two separate layers."
-      : null,
-    attempt.attempt_type === "execution" &&
-    attemptContract.adversarial_verification_required === true
-      ? 'Use this JSON shape for artifacts/adversarial-verification.json: {"summary":"简短结论","verdict":"pass","checks":[{"code":"non_happy_path","status":"passed","message":"实际验证结果"}],"commands":[{"purpose":"对抗性验证","command":"pnpm verify:run-api","exit_code":0,"status":"passed","output_ref":"artifacts/adversarial/run-api.txt"}],"output_refs":["artifacts/adversarial/run-api.txt"]}'
+      ? "After deterministic replay passes, the control plane will run a clean read-only postflight adversarial verifier in a fresh context. Do not create or cite artifacts/adversarial-verification.json as execution-worker proof."
       : null,
     `Allowed findings.type values: ${workerFindingTypes}. Do not invent values like "gap".`,
     `artifacts must be an array of objects with stable keys. Allowed artifacts[].type values: ${workerArtifactTypes}.`,
     `Copy this artifacts object shape when you have one: ${JSON.stringify(executionArtifactExample)}`,
-    attempt.attempt_type === "execution" &&
-    attemptContract.adversarial_verification_required === true
-      ? `Include this extra artifact when adversarial verification is required: ${JSON.stringify(adversarialArtifactExample)}`
-      : null,
     'Do not return artifacts as plain strings like "scripts/verify-run-detail-api.ts".',
     "If you only want to cite files or commands as evidence, put them in findings[].evidence, recommended_next_steps, or next_attempt_contract.expected_artifacts instead of artifacts[].",
     attempt.attempt_type === "research"
@@ -1946,10 +2207,89 @@ function buildCodexAttemptPrompt(
             : undefined,
         artifacts:
           attempt.attempt_type === "execution"
-            ? attemptContract.adversarial_verification_required === true
-              ? [executionArtifactExample, adversarialArtifactExample]
-              : [executionArtifactExample]
+            ? [executionArtifactExample]
             : []
+      },
+      null,
+      2
+    )
+  ].join("\n");
+}
+
+function buildCodexAdversarialVerifierPrompt(input: {
+  run: Run;
+  attempt: Attempt;
+  attemptContract: AttemptContract;
+  result: WorkerWriteback;
+  runtimeVerification: AttemptRuntimeVerification;
+  stdoutFile: string;
+  stderrFile: string;
+}): string {
+  const verifierKit = input.attemptContract.verifier_kit ?? "repo";
+  return [
+    "You are AISA's clean postflight adversarial verifier.",
+    "",
+    "Rules:",
+    "- This is a fresh verifier context after the execution worker has finished.",
+    "- Work read-only. Do not modify files, create files, or repair the implementation.",
+    "- Do not trust an execution-worker-written artifacts/adversarial-verification.json as proof.",
+    "- First do a short read-only inspection of the provided contract, worker result, and runtime replay result.",
+    "- Then run at least one adversarial probe that is different from the deterministic replay when the workspace allows it.",
+    "- Every command listed in commands must be a command you actually ran in this verifier session.",
+    "- If the environment prevents a meaningful probe, return verdict partial with the reason instead of claiming pass.",
+    "- Write all human-facing strings in concise Chinese.",
+    "- Return only valid JSON with no markdown fences and no extra commentary.",
+    "",
+    "Run:",
+    `- Title: ${input.run.title}`,
+    `- Description: ${input.run.description}`,
+    `- Workspace Root: ${input.attempt.workspace_root}`,
+    "",
+    "Attempt:",
+    `- Attempt ID: ${input.attempt.id}`,
+    `- Type: ${input.attempt.attempt_type}`,
+    `- Objective: ${input.attempt.objective}`,
+    "",
+    "Expected Target Surface:",
+    `- target_surface must be ${verifierKit}`,
+    "",
+    "Attempt Contract:",
+    JSON.stringify(input.attemptContract, null, 2),
+    "",
+    "Execution Worker Result:",
+    JSON.stringify(input.result, null, 2),
+    "",
+    "Deterministic Runtime Verification:",
+    JSON.stringify(input.runtimeVerification, null, 2),
+    "",
+    "Verifier Output Refs:",
+    `- stdout log: ${input.stdoutFile}`,
+    `- stderr log: ${input.stderrFile}`,
+    "",
+    "Return JSON in this exact shape:",
+    JSON.stringify(
+      {
+        target_surface: verifierKit,
+        summary: "简短结论",
+        verdict: "pass",
+        checks: [
+          {
+            code: "clean_context_probe",
+            status: "passed",
+            message: "实际验证结果"
+          }
+        ],
+        commands: [
+          {
+            purpose: "clean postflight adversarial probe",
+            command: "实际运行的只读命令",
+            cwd: input.attempt.workspace_root,
+            exit_code: 0,
+            status: "passed",
+            output_ref: input.stdoutFile
+          }
+        ],
+        output_refs: [input.stdoutFile]
       },
       null,
       2
@@ -2074,6 +2414,24 @@ function parseWritebackFromText(
   }
 
   return parsed.data;
+}
+
+function parseJsonObjectFromText(text: string, label: string): Record<string, unknown> {
+  const trimmed = text.trim();
+  const candidate = trimmed.startsWith("```")
+    ? trimmed.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "")
+    : trimmed;
+
+  if (!candidate) {
+    throw new Error(`${label} returned empty output.`);
+  }
+
+  const parsed = JSON.parse(candidate) as unknown;
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error(`${label} must return a JSON object.`);
+  }
+
+  return parsed as Record<string, unknown>;
 }
 
 async function resolveCommandPath(

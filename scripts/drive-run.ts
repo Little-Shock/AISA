@@ -26,9 +26,12 @@ import {
 } from "../packages/orchestrator/src/runtime-layout.ts";
 import { createRunWorkspaceScopePolicy } from "../packages/orchestrator/src/workspace-scope.ts";
 import {
+  createAdversarialVerifierAdapter,
   createExecutionWorkerAdapter,
+  loadAdversarialVerifierAdapterConfig,
   loadExecutionWorkerAdapterConfig,
   resolveSandboxForAttempt,
+  type AdversarialVerifierAdapter,
   type CodexCliConfig,
   type WorkerAdapter
 } from "../packages/worker-adapters/src/index.ts";
@@ -74,6 +77,7 @@ export async function driveRun(input: {
   workspaceRoot: string;
   runId: string;
   adapter: AttemptAdapter;
+  adversarialVerifier?: AdversarialVerifierAdapter | null;
   repositoryRoot?: string;
   pollIntervalMs?: number;
   maxPolls?: number;
@@ -104,6 +108,8 @@ export async function driveRun(input: {
     input.pollIntervalMs ?? 1500,
     {
       ...input.orchestratorOptions,
+      adversarialVerifier:
+        input.adversarialVerifier ?? input.orchestratorOptions?.adversarialVerifier,
       runtimeLayout,
       runWorkspaceScopePolicy
     }
@@ -403,6 +409,7 @@ async function main(): Promise<void> {
   }
 
   const adapterConfig = loadExecutionWorkerAdapterConfig(process.env);
+  const adversarialVerifierConfig = loadAdversarialVerifierAdapterConfig(process.env);
   if (options.sandbox) {
     adapterConfig.sandbox = options.sandbox;
   }
@@ -411,6 +418,7 @@ async function main(): Promise<void> {
     workspaceRoot: options.workspaceRoot ?? process.cwd(),
     runId: options.runId,
     adapter: createExecutionWorkerAdapter(adapterConfig),
+    adversarialVerifier: createAdversarialVerifierAdapter(adversarialVerifierConfig),
     repositoryRoot: process.cwd(),
     pollIntervalMs: options.pollIntervalMs,
     maxPolls: options.maxPolls,
