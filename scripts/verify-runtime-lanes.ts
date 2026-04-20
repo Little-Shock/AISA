@@ -180,6 +180,7 @@ async function main(): Promise<void> {
     await verifyRepairManagedWorkspaceRehomesDivergedHistory();
     await verifyControlApiUsesSeparateRuntimeLayout();
     const promotion = await verifyCheckpointPromotionUpdatesRuntimeRepo();
+    const attachedPromotion = await verifyAttachedProjectPromotionSkipsUnrelatedRuntimeRepo();
     const dirtyBlock = await verifyDirtyRuntimeRepoBlocksPromotion();
 
     console.log(
@@ -187,6 +188,7 @@ async function main(): Promise<void> {
         {
           status: "passed",
           promotion,
+          attached_promotion: attachedPromotion,
           dirty_block: dirtyBlock
         },
         null,
@@ -747,6 +749,124 @@ async function verifyDirtyRuntimeRepoBlocksPromotion(): Promise<{
 
   return {
     blocked_reason: outcome.reason
+  };
+}
+
+async function verifyAttachedProjectPromotionSkipsUnrelatedRuntimeRepo(): Promise<{
+  dev_repo_head: string;
+  runtime_repo_head: string;
+  promoted_attempt_id: string;
+}> {
+  const baseDir = await createTrackedVerifyTempDir("aisa-attached-project-promotion-");
+  const productSeedRoot = join(baseDir, "product-seed");
+  const runtimeSeedRoot = join(baseDir, "runtime-seed");
+  const devRepoRoot = join(baseDir, "product-dev");
+  const runtimeRepoRoot = join(baseDir, "runtime-repo");
+  const runtimeDataRoot = join(baseDir, "runtime-data");
+  const attemptWorktreeRoot = join(baseDir, "attempt-worktree");
+  const managedWorkspaceRoot = join(baseDir, ".aisa-run-worktrees");
+
+  await createSeedRepo(productSeedRoot);
+  await createSeedRepo(runtimeSeedRoot);
+  await cloneRepo(productSeedRoot, devRepoRoot);
+  await cloneRepo(runtimeSeedRoot, runtimeRepoRoot);
+  await mkdir(runtimeDataRoot, { recursive: true });
+  await mkdir(managedWorkspaceRoot, { recursive: true });
+  await runCommand(devRepoRoot, [
+    "git",
+    "worktree",
+    "add",
+    "--detach",
+    attemptWorktreeRoot,
+    "HEAD"
+  ]);
+
+  const runtimeLayout = resolveRuntimeLayout({
+    repositoryRoot: runtimeRepoRoot,
+    devRepoRoot,
+    runtimeRepoRoot,
+    runtimeDataRoot,
+    managedWorkspaceRoot
+  });
+  const workspacePaths = resolveWorkspacePaths(runtimeDataRoot);
+  await ensureWorkspace(workspacePaths);
+
+  const run = createRun({
+    title: "Promote attached project checkpoint",
+    description: "External product work should update the attached dev repo without rewriting AISA runtime.",
+    success_criteria: ["Promote product checkpoint only."],
+    constraints: [],
+    owner_id: "test-owner",
+    workspace_root: devRepoRoot
+  });
+  const attempt = createAttempt({
+    run_id: run.id,
+    attempt_type: "execution",
+    objective: "Commit an attached project change.",
+    success_criteria: ["Dev repo fast-forwards; runtime repo remains unchanged."],
+    status: "completed",
+    workspace_root: attemptWorktreeRoot,
+    worker: "fake-codex",
+    branch_id: null
+  });
+  await saveRun(workspacePaths, run);
+  const attemptPaths = resolveAttemptPaths(workspacePaths, run.id, attempt.id);
+  await mkdir(attemptPaths.artifactsDir, { recursive: true });
+
+  await writeFile(join(attemptWorktreeRoot, "product-feature.txt"), `${attempt.id}\n`, "utf8");
+  await runCommand(attemptWorktreeRoot, ["git", "add", "product-feature.txt"]);
+  await runCommand(attemptWorktreeRoot, [
+    "git",
+    "commit",
+    "-m",
+    `test: attached project checkpoint ${attempt.id}`
+  ]);
+
+  const checkpointSha = await readGitHead(attemptWorktreeRoot);
+  const runtimeHeadBefore = await readGitHead(runtimeRepoRoot);
+  assert.ok(checkpointSha, "checkpoint sha should be readable from attached attempt worktree");
+  assert.ok(runtimeHeadBefore, "runtime head should be readable before attached promotion");
+
+  const outcome = await maybePromoteVerifiedCheckpoint({
+    layout: runtimeLayout,
+    run,
+    attempt,
+    attemptPaths,
+    checkpointOutcome: {
+      status: "created",
+      message: `Execution already created verified checkpoint ${checkpointSha}.`,
+      artifact_path: join(attemptPaths.artifactsDir, "git-checkpoint.json"),
+      commit: {
+        sha: checkpointSha,
+        message: `test: attached project checkpoint ${attempt.id}`,
+        changed_files: ["product-feature.txt"]
+      },
+      includes_preexisting_changes: false,
+      preexisting_status_before: []
+    }
+  });
+
+  assert.equal(outcome.status, "promoted");
+  assert.equal(outcome.dev_repo_updated, true);
+  assert.equal(outcome.runtime_repo_updated, false);
+  assert.equal(outcome.restart_required, false);
+  assert.match(outcome.message, /attached dev repo only/);
+
+  const [devHeadAfter, runtimeHeadAfter, devStatus, runtimeStatus] = await Promise.all([
+    readGitHead(devRepoRoot),
+    readGitHead(runtimeRepoRoot),
+    readGitStatus(devRepoRoot),
+    readGitStatus(runtimeRepoRoot)
+  ]);
+  assert.equal(devHeadAfter, checkpointSha);
+  assert.equal(runtimeHeadAfter, runtimeHeadBefore);
+  assert.deepEqual(devStatus, []);
+  assert.deepEqual(runtimeStatus, []);
+
+  return {
+    dev_repo_head: devHeadAfter ?? "unknown",
+    runtime_repo_head: runtimeHeadAfter ?? "unknown",
+    promoted_attempt_id: attempt.id
   };
 }
 

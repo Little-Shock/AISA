@@ -192,27 +192,6 @@ export async function maybePromoteVerifiedCheckpoint(input: {
     });
   }
 
-  if (
-    normalizePath(devRepoRoot) !== normalizePath(runtimeRepoRoot) &&
-    runtimeRepoStatusBefore.length > 0
-  ) {
-    return await writePromotionArtifact(input.attemptPaths, {
-      status: "blocked",
-      reason: "runtime_repo_dirty",
-      message: [
-        "Runtime repo is dirty, so promotion refuses to rewrite it.",
-        `Entries: ${runtimeRepoStatusBefore.slice(0, 5).join("; ")}`
-      ].join(" "),
-      checkpoint_sha: createdCheckpointSha,
-      dev_repo_root: devRepoRoot,
-      runtime_repo_root: runtimeRepoRoot,
-      dev_repo_head_before: devRepoHeadBefore,
-      runtime_repo_head_before: runtimeRepoHeadBefore,
-      dev_repo_status_before: devRepoStatusBefore,
-      runtime_repo_status_before: runtimeRepoStatusBefore
-    });
-  }
-
   if (!devRepoHeadBefore) {
     return await writePromotionArtifact(input.attemptPaths, {
       status: "blocked",
@@ -291,7 +270,30 @@ export async function maybePromoteVerifiedCheckpoint(input: {
   }
 
   const runtimeSharesRepo = normalizePath(devRepoRoot) === normalizePath(runtimeRepoRoot);
-  if (!runtimeSharesRepo) {
+  const runtimeRepoSharesDevHistoryBefore =
+    runtimeSharesRepo ||
+    ((await gitCommitExists(runtimeRepoRoot, devRepoHeadBefore)) &&
+      (await gitIsAncestor(runtimeRepoRoot, runtimeRepoHeadBefore, devRepoHeadBefore)));
+
+  if (!runtimeSharesRepo && runtimeRepoSharesDevHistoryBefore) {
+    if (runtimeRepoStatusBefore.length > 0) {
+      return await writePromotionArtifact(input.attemptPaths, {
+        status: "blocked",
+        reason: "runtime_repo_dirty",
+        message: [
+          "Runtime repo is dirty, so promotion refuses to rewrite it.",
+          `Entries: ${runtimeRepoStatusBefore.slice(0, 5).join("; ")}`
+        ].join(" "),
+        checkpoint_sha: createdCheckpointSha,
+        dev_repo_root: devRepoRoot,
+        runtime_repo_root: runtimeRepoRoot,
+        dev_repo_head_before: devRepoHeadBefore,
+        runtime_repo_head_before: runtimeRepoHeadBefore,
+        dev_repo_status_before: devRepoStatusBefore,
+        runtime_repo_status_before: runtimeRepoStatusBefore
+      });
+    }
+
     const runtimeFetchResult =
       normalizePath(attemptRepoRoot) === normalizePath(runtimeRepoRoot)
         ? { exit_code: 0, stdout: "", stderr: "" }
@@ -391,7 +393,10 @@ export async function maybePromoteVerifiedCheckpoint(input: {
   if (runtimeSharesRepo) {
     runtimeRepoHeadAfter = devRepoHeadAfter;
     runtimeRepoUpdated = devRepoUpdated;
-  } else if (runtimeRepoHeadBefore !== createdCheckpointSha) {
+  } else if (
+    runtimeRepoSharesDevHistoryBefore &&
+    runtimeRepoHeadBefore !== createdCheckpointSha
+  ) {
     const runtimeUpdateResult = await runGit(
       runtimeRepoRoot,
       ["merge", "--ff-only", createdCheckpointSha],
@@ -438,7 +443,8 @@ export async function maybePromoteVerifiedCheckpoint(input: {
     message: buildPromotionMessage({
       checkpointSha: createdCheckpointSha,
       runtimeRepoUpdated,
-      runtimeSharesRepo
+      runtimeSharesRepo,
+      runtimeRepoSharesDevHistoryBefore
     }),
     checkpoint_sha: createdCheckpointSha,
     dev_repo_root: devRepoRoot,
@@ -457,7 +463,12 @@ function buildPromotionMessage(input: {
   checkpointSha: string;
   runtimeRepoUpdated: boolean;
   runtimeSharesRepo: boolean;
+  runtimeRepoSharesDevHistoryBefore: boolean;
 }): string {
+  if (!input.runtimeSharesRepo && !input.runtimeRepoSharesDevHistoryBefore) {
+    return `Promoted checkpoint ${input.checkpointSha} into the attached dev repo only. Runtime repo history is separate, so no runtime restart is required.`;
+  }
+
   if (!input.runtimeRepoUpdated) {
     return `Checkpoint ${input.checkpointSha} already matches the runtime lane. No runtime restart is required.`;
   }
