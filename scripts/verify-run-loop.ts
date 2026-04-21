@@ -854,18 +854,46 @@ class ScenarioAdapter {
     }
 
     if (this.driver === "execution_runtime_source_drift_requires_restart") {
+      if (passNumber === 2) {
+        return {
+          summary: "Patched a runtime-like source file and queued one more concrete execution step.",
+          findings: [
+            {
+              type: "fact",
+              content: "Updated the runtime-like source path in the project workspace",
+              evidence: ["packages/orchestrator/src/index.ts"]
+            }
+          ],
+          questions: [],
+          recommended_next_steps: ["Continue with the follow-up execution step."],
+          confidence: 0.86,
+          artifacts: [
+            { type: "patch", path: "artifacts/diff.patch" },
+            { type: "test_result", path: "artifacts/adversarial-verification.json" }
+          ]
+        };
+      }
+
       return {
-        summary: "Patched a live runtime source file and found the next execution move.",
+        summary: "Patched the runtime-like source file and left verification artifacts.",
         findings: [
           {
             type: "fact",
-            content: "Updated the in-process runtime source",
+            content: "Updated the runtime-like source path in the project workspace",
             evidence: ["packages/orchestrator/src/index.ts"]
           }
         ],
         questions: [],
-        recommended_next_steps: ["Resume the follow-up execution step after restart."],
+        recommended_next_steps: [],
         confidence: 0.86,
+        verification_plan: {
+          commands: [
+            {
+              purpose: "confirm the runtime-like source change was written",
+              command: this.buildExecutionVerificationCommand(attempt.id)
+            }
+          ]
+        },
         artifacts: [
           { type: "patch", path: "artifacts/diff.patch" },
           { type: "test_result", path: "artifacts/adversarial-verification.json" }
@@ -6161,14 +6189,15 @@ function assertCase(scenario: ScenarioCase, observation: ScenarioObservation): v
       ["packages/orchestrator/src/index.ts"],
       `${scenario.id}: runtime verification should record the changed runtime source file`
     );
-    assert.ok(
-      executionPacket.restart_required_message?.includes("Promoted checkpoint"),
-      `${scenario.id}: review packet should record the restart-required message`
+    assert.equal(
+      executionPacket.restart_required_message,
+      null,
+      `${scenario.id}: project-local runtime-like paths must not fabricate a runtime restart blocker`
     );
     assert.deepEqual(
       executionPacket.restart_required_affected_files,
       [],
-      `${scenario.id}: promotion-driven restart should not pretend the managed worktree edited the live repo in place`
+      `${scenario.id}: project-local runtime-like paths must not report live runtime restart files`
     );
   }
 

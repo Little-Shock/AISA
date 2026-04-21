@@ -21,6 +21,7 @@
     "verify:run-stream": "node --experimental-transform-types --loader ./scripts/ts-runtime-loader.mjs scripts/verify-run-stream.ts",
     "verify:run-loop": "node --experimental-transform-types --loader ./scripts/ts-runtime-loader.mjs scripts/verify-run-loop.ts",
     "verify:runtime-lanes": "node --experimental-transform-types --loader ./scripts/ts-runtime-loader.mjs scripts/verify-runtime-lanes.ts",
+    "verify:project-isolation": "node --experimental-transform-types --loader ./scripts/ts-runtime-loader.mjs scripts/verify-project-isolation.ts",
     "verify:run-autonomy": "node --experimental-transform-types --loader ./scripts/ts-runtime-loader.mjs scripts/verify-run-autonomy.ts",
     "verify:working-context": "node --experimental-transform-types --loader ./scripts/ts-runtime-loader.mjs scripts/verify-working-context.ts",
     "verify:maintenance-plane": "node --experimental-transform-types --loader ./scripts/ts-runtime-loader.mjs scripts/verify-maintenance-plane.ts",

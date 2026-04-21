@@ -24,6 +24,9 @@ type RuntimePromotionBlockedReason =
 type RuntimePromotionSkippedReason =
   | "not_execution"
   | "checkpoint_not_created"
+  | "not_requested"
+  | "awaiting_runtime_upgrade_approval"
+  | "external_project_not_runtime_upgrade"
   | "workspace_outside_dev_repo";
 
 export type RuntimePromotionOutcome =
@@ -71,6 +74,7 @@ export async function maybePromoteVerifiedCheckpoint(input: {
   attempt: Attempt;
   attemptPaths: AttemptPaths;
   checkpointOutcome: AttemptCheckpointOutcome;
+  runtimeUpgradeApproved?: boolean;
 }): Promise<RuntimePromotionOutcome> {
   const checkpointSha =
     input.checkpointOutcome.status === "created"
@@ -100,6 +104,30 @@ export async function maybePromoteVerifiedCheckpoint(input: {
     });
   }
   const createdCheckpointSha = input.checkpointOutcome.commit.sha;
+
+  if (!input.run.runtime_upgrade_intent) {
+    return await writePromotionArtifact(input.attemptPaths, {
+      status: "skipped",
+      reason: "not_requested",
+      message:
+        "Ordinary execution checkpoints do not promote the runtime unless runtime upgrade intent is explicitly enabled for the run.",
+      checkpoint_sha: createdCheckpointSha,
+      dev_repo_root: input.layout.devRepoRoot,
+      runtime_repo_root: input.layout.runtimeRepoRoot
+    });
+  }
+
+  if (input.runtimeUpgradeApproved !== true) {
+    return await writePromotionArtifact(input.attemptPaths, {
+      status: "skipped",
+      reason: "awaiting_runtime_upgrade_approval",
+      message:
+        "Runtime upgrade intent is set, but promotion is still waiting for explicit runtime upgrade approval.",
+      checkpoint_sha: createdCheckpointSha,
+      dev_repo_root: input.layout.devRepoRoot,
+      runtime_repo_root: input.layout.runtimeRepoRoot
+    });
+  }
 
   const attemptRepoRoot = await resolveGitRepoRoot(input.attempt.workspace_root);
   if (!attemptRepoRoot) {
@@ -149,6 +177,22 @@ export async function maybePromoteVerifiedCheckpoint(input: {
       runtime_repo_head_before: null,
       dev_repo_status_before: [],
       runtime_repo_status_before: []
+    });
+  }
+
+  if (
+    input.run.attached_project_id !== null &&
+    (!runWorkspaceRepoRoot ||
+      normalizePath(runWorkspaceRepoRoot) !== normalizePath(devRepoRoot))
+  ) {
+    return await writePromotionArtifact(input.attemptPaths, {
+      status: "skipped",
+      reason: "external_project_not_runtime_upgrade",
+      message:
+        "Attached external project checkpoints never promote the AISA runtime. Promotion is reserved for explicit AISA runtime upgrade runs.",
+      checkpoint_sha: createdCheckpointSha,
+      dev_repo_root: devRepoRoot,
+      runtime_repo_root: runtimeRepoRoot
     });
   }
 

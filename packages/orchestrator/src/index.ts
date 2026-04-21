@@ -191,6 +191,7 @@ import {
   ensureRunManagedWorkspace,
   getEffectiveRunWorkspaceRoot
 } from "./run-workspace.js";
+import { createRunScopedWorkspacePolicy } from "./run-scope-policy.js";
 
 export type RunRecoveryPath =
   | "first_attempt"
@@ -3263,12 +3264,15 @@ export class Orchestrator {
         attempt,
         checkpointOutcome
       );
+      const promotionPolicyRuntime = await getRunPolicyRuntime(this.workspacePaths, runId);
       const promotionOutcome = await maybePromoteVerifiedCheckpoint({
         layout: this.runtimeLayout,
         run,
         attempt,
         attemptPaths,
-        checkpointOutcome
+        checkpointOutcome,
+        runtimeUpgradeApproved:
+          promotionPolicyRuntime?.runtime_upgrade_approval_status === "approved"
       });
       nextCurrent = this.applyRuntimePromotionOutcomeToCurrentDecision(
         nextCurrent,
@@ -7386,12 +7390,13 @@ export class Orchestrator {
   private async getRunWorkspaceScopeError(
     run: Run
   ): Promise<RunWorkspaceScopeError | null> {
+    const runWorkspaceScopePolicy = this.getRunScopedWorkspacePolicy(run);
     try {
-      await lockRunWorkspaceRoot(run.workspace_root, this.runWorkspaceScopePolicy);
+      await lockRunWorkspaceRoot(run.workspace_root, runWorkspaceScopePolicy);
       if (run.managed_workspace_root) {
         await lockRunWorkspaceRoot(
           run.managed_workspace_root,
-          this.runWorkspaceScopePolicy
+          runWorkspaceScopePolicy
         );
       }
       return null;
@@ -7412,14 +7417,14 @@ export class Orchestrator {
       runWorkspaceRoot: run.workspace_root,
       managedRunWorkspaceRoot: run.managed_workspace_root,
       attemptWorkspaceRoot: attempt.workspace_root,
-      policy: this.runWorkspaceScopePolicy
+      policy: this.getRunScopedWorkspacePolicy(run)
     });
   }
 
   private async ensureRunWorkspaceReady(run: Run): Promise<Run> {
     return ensureRunManagedWorkspace({
       run,
-      policy: this.runWorkspaceScopePolicy
+      policy: this.getRunScopedWorkspacePolicy(run)
     });
   }
 
@@ -7444,6 +7449,13 @@ export class Orchestrator {
     });
     await saveAttempt(this.workspacePaths, nextAttempt);
     return nextAttempt;
+  }
+
+  private getRunScopedWorkspacePolicy(run: Run): RunWorkspaceScopePolicy {
+    return createRunScopedWorkspacePolicy({
+      run,
+      managedWorkspaceRoot: this.runWorkspaceScopePolicy.managedWorkspaceRoot
+    });
   }
 
   private async persistRunWorkspaceScopeBlocked(
@@ -7760,6 +7772,7 @@ export {
   createRunWorkspaceScopePolicy,
   createDefaultRunWorkspaceScopePolicy,
   lockRunWorkspaceRoot,
+  parseRunWorkspaceScopeRoots,
   RunWorkspaceScopeError,
   type RunWorkspaceScopePolicy
 } from "./workspace-scope.js";
@@ -7779,6 +7792,17 @@ export {
   repairRunManagedWorkspace,
   type ManagedWorkspaceRepairResult
 } from "./run-workspace.js";
+
+export {
+  assertRuntimeDataRootCompatible,
+  RuntimeDataRootGuardError
+} from "./runtime-data-root-guard.js";
+
+export {
+  buildPersistedRunWorkspaceScope,
+  createRunScopedWorkspacePolicy,
+  resolveRunScopeRoot
+} from "./run-scope-policy.js";
 
 export {
   maybePromoteVerifiedCheckpoint,

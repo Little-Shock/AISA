@@ -1,28 +1,29 @@
 {
   "id": "execution-runtime-source-drift-requires-restart",
-  "description": "A verified execution that edits live in-process runtime source must stop for restart before the loop can dispatch the next attempt.",
+  "description": "A verified execution that edits a runtime-like path inside the project workspace must not be mistaken for a live AISA runtime restart blocker.",
   "driver": "execution_runtime_source_drift_requires_restart",
-  "max_ticks": 12,
+  "max_ticks": 18,
   "expected": {
-    "run_status": "waiting_steer",
-    "waiting_for_human": true,
-    "recommended_next_action": "continue_execution",
-    "attempt_types": ["research", "execution"],
-    "attempt_statuses": ["completed", "completed"],
-    "verification_statuses": ["not_applicable", "passed"],
+    "run_status": "completed",
+    "waiting_for_human": false,
+    "recommended_next_action": null,
+    "attempt_types": ["research", "execution", "execution"],
+    "attempt_statuses": ["completed", "completed", "completed"],
+    "verification_statuses": ["not_applicable", "passed", "passed"],
     "required_journal_types": [
       "attempt.completed",
       "attempt.verification.passed",
-      "attempt.runtime.promoted",
-      "attempt.restart_required"
+      "attempt.checkpoint.created",
+      "attempt.adversarial_verification.passed",
+      "attempt.runtime.promotion.skipped"
     ],
     "required_journal_counts": {
-      "attempt.started": 2,
-      "attempt.completed": 2,
-      "attempt.verification.passed": 1,
-      "attempt.runtime.promoted": 1,
-      "attempt.restart_required": 1
-    },
-    "blocking_reason_includes": "Promoted checkpoint"
+      "attempt.started": 3,
+      "attempt.completed": 3,
+      "attempt.verification.passed": 2,
+      "attempt.checkpoint.created": 2,
+      "attempt.adversarial_verification.passed": 2,
+      "attempt.runtime.promotion.skipped": 3
+    }
   }
 }

@@ -272,6 +272,12 @@ export const GoalSchema = z.object({
   updated_at: z.string().datetime()
 });
 
+const RunWorkspaceScopeSchema = z.object({
+  requested_root: z.string().min(1),
+  resolved_root: z.string().min(1),
+  matched_scope_root: z.string().min(1)
+});
+
 export const RunSchema = z.object({
   id: z.string(),
   title: z.string().min(1),
@@ -280,11 +286,13 @@ export const RunSchema = z.object({
   constraints: z.array(z.string().min(1)).default([]),
   owner_id: z.string(),
   workspace_root: z.string().min(1),
+  workspace_scope: RunWorkspaceScopeSchema.nullable().default(null),
   attached_project_id: z.string().nullable().default(null),
   attached_project_stack_pack_id:
     AttachedProjectStackPackIdSchema.nullable().default(null),
   attached_project_task_preset_id:
     AttachedProjectTaskPresetIdSchema.nullable().default(null),
+  runtime_upgrade_intent: z.boolean().default(false),
   managed_workspace_root: z.string().min(1).nullable().default(null),
   harness_profile: RunHarnessProfileSchema.default(DEFAULT_RUN_HARNESS_PROFILE),
   budget: BudgetSchema,
@@ -309,6 +317,7 @@ export const CreateRunInputSchema = RunSchema.omit({
   updated_at: true
 }).extend({
   workspace_root: z.string().min(1).optional(),
+  workspace_scope: RunWorkspaceScopeSchema.nullable().optional(),
   budget: BudgetSchema.optional()
 });
 
@@ -614,6 +623,12 @@ export const RunPolicyRuntimeSchema = z.object({
   stage: RunPolicyStageSchema,
   approval_status: RunPolicyApprovalStatusSchema,
   approval_required: z.boolean().default(false),
+  runtime_upgrade_approval_status:
+    RunPolicyApprovalStatusSchema.default("not_required"),
+  runtime_upgrade_requested_at: z.string().datetime().nullable().default(null),
+  runtime_upgrade_decided_at: z.string().datetime().nullable().default(null),
+  runtime_upgrade_actor: z.string().nullable().default(null),
+  runtime_upgrade_note: z.string().nullable().default(null),
   proposed_signature: z.string().nullable().default(null),
   proposed_attempt_type: AttemptTypeSchema.nullable().default(null),
   proposed_objective: z.string().nullable().default(null),
@@ -2016,6 +2031,8 @@ export function createRun(input: CreateRunInput): Run {
     ...input,
     id: createEntityId("run"),
     workspace_root: input.workspace_root ?? process.cwd(),
+    workspace_scope: input.workspace_scope ?? null,
+    runtime_upgrade_intent: input.runtime_upgrade_intent ?? false,
     managed_workspace_root: null,
     budget,
     created_at: now,
@@ -2906,6 +2923,11 @@ export function createRunPolicyRuntime(input: {
   stage?: RunPolicyStage;
   approval_status?: RunPolicyApprovalStatus;
   approval_required?: boolean;
+  runtime_upgrade_approval_status?: RunPolicyApprovalStatus;
+  runtime_upgrade_requested_at?: string | null;
+  runtime_upgrade_decided_at?: string | null;
+  runtime_upgrade_actor?: string | null;
+  runtime_upgrade_note?: string | null;
   proposed_signature?: string | null;
   proposed_attempt_type?: AttemptType | null;
   proposed_objective?: string | null;
@@ -2931,6 +2953,12 @@ export function createRunPolicyRuntime(input: {
     stage: input.stage ?? "planning",
     approval_status: input.approval_status ?? "not_required",
     approval_required: input.approval_required ?? false,
+    runtime_upgrade_approval_status:
+      input.runtime_upgrade_approval_status ?? "not_required",
+    runtime_upgrade_requested_at: input.runtime_upgrade_requested_at ?? null,
+    runtime_upgrade_decided_at: input.runtime_upgrade_decided_at ?? null,
+    runtime_upgrade_actor: input.runtime_upgrade_actor ?? null,
+    runtime_upgrade_note: input.runtime_upgrade_note ?? null,
     proposed_signature: input.proposed_signature ?? null,
     proposed_attempt_type: input.proposed_attempt_type ?? null,
     proposed_objective: input.proposed_objective ?? null,

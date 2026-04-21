@@ -359,6 +359,47 @@ class ProgressingAdapter {
         "utf8"
       )
     ]);
+    await writeFile(
+      join(input.attempt.workspace_root, "artifacts", "legacy-postflight-output.txt"),
+      "legacy postflight output\n",
+      "utf8"
+    );
+    await writeFile(
+      join(input.attempt.workspace_root, "artifacts", "adversarial-verification.json"),
+      JSON.stringify(
+        {
+          attempt_id: input.attempt.id,
+          run_id: input.attempt.run_id,
+          attempt_type: input.attempt.attempt_type,
+          status: "passed",
+          verifier_kit: "web",
+          verdict: "pass",
+          summary: "legacy postflight placeholder",
+          target_surface: "web",
+          checks: [
+            {
+              code: "legacy_postflight_placeholder",
+              status: "passed",
+              message: "placeholder artifact"
+            }
+          ],
+          commands: [
+            {
+              purpose: "confirm legacy placeholder artifact exists",
+              command: "test -f artifacts/adversarial-verification.json",
+              exit_code: 0,
+              status: "passed",
+              output_ref: "artifacts/legacy-postflight-output.txt"
+            }
+          ],
+          output_refs: ["artifacts/legacy-postflight-output.txt"],
+          created_at: new Date().toISOString()
+        },
+        null,
+        2
+      ) + "\n",
+      "utf8"
+    );
 
     return {
       writeback: {
@@ -389,6 +430,10 @@ class ProgressingAdapter {
           {
             type: "screenshot",
             path: "artifacts/verifier-evidence/execution-screenshot.png"
+          },
+          {
+            type: "report",
+            path: "artifacts/adversarial-verification.json"
           }
         ]
       },
@@ -755,13 +800,10 @@ async function main(hostJudgeConfig: HostJudgeConfigSnapshot): Promise<void> {
   ).stdout.trim();
   assert.equal(secondStop.stopReason, "run_settled");
   assert.doesNotThrow(() => assertDriveRunReachedStableStop(secondStop));
-  assert.equal(persistedCurrent?.run_status, "waiting_steer");
-  assert.equal(persistedCurrent?.waiting_for_human, true);
-  assert.equal(persistedCurrent?.recommended_next_action, "wait_for_human");
-  assert.match(
-    persistedCurrent?.blocking_reason ?? "",
-    /Promoted checkpoint/u
-  );
+  assert.equal(persistedCurrent?.run_status, "completed");
+  assert.equal(persistedCurrent?.waiting_for_human, false);
+  assert.equal(persistedCurrent?.recommended_next_action, null);
+  assert.equal(persistedCurrent?.blocking_reason ?? null, null);
   assert.equal(executionAttempts.length, 1);
   assert.equal(researchAttempts.length, 2);
   assert.ok(

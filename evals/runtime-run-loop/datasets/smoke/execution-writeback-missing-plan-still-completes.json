@@ -4,9 +4,9 @@
   "driver": "execution_missing_verification_plan",
   "max_ticks": 12,
   "expected": {
-    "run_status": "waiting_steer",
-    "waiting_for_human": true,
-    "recommended_next_action": "wait_for_human",
+    "run_status": "completed",
+    "waiting_for_human": false,
+    "recommended_next_action": null,
     "attempt_types": ["research", "execution"],
     "attempt_statuses": ["completed", "completed"],
     "verification_statuses": ["not_applicable", "passed"],
@@ -14,17 +14,16 @@
       "attempt.completed",
       "attempt.verification.passed",
       "attempt.checkpoint.created",
-      "attempt.runtime.promoted",
-      "attempt.restart_required"
+      "attempt.adversarial_verification.passed",
+      "attempt.runtime.promotion.skipped"
     ],
     "required_journal_counts": {
       "attempt.started": 2,
       "attempt.completed": 2,
       "attempt.verification.passed": 1,
       "attempt.checkpoint.created": 1,
-      "attempt.runtime.promoted": 1,
-      "attempt.restart_required": 1
-    },
-    "blocking_reason_includes": "Promoted checkpoint"
+      "attempt.adversarial_verification.passed": 1,
+      "attempt.runtime.promotion.skipped": 2
+    }
   }
 }

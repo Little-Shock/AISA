@@ -21,6 +21,6 @@
       "attempt.failed": 1,
       "run.workspace_scope.blocked": 1
     },
-    "blocking_reason_includes": "超出当前 run 的工作区范围"
+    "blocking_reason_includes": "工作区超出允许范围"
   }
 }

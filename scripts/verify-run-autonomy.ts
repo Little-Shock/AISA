@@ -3008,8 +3008,8 @@ async function verifyRuntimeSourceDriftAutoResumesAfterRestart(): Promise<void> 
     "resumed execution should still pass runtime verification after restart"
   );
   assert.ok(
-    restartRequests.some((request) => request.reason === "runtime_promotion"),
-    "the resumed execution should still request a runtime promotion restart under supervision"
+    !restartRequests.some((request) => request.reason === "runtime_promotion"),
+    "ordinary execution must not request a runtime promotion restart without explicit runtime-upgrade intent"
   );
 }
 
@@ -3640,8 +3640,8 @@ async function verifyCheckpointedRestartResetsAutoResumeBudget(): Promise<void> 
     "restart auto-resume cycle numbering should reset after a verified checkpoint"
   );
   assert.ok(
-    restartRequests.some((request) => request.reason === "runtime_promotion"),
-    "checkpointed resume should still ask the supervisor to restart into the promoted runtime"
+    !restartRequests.some((request) => request.reason === "runtime_promotion"),
+    "checkpointed ordinary execution must not ask for a runtime promotion restart without explicit approval"
   );
 }
 

@@ -31,6 +31,8 @@ import { appendEvent, listEvents } from "@autoresearch/event-log";
 import {
   assessRunHealth,
   buildRuntimeWorkspaceScopeRoots,
+  buildPersistedRunWorkspaceScope,
+  createRunScopedWorkspacePolicy,
   captureAttachedProjectCapabilitySnapshot,
   captureSelfBootstrapRuntimeHealthSnapshot,
   captureSelfBootstrapNextTaskArtifacts,
@@ -40,7 +42,9 @@ import {
   lockRunWorkspaceRoot,
   loadSelfBootstrapNextTaskActiveEntry,
   Orchestrator,
+  parseRunWorkspaceScopeRoots,
   appendResolvedRunMailboxEntry,
+  assertRuntimeDataRootCompatible,
   buildAttachedProjectExecutionContractPreview,
   buildAttachedProjectExecutionDefaults,
   buildRunMailboxThreadId,
@@ -131,6 +135,17 @@ import {
 const currentDir = dirname(fileURLToPath(import.meta.url));
 const repositoryRoot = join(currentDir, "..", "..", "..");
 loadEnv({ path: join(repositoryRoot, ".env") });
+
+function resolveAllowedProjectRoots(
+  explicitRoots: string[] | undefined,
+  env: NodeJS.ProcessEnv
+): string[] {
+  return [
+    ...(explicitRoots ?? []),
+    ...parseRunWorkspaceScopeRoots(env.AISA_ALLOWED_PROJECT_ROOTS),
+    ...parseRunWorkspaceScopeRoots(env.AISA_ALLOWED_WORKSPACE_ROOTS)
+  ];
+}
 
 function inferLaunchAttemptType(input: {
   current: Awaited<ReturnType<typeof getCurrentDecision>> | null;
@@ -547,18 +562,28 @@ function hasApprovedExecutionPlan(
   );
 }
 
-function buildPlanningPolicyRuntime(runId: string) {
+function buildInitialRunPolicyRuntime(input: {
+  runId: string;
+  runtimeUpgradeIntent: boolean;
+}) {
   return createRunPolicyRuntime({
-    run_id: runId,
+    run_id: input.runId,
     stage: "planning",
-    last_decision: "planning"
+    last_decision: "planning",
+    runtime_upgrade_approval_status: input.runtimeUpgradeIntent
+      ? "pending"
+      : "not_required",
+    runtime_upgrade_requested_at: input.runtimeUpgradeIntent
+      ? new Date().toISOString()
+      : null
   });
 }
 
 const CreateAttachedProjectRunRequestSchema = z.object({
   owner_id: z.string().min(1).optional(),
   stack_pack_id: AttachedProjectStackPackIdSchema.optional(),
-  task_preset_id: AttachedProjectTaskPresetIdSchema.optional()
+  task_preset_id: AttachedProjectTaskPresetIdSchema.optional(),
+  runtime_upgrade_intent: z.boolean().optional()
 });
 
 type AttachedProjectRunTemplate = {
@@ -956,6 +981,7 @@ export async function buildServer(
     managedWorkspaceRoot?: string;
     startOrchestrator?: boolean;
     allowedRunWorkspaceRoots?: string[];
+    allowedProjectRoots?: string[];
     enableSelfRestart?: boolean;
   } = {}
 ) {
@@ -981,14 +1007,21 @@ export async function buildServer(
     logger: true
   });
   const runHealthStaleMs = readPositiveIntegerEnv("AISA_RUN_HEALTH_STALE_MS", 180_000);
+  const allowedProjectRoots = resolveAllowedProjectRoots(
+    options.allowedProjectRoots,
+    process.env
+  );
   const runWorkspaceScopePolicy = await createRunWorkspaceScopePolicy({
     runtimeRoot: runtimeLayout.runtimeRepoRoot,
     allowedRoots: buildRuntimeWorkspaceScopeRoots(
       runtimeLayout,
-      options.allowedRunWorkspaceRoots
+      [...(options.allowedRunWorkspaceRoots ?? []), ...allowedProjectRoots]
     ),
-    envValue: process.env.AISA_ALLOWED_WORKSPACE_ROOTS,
     managedWorkspaceRoot: runtimeLayout.managedWorkspaceRoot
+  });
+  await assertRuntimeDataRootCompatible({
+    layout: runtimeLayout,
+    runWorkspaceScopePolicy
   });
   let orchestratorStarted = false;
   let restartPending = false;
@@ -1696,7 +1729,7 @@ export async function buildServer(
         ownerId: input.owner_id ?? null,
         taskPresetTitle: executionDefaults.task_preset.title
       });
-      const lockedWorkspaceRoot = await lockWorkspaceRootOrThrow(
+      const lockedWorkspace = await lockWorkspaceRootOrThrowDetailed(
         template.workspace_root
       );
       const run = createRun({
@@ -1704,7 +1737,9 @@ export async function buildServer(
         attached_project_id: project.id,
         attached_project_stack_pack_id: executionDefaults.stack_pack.id,
         attached_project_task_preset_id: executionDefaults.task_preset.id,
-        workspace_root: lockedWorkspaceRoot,
+        workspace_root: lockedWorkspace.resolvedRoot,
+        workspace_scope: buildPersistedRunWorkspaceScope(lockedWorkspace),
+        runtime_upgrade_intent: input.runtime_upgrade_intent ?? false,
         harness_profile: {
           execution: {
             default_verifier_kit: executionDefaults.verifier_kit
@@ -1718,6 +1753,13 @@ export async function buildServer(
       });
 
       await saveRun(workspacePaths, run);
+      await saveRunPolicyRuntime(
+        workspacePaths,
+        buildInitialRunPolicyRuntime({
+          runId: run.id,
+          runtimeUpgradeIntent: run.runtime_upgrade_intent
+        })
+      );
       await saveCurrentDecision(workspacePaths, current);
       await appendRunJournal(
         workspacePaths,
@@ -1809,6 +1851,7 @@ export async function buildServer(
         runtime_data_root: runtimeLayout.runtimeDataRoot,
         managed_workspace_root: runtimeLayout.managedWorkspaceRoot
       },
+      allowed_project_roots: allowedProjectRoots,
       allowed_run_workspace_roots: runWorkspaceScopePolicy.allowedRoots,
       run_health_stale_ms: runHealthStaleMs,
       run_count: runSummaries.length,
@@ -1913,12 +1956,13 @@ export async function buildServer(
   app.post("/runs", async (request, reply) => {
     try {
       const input = CreateRunInputSchema.parse(request.body);
-      const lockedWorkspaceRoot = await lockWorkspaceRootOrThrow(
+      const lockedWorkspace = await lockWorkspaceRootOrThrowDetailed(
         input.workspace_root ?? defaultRunWorkspaceRoot
       );
       const run = createRun({
         ...input,
-        workspace_root: lockedWorkspaceRoot
+        workspace_root: lockedWorkspace.resolvedRoot,
+        workspace_scope: buildPersistedRunWorkspaceScope(lockedWorkspace)
       });
       const current = createCurrentDecision({
         run_id: run.id,
@@ -1927,6 +1971,13 @@ export async function buildServer(
       });
 
       await saveRun(workspacePaths, run);
+      await saveRunPolicyRuntime(
+        workspacePaths,
+        buildInitialRunPolicyRuntime({
+          runId: run.id,
+          runtimeUpgradeIntent: run.runtime_upgrade_intent
+        })
+      );
       await saveCurrentDecision(workspacePaths, current);
       await appendRunJournal(
         workspacePaths,
@@ -1984,12 +2035,14 @@ export async function buildServer(
     });
     let run;
     try {
-      const lockedWorkspaceRoot = await lockWorkspaceRootOrThrow(
+      const lockedWorkspace = await lockWorkspaceRootOrThrowDetailed(
         template.runInput.workspace_root ?? defaultRunWorkspaceRoot
       );
       run = createRun({
         ...template.runInput,
-        workspace_root: lockedWorkspaceRoot
+        workspace_root: lockedWorkspace.resolvedRoot,
+        workspace_scope: buildPersistedRunWorkspaceScope(lockedWorkspace),
+        runtime_upgrade_intent: true
       });
     } catch (error) {
       return reply.code(400).send({
@@ -2047,6 +2100,13 @@ export async function buildServer(
       }
     });
     await saveRun(workspacePaths, run);
+    await saveRunPolicyRuntime(
+      workspacePaths,
+      buildInitialRunPolicyRuntime({
+        runId: run.id,
+        runtimeUpgradeIntent: run.runtime_upgrade_intent
+      })
+    );
     await saveRunRuntimeHealthSnapshot(workspacePaths, runtimeHealthSnapshot);
     await saveCurrentDecision(workspacePaths, current);
     await appendRunJournal(
@@ -2123,7 +2183,13 @@ export async function buildServer(
         summary: "Self-bootstrap run launched. Loop will create the first attempt."
       });
       await saveCurrentDecision(workspacePaths, current);
-      await saveRunPolicyRuntime(workspacePaths, buildPlanningPolicyRuntime(run.id));
+      await saveRunPolicyRuntime(
+        workspacePaths,
+        buildInitialRunPolicyRuntime({
+          runId: run.id,
+          runtimeUpgradeIntent: run.runtime_upgrade_intent
+        })
+      );
       await appendRunJournal(
         workspacePaths,
         createRunJournalEntry({
@@ -2337,7 +2403,10 @@ export async function buildServer(
               approval_note: null,
               source_ref: null
             })
-          : buildPlanningPolicyRuntime(runId)
+          : buildInitialRunPolicyRuntime({
+              runId,
+              runtimeUpgradeIntent: run.runtime_upgrade_intent
+            })
       );
       await activateRunAutomation(runId, "control-api");
       await appendRunJournal(
@@ -2586,6 +2655,121 @@ export async function buildServer(
     }
   });
 
+  app.post("/runs/:runId/runtime-upgrade/approve", async (request, reply) => {
+    const { runId } = request.params as { runId: string };
+    const body =
+      (request.body as
+        | {
+            actor?: string;
+            note?: string;
+          }
+        | undefined) ?? {};
+
+    try {
+      const run = await getRun(workspacePaths, runId);
+      if (!run.runtime_upgrade_intent) {
+        return reply.code(409).send({
+          message: "This run was not created as a runtime upgrade."
+        });
+      }
+
+      const basePolicy =
+        (await getRunPolicyRuntime(workspacePaths, runId)) ??
+        buildInitialRunPolicyRuntime({
+          runId,
+          runtimeUpgradeIntent: true
+        });
+      const decidedAt = new Date().toISOString();
+      const nextPolicy = updateRunPolicyRuntime(basePolicy, {
+        runtime_upgrade_approval_status: "approved",
+        runtime_upgrade_requested_at: basePolicy.runtime_upgrade_requested_at ?? decidedAt,
+        runtime_upgrade_decided_at: decidedAt,
+        runtime_upgrade_actor: body.actor?.trim() || "control-api",
+        runtime_upgrade_note: body.note?.trim() || null
+      });
+
+      await saveRunPolicyRuntime(workspacePaths, nextPolicy);
+      await appendRunJournal(
+        workspacePaths,
+        createRunJournalEntry({
+          run_id: runId,
+          type: "run.runtime_upgrade.approved",
+          payload: {
+            actor: nextPolicy.runtime_upgrade_actor,
+            note: nextPolicy.runtime_upgrade_note
+          }
+        })
+      );
+      await refreshRunOperatorSurface(workspacePaths, runId);
+
+      return {
+        policy_runtime: nextPolicy
+      };
+    } catch (error) {
+      return reply.code(404).send({
+        message: error instanceof Error ? error.message : `Run ${runId} not found`
+      });
+    }
+  });
+
+  app.post("/runs/:runId/runtime-upgrade/reject", async (request, reply) => {
+    const { runId } = request.params as { runId: string };
+    const body =
+      (request.body as
+        | {
+            actor?: string;
+            note?: string;
+          }
+        | undefined) ?? {};
+
+    try {
+      const run = await getRun(workspacePaths, runId);
+      if (!run.runtime_upgrade_intent) {
+        return reply.code(409).send({
+          message: "This run was not created as a runtime upgrade."
+        });
+      }
+
+      const basePolicy =
+        (await getRunPolicyRuntime(workspacePaths, runId)) ??
+        buildInitialRunPolicyRuntime({
+          runId,
+          runtimeUpgradeIntent: true
+        });
+      const decidedAt = new Date().toISOString();
+      const nextPolicy = updateRunPolicyRuntime(basePolicy, {
+        runtime_upgrade_approval_status: "rejected",
+        runtime_upgrade_requested_at: basePolicy.runtime_upgrade_requested_at ?? decidedAt,
+        runtime_upgrade_decided_at: decidedAt,
+        runtime_upgrade_actor: body.actor?.trim() || "control-api",
+        runtime_upgrade_note:
+          body.note?.trim() || "Runtime upgrade approval was rejected."
+      });
+
+      await saveRunPolicyRuntime(workspacePaths, nextPolicy);
+      await appendRunJournal(
+        workspacePaths,
+        createRunJournalEntry({
+          run_id: runId,
+          type: "run.runtime_upgrade.rejected",
+          payload: {
+            actor: nextPolicy.runtime_upgrade_actor,
+            note: nextPolicy.runtime_upgrade_note
+          }
+        })
+      );
+      await refreshRunOperatorSurface(workspacePaths, runId);
+
+      return {
+        policy_runtime: nextPolicy
+      };
+    } catch (error) {
+      return reply.code(404).send({
+        message: error instanceof Error ? error.message : `Run ${runId} not found`
+      });
+    }
+  });
+
   app.post("/runs/:runId/policy/killswitch/enable", async (request, reply) => {
     const { runId } = request.params as { runId: string };
     const body =
@@ -2620,7 +2804,12 @@ export async function buildServer(
         body.note?.trim() ||
         "Execution is paused because the policy killswitch is active.";
       const actor = body.actor?.trim() || "control-api";
-      const basePolicy = policySurface.policyRuntime ?? buildPlanningPolicyRuntime(runId);
+      const basePolicy =
+        policySurface.policyRuntime ??
+        buildInitialRunPolicyRuntime({
+          runId,
+          runtimeUpgradeIntent: run.runtime_upgrade_intent
+        });
       const preservedBlockingReason =
         basePolicy.blocking_reason && basePolicy.blocking_reason !== basePolicy.killswitch_reason
           ? basePolicy.blocking_reason
@@ -2823,9 +3012,13 @@ export async function buildServer(
       });
 
       try {
+        const scopedPolicy = createRunScopedWorkspacePolicy({
+          run,
+          managedWorkspaceRoot: runWorkspaceScopePolicy.managedWorkspaceRoot
+        });
         const ensuredRun = await ensureRunManagedWorkspace({
           run,
-          policy: runWorkspaceScopePolicy
+          policy: scopedPolicy
         });
         if (
           ensuredRun.workspace_root !== run.workspace_root ||
@@ -2893,7 +3086,10 @@ export async function buildServer(
 
         const repair = await repairRunManagedWorkspace({
           run,
-          policy: runWorkspaceScopePolicy
+          policy: createRunScopedWorkspacePolicy({
+            run,
+            managedWorkspaceRoot: runWorkspaceScopePolicy.managedWorkspaceRoot
+          })
         });
         await saveRun(workspacePaths, repair.run);
 
@@ -3283,13 +3479,12 @@ export async function buildServer(
     }
   });
 
-  async function lockWorkspaceRootOrThrow(
-    workspaceRoot: string
-  ): Promise<string> {
-    const lockedWorkspace = await lockRunWorkspaceRoot(
-      workspaceRoot,
-      runWorkspaceScopePolicy
-    );
+  async function lockWorkspaceRootOrThrowDetailed(workspaceRoot: string) {
+    return await lockRunWorkspaceRoot(workspaceRoot, runWorkspaceScopePolicy);
+  }
+
+  async function lockWorkspaceRootOrThrow(workspaceRoot: string): Promise<string> {
+    const lockedWorkspace = await lockWorkspaceRootOrThrowDetailed(workspaceRoot);
     return lockedWorkspace.resolvedRoot;
   }
 

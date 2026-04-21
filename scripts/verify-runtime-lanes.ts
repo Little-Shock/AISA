@@ -12,6 +12,7 @@ import { join } from "node:path";
 import {
   createAttempt,
   createCurrentDecision,
+  createRunPolicyRuntime,
   createRun,
   createRunJournalEntry,
   type Attempt,
@@ -38,6 +39,7 @@ import {
   resolveAttemptPaths,
   resolveWorkspacePaths,
   saveCurrentDecision,
+  saveRunPolicyRuntime,
   saveRun
 } from "../packages/state-store/src/index.ts";
 import { driveRun } from "./drive-run.ts";
@@ -179,7 +181,10 @@ async function main(): Promise<void> {
     await verifyManagedWorkspaceRejectsDirtyStaleBaseline();
     await verifyRepairManagedWorkspaceRehomesDivergedHistory();
     await verifyControlApiUsesSeparateRuntimeLayout();
+    const noIntentSkip = await verifyCheckpointPromotionRequiresExplicitIntent();
+    const approvalSkip = await verifyCheckpointPromotionWaitsForApproval();
     const promotion = await verifyCheckpointPromotionUpdatesRuntimeRepo();
+    const externalRuntimeSkip = await verifyExternalProjectPromotionCannotTouchAisaRuntime();
     const attachedPromotion = await verifyAttachedProjectPromotionSkipsUnrelatedRuntimeRepo();
     const dirtyBlock = await verifyDirtyRuntimeRepoBlocksPromotion();
 
@@ -187,7 +192,10 @@ async function main(): Promise<void> {
       JSON.stringify(
         {
           status: "passed",
+          no_intent_skip: noIntentSkip,
+          approval_skip: approvalSkip,
           promotion,
+          external_runtime_skip: externalRuntimeSkip,
           attached_promotion: attachedPromotion,
           dirty_block: dirtyBlock
         },
@@ -568,6 +576,145 @@ async function verifyControlApiUsesSeparateRuntimeLayout(): Promise<void> {
   }
 }
 
+async function verifyCheckpointPromotionRequiresExplicitIntent(): Promise<{
+  skipped_reason: string;
+}> {
+  const layout = await createRuntimeLaneFixture("aisa-runtime-no-intent-");
+  const workspacePaths = resolveWorkspacePaths(layout.runtimeDataRoot);
+  await ensureWorkspace(workspacePaths);
+
+  const run = createRun({
+    title: "Do not auto-promote ordinary execution",
+    description: "Ordinary execution checkpoints must not promote the runtime by default.",
+    success_criteria: ["Skip promotion until a runtime upgrade run explicitly asks for it."],
+    constraints: [],
+    owner_id: "test-owner",
+    workspace_root: layout.devRepoRoot
+  });
+  const attempt = createAttempt({
+    run_id: run.id,
+    attempt_type: "execution",
+    objective: "Produce a verified checkpoint without runtime upgrade intent.",
+    success_criteria: ["Promotion is skipped as not requested."],
+    status: "completed",
+    workspace_root: layout.attemptWorktreeRoot,
+    worker: "fake-codex",
+    branch_id: null
+  });
+
+  await saveRun(workspacePaths, run);
+  const attemptPaths = resolveAttemptPaths(workspacePaths, run.id, attempt.id);
+  await mkdir(attemptPaths.artifactsDir, { recursive: true });
+  await writeFile(
+    join(layout.attemptWorktreeRoot, RUNTIME_MARKER_FILE),
+    `export const runtimeLaneMarker = "${attempt.id}";\n`,
+    "utf8"
+  );
+  await runCommand(layout.attemptWorktreeRoot, ["git", "add", "-A"]);
+  await runCommand(layout.attemptWorktreeRoot, ["git", "commit", "-m", `test: checkpoint ${attempt.id}`]);
+  const checkpointSha = await readGitHead(layout.attemptWorktreeRoot);
+
+  const outcome = await maybePromoteVerifiedCheckpoint({
+    layout: layout.runtimeLayout,
+    run,
+    attempt,
+    attemptPaths,
+    checkpointOutcome: {
+      status: "created",
+      message: `Created execution auto-checkpoint ${checkpointSha}.`,
+      artifact_path: join(attemptPaths.artifactsDir, "git-checkpoint.json"),
+      commit: {
+        sha: checkpointSha!,
+        message: `test: checkpoint ${attempt.id}`,
+        changed_files: [RUNTIME_MARKER_FILE]
+      },
+      includes_preexisting_changes: false,
+      preexisting_status_before: []
+    }
+  });
+
+  assert.equal(outcome.status, "skipped");
+  assert.equal(outcome.reason, "not_requested");
+
+  return {
+    skipped_reason: outcome.reason
+  };
+}
+
+async function verifyCheckpointPromotionWaitsForApproval(): Promise<{
+  skipped_reason: string;
+}> {
+  const layout = await createRuntimeLaneFixture("aisa-runtime-awaiting-approval-");
+  const workspacePaths = resolveWorkspacePaths(layout.runtimeDataRoot);
+  await ensureWorkspace(workspacePaths);
+
+  const run = createRun({
+    title: "Wait for runtime upgrade approval",
+    description: "Runtime upgrade intent still needs explicit approval before promotion.",
+    success_criteria: ["Skip promotion until approval arrives."],
+    constraints: [],
+    owner_id: "test-owner",
+    workspace_root: layout.devRepoRoot,
+    runtime_upgrade_intent: true
+  });
+  const attempt = createAttempt({
+    run_id: run.id,
+    attempt_type: "execution",
+    objective: "Produce a verified checkpoint before runtime upgrade approval.",
+    success_criteria: ["Promotion is skipped while approval is pending."],
+    status: "completed",
+    workspace_root: layout.attemptWorktreeRoot,
+    worker: "fake-codex",
+    branch_id: null
+  });
+
+  await saveRun(workspacePaths, run);
+  await saveRunPolicyRuntime(
+    workspacePaths,
+    createRunPolicyRuntime({
+      run_id: run.id,
+      runtime_upgrade_approval_status: "pending",
+      runtime_upgrade_requested_at: "2026-04-01T00:00:00.000Z"
+    })
+  );
+  const attemptPaths = resolveAttemptPaths(workspacePaths, run.id, attempt.id);
+  await mkdir(attemptPaths.artifactsDir, { recursive: true });
+  await writeFile(
+    join(layout.attemptWorktreeRoot, RUNTIME_MARKER_FILE),
+    `export const runtimeLaneMarker = "${attempt.id}";\n`,
+    "utf8"
+  );
+  await runCommand(layout.attemptWorktreeRoot, ["git", "add", "-A"]);
+  await runCommand(layout.attemptWorktreeRoot, ["git", "commit", "-m", `test: checkpoint ${attempt.id}`]);
+  const checkpointSha = await readGitHead(layout.attemptWorktreeRoot);
+
+  const outcome = await maybePromoteVerifiedCheckpoint({
+    layout: layout.runtimeLayout,
+    run,
+    attempt,
+    attemptPaths,
+    checkpointOutcome: {
+      status: "created",
+      message: `Created execution auto-checkpoint ${checkpointSha}.`,
+      artifact_path: join(attemptPaths.artifactsDir, "git-checkpoint.json"),
+      commit: {
+        sha: checkpointSha!,
+        message: `test: checkpoint ${attempt.id}`,
+        changed_files: [RUNTIME_MARKER_FILE]
+      },
+      includes_preexisting_changes: false,
+      preexisting_status_before: []
+    }
+  });
+
+  assert.equal(outcome.status, "skipped");
+  assert.equal(outcome.reason, "awaiting_runtime_upgrade_approval");
+
+  return {
+    skipped_reason: outcome.reason
+  };
+}
+
 async function verifyCheckpointPromotionUpdatesRuntimeRepo(): Promise<{
   runtime_repo_head: string;
   promoted_attempt_id: string;
@@ -582,7 +729,8 @@ async function verifyCheckpointPromotionUpdatesRuntimeRepo(): Promise<{
     success_criteria: ["Promote the verified checkpoint and request runtime restart."],
     constraints: [],
     owner_id: "test-owner",
-    workspace_root: layout.devRepoRoot
+    workspace_root: layout.devRepoRoot,
+    runtime_upgrade_intent: true
   });
   const current = createCurrentDecision({
     run_id: run.id,
@@ -593,6 +741,16 @@ async function verifyCheckpointPromotionUpdatesRuntimeRepo(): Promise<{
   });
 
   await saveRun(workspacePaths, run);
+  await saveRunPolicyRuntime(
+    workspacePaths,
+    createRunPolicyRuntime({
+      run_id: run.id,
+      runtime_upgrade_approval_status: "approved",
+      runtime_upgrade_requested_at: "2026-04-01T00:00:00.000Z",
+      runtime_upgrade_decided_at: "2026-04-01T00:00:01.000Z",
+      runtime_upgrade_actor: "verify-runtime-lanes"
+    })
+  );
   await saveCurrentDecision(workspacePaths, current);
   await appendSeedRunJournal(workspacePaths, run);
   const runWorkspaceScopePolicy = await createRunWorkspaceScopePolicy({
@@ -683,7 +841,8 @@ async function verifyDirtyRuntimeRepoBlocksPromotion(): Promise<{
     success_criteria: ["Block promotion and keep both repos unchanged."],
     constraints: [],
     owner_id: "test-owner",
-    workspace_root: layout.devRepoRoot
+    workspace_root: layout.devRepoRoot,
+    runtime_upgrade_intent: true
   });
   const attempt = createAttempt({
     run_id: run.id,
@@ -728,6 +887,7 @@ async function verifyDirtyRuntimeRepoBlocksPromotion(): Promise<{
     run,
     attempt,
     attemptPaths,
+    runtimeUpgradeApproved: true,
     checkpointOutcome: {
       status: "created",
       message: `Created execution auto-checkpoint ${checkpointSha}.`,
@@ -749,6 +909,87 @@ async function verifyDirtyRuntimeRepoBlocksPromotion(): Promise<{
 
   return {
     blocked_reason: outcome.reason
+  };
+}
+
+async function verifyExternalProjectPromotionCannotTouchAisaRuntime(): Promise<{
+  skipped_reason: string;
+}> {
+  const layout = await createRuntimeLaneFixture("aisa-runtime-external-project-skip-");
+  const externalRepoRoot = join(layout.runtimeDataRoot, "..", "external-project");
+  await cloneRepo(layout.devRepoRoot, externalRepoRoot);
+  const externalAttemptWorktreeRoot = join(layout.runtimeDataRoot, "..", "external-attempt-worktree");
+  await runCommand(externalRepoRoot, [
+    "git",
+    "worktree",
+    "add",
+    "--detach",
+    externalAttemptWorktreeRoot,
+    "HEAD"
+  ]);
+
+  const workspacePaths = resolveWorkspacePaths(layout.runtimeDataRoot);
+  await ensureWorkspace(workspacePaths);
+
+  const run = createRun({
+    title: "External project must not promote AISA runtime",
+    description: "Attached external projects cannot reuse runtime promotion even when approval is granted.",
+    success_criteria: ["Skip promotion because the run does not belong to the AISA runtime repo."],
+    constraints: [],
+    owner_id: "test-owner",
+    workspace_root: externalRepoRoot,
+    attached_project_id: "external_project_runtime_skip",
+    runtime_upgrade_intent: true
+  });
+  const attempt = createAttempt({
+    run_id: run.id,
+    attempt_type: "execution",
+    objective: "Commit an external project change under an AISA runtime layout.",
+    success_criteria: ["Promotion is skipped as an external project runtime change."],
+    status: "completed",
+    workspace_root: externalAttemptWorktreeRoot,
+    worker: "fake-codex",
+    branch_id: null
+  });
+
+  await saveRun(workspacePaths, run);
+  const attemptPaths = resolveAttemptPaths(workspacePaths, run.id, attempt.id);
+  await mkdir(attemptPaths.artifactsDir, { recursive: true });
+  await writeFile(join(externalAttemptWorktreeRoot, "external-change.txt"), `${attempt.id}\n`, "utf8");
+  await runCommand(externalAttemptWorktreeRoot, ["git", "add", "external-change.txt"]);
+  await runCommand(externalAttemptWorktreeRoot, [
+    "git",
+    "commit",
+    "-m",
+    `test: external runtime skip ${attempt.id}`
+  ]);
+  const checkpointSha = await readGitHead(externalAttemptWorktreeRoot);
+
+  const outcome = await maybePromoteVerifiedCheckpoint({
+    layout: layout.runtimeLayout,
+    run,
+    attempt,
+    attemptPaths,
+    runtimeUpgradeApproved: true,
+    checkpointOutcome: {
+      status: "created",
+      message: `Created execution auto-checkpoint ${checkpointSha}.`,
+      artifact_path: join(attemptPaths.artifactsDir, "git-checkpoint.json"),
+      commit: {
+        sha: checkpointSha!,
+        message: `test: external runtime skip ${attempt.id}`,
+        changed_files: ["external-change.txt"]
+      },
+      includes_preexisting_changes: false,
+      preexisting_status_before: []
+    }
+  });
+
+  assert.equal(outcome.status, "skipped");
+  assert.equal(outcome.reason, "external_project_not_runtime_upgrade");
+
+  return {
+    skipped_reason: outcome.reason
   };
 }
 
@@ -797,7 +1038,8 @@ async function verifyAttachedProjectPromotionSkipsUnrelatedRuntimeRepo(): Promis
     constraints: [],
     owner_id: "test-owner",
     workspace_root: devRepoRoot,
-    attached_project_id: "project_attached_promotion"
+    attached_project_id: "project_attached_promotion",
+    runtime_upgrade_intent: true
   });
   const attempt = createAttempt({
     run_id: run.id,
@@ -838,6 +1080,7 @@ async function verifyAttachedProjectPromotionSkipsUnrelatedRuntimeRepo(): Promis
     run,
     attempt,
     attemptPaths,
+    runtimeUpgradeApproved: true,
     checkpointOutcome: {
       status: "created",
       message: `Execution already created verified checkpoint ${checkpointSha}.`,

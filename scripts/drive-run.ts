@@ -17,6 +17,7 @@ import {
   type WorkspacePaths
 } from "../packages/state-store/src/index.ts";
 import {
+  assertRuntimeDataRootCompatible,
   Orchestrator,
   type OrchestratorOptions
 } from "../packages/orchestrator/src/index.ts";
@@ -24,7 +25,10 @@ import {
   buildRuntimeWorkspaceScopeRoots,
   resolveRuntimeLayout
 } from "../packages/orchestrator/src/runtime-layout.ts";
-import { createRunWorkspaceScopePolicy } from "../packages/orchestrator/src/workspace-scope.ts";
+import {
+  createRunWorkspaceScopePolicy,
+  parseRunWorkspaceScopeRoots
+} from "../packages/orchestrator/src/workspace-scope.ts";
 import {
   createAdversarialVerifierAdapter,
   createExecutionWorkerAdapter,
@@ -97,10 +101,16 @@ export async function driveRun(input: {
     input.orchestratorOptions?.runWorkspaceScopePolicy ??
     (await createRunWorkspaceScopePolicy({
       runtimeRoot: runtimeLayout.runtimeRepoRoot,
-      allowedRoots: buildRuntimeWorkspaceScopeRoots(runtimeLayout),
-      envValue: process.env.AISA_ALLOWED_WORKSPACE_ROOTS,
+      allowedRoots: buildRuntimeWorkspaceScopeRoots(runtimeLayout, [
+        ...parseRunWorkspaceScopeRoots(process.env.AISA_ALLOWED_PROJECT_ROOTS),
+        ...parseRunWorkspaceScopeRoots(process.env.AISA_ALLOWED_WORKSPACE_ROOTS)
+      ]),
       managedWorkspaceRoot: runtimeLayout.managedWorkspaceRoot
     }));
+  await assertRuntimeDataRootCompatible({
+    layout: runtimeLayout,
+    runWorkspaceScopePolicy
+  });
   const orchestrator = new Orchestrator(
     workspacePaths,
     input.adapter,
