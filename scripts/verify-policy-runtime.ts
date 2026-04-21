@@ -341,6 +341,7 @@ async function createScenarioOrchestrator(input: {
   runtimeDataRoot: string;
   workspaceRoot: string;
   workspacePaths: ReturnType<typeof resolveWorkspacePaths>;
+  executionApprovalMode?: "auto" | "manual";
 }): Promise<Orchestrator> {
   const runWorkspaceScopePolicy = await createRunWorkspaceScopePolicy({
     runtimeRoot: input.runtimeDataRoot,
@@ -354,6 +355,7 @@ async function createScenarioOrchestrator(input: {
     50,
     {
       runWorkspaceScopePolicy,
+      executionApprovalMode: input.executionApprovalMode,
       waitingHumanAutoResumeMs: 60_000,
       attemptHeartbeatIntervalMs: 20,
       attemptHeartbeatStaleMs: 200
@@ -384,13 +386,50 @@ async function waitForPendingApproval(
   });
 }
 
+async function verifyExecutionAutoDispatchesByDefault(): Promise<void> {
+  const { runtimeDataRoot, workspaceRoot, workspacePaths, run } =
+    await bootstrapExecutionApprovalRun("auto-dispatch-default");
+  const orchestrator = await createScenarioOrchestrator({
+    runtimeDataRoot,
+    workspaceRoot,
+    workspacePaths
+  });
+
+  await driveOrchestratorUntil({
+    orchestrator,
+    predicate: async () =>
+      (await listAttempts(workspacePaths, run.id)).some(
+        (attempt) => attempt.attempt_type === "execution" && attempt.status === "completed"
+      )
+  });
+
+  const [attempts, current, policy, journal] = await Promise.all([
+    listAttempts(workspacePaths, run.id),
+    getCurrentDecision(workspacePaths, run.id),
+    readRunPolicyRuntimeStrict(workspacePaths, run.id),
+    listRunJournal(workspacePaths, run.id)
+  ]);
+  assert.equal(
+    attempts.some((attempt) => attempt.attempt_type === "execution"),
+    true,
+    "default execution policy should dispatch without manual approval"
+  );
+  assert.equal(policy.approval_required, false);
+  assert.equal(policy.approval_status, "not_required");
+  assert.ok(
+    !journal.some((entry) => entry.type === "run.policy.approval_requested"),
+    "default execution policy should not queue leader approval"
+  );
+}
+
 async function verifyExecutionPlanRequiresApproval(): Promise<void> {
   const { runtimeDataRoot, workspaceRoot, workspacePaths, run } =
     await bootstrapExecutionApprovalRun("pending-approval");
   const orchestrator = await createScenarioOrchestrator({
     runtimeDataRoot,
     workspaceRoot,
-    workspacePaths
+    workspacePaths,
+    executionApprovalMode: "manual"
   });
   await waitForPendingApproval(orchestrator, workspacePaths, run.id);
 
@@ -420,7 +459,8 @@ async function verifyLaunchBypassIsBlockedWhileApprovalPending(): Promise<void> 
   const orchestrator = await createScenarioOrchestrator({
     runtimeDataRoot,
     workspaceRoot,
-    workspacePaths
+    workspacePaths,
+    executionApprovalMode: "manual"
   });
   await waitForPendingApproval(orchestrator, workspacePaths, run.id);
 
@@ -446,7 +486,8 @@ async function verifyApproveRouteUnlocksExecution(): Promise<void> {
   const orchestrator = await createScenarioOrchestrator({
     runtimeDataRoot,
     workspaceRoot,
-    workspacePaths
+    workspacePaths,
+    executionApprovalMode: "manual"
   });
   await waitForPendingApproval(orchestrator, workspacePaths, run.id);
 
@@ -488,7 +529,8 @@ async function verifyApproveRouteUnlocksExecution(): Promise<void> {
   const resumedOrchestrator = await createScenarioOrchestrator({
     runtimeDataRoot,
     workspaceRoot,
-    workspacePaths
+    workspacePaths,
+    executionApprovalMode: "manual"
   });
   await driveOrchestratorUntil({
     orchestrator: resumedOrchestrator,
@@ -526,7 +568,8 @@ async function verifyRejectRouteForcesResearchReplan(): Promise<void> {
   const orchestrator = await createScenarioOrchestrator({
     runtimeDataRoot,
     workspaceRoot,
-    workspacePaths
+    workspacePaths,
+    executionApprovalMode: "manual"
   });
   await waitForPendingApproval(orchestrator, workspacePaths, run.id);
 
@@ -584,7 +627,8 @@ async function verifyApproveAndRejectRequirePendingApproval(): Promise<void> {
   const orchestrator = await createScenarioOrchestrator({
     runtimeDataRoot,
     workspaceRoot,
-    workspacePaths
+    workspacePaths,
+    executionApprovalMode: "manual"
   });
   await waitForPendingApproval(orchestrator, workspacePaths, run.id);
 
@@ -622,7 +666,8 @@ async function verifyApproveAndRejectRequirePendingApproval(): Promise<void> {
   const secondOrchestrator = await createScenarioOrchestrator({
     runtimeDataRoot: secondScenario.runtimeDataRoot,
     workspaceRoot: secondScenario.workspaceRoot,
-    workspacePaths: secondScenario.workspacePaths
+    workspacePaths: secondScenario.workspacePaths,
+    executionApprovalMode: "manual"
   });
   await waitForPendingApproval(
     secondOrchestrator,
@@ -718,7 +763,8 @@ async function verifyReplaySafeTmpCleanupCanEnterApproval(): Promise<void> {
   const orchestrator = await createScenarioOrchestrator({
     runtimeDataRoot,
     workspaceRoot,
-    workspacePaths
+    workspacePaths,
+    executionApprovalMode: "manual"
   });
   await waitForPendingApproval(orchestrator, workspacePaths, run.id);
 
@@ -794,7 +840,8 @@ async function verifyKillswitchRoutesGateLaunch(): Promise<void> {
   const orchestrator = await createScenarioOrchestrator({
     runtimeDataRoot,
     workspaceRoot,
-    workspacePaths
+    workspacePaths,
+    executionApprovalMode: "manual"
   });
   await waitForPendingApproval(orchestrator, workspacePaths, run.id);
 
@@ -1005,7 +1052,8 @@ async function verifyCorruptPolicyFailsClosed(): Promise<void> {
   const orchestrator = await createScenarioOrchestrator({
     runtimeDataRoot,
     workspaceRoot,
-    workspacePaths
+    workspacePaths,
+    executionApprovalMode: "manual"
   });
   await waitForPendingApproval(orchestrator, workspacePaths, run.id);
 
@@ -1109,6 +1157,7 @@ async function runCase(id: string, fn: () => Promise<void>): Promise<CaseResult>
 async function main(): Promise<void> {
   try {
     const cases: Array<[string, () => Promise<void>]> = [
+      ["execution_auto_dispatches_by_default", verifyExecutionAutoDispatchesByDefault],
       ["execution_requires_approval", verifyExecutionPlanRequiresApproval],
       [
         "pending_approval_blocks_launch_bypass",

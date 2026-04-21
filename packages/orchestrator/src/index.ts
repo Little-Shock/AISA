@@ -379,6 +379,7 @@ export interface OrchestratorOptions {
   attemptHeartbeatIntervalMs?: number;
   attemptHeartbeatStaleMs?: number;
   maxConcurrentAttempts?: number;
+  executionApprovalMode?: "auto" | "manual";
   waitingHumanAutoResumeMs?: number;
   maxAutomaticResumeCycles?: number;
   providerRateLimitAutoResumeMs?: number;
@@ -418,6 +419,13 @@ export type RunWorkerEffortSlotView = {
   applied: boolean;
   detail: string;
 };
+
+function readExecutionApprovalModeEnv(
+  value: string | undefined
+): "auto" | "manual" {
+  const normalized = String(value ?? "").trim().toLowerCase();
+  return normalized === "manual" ? "manual" : "auto";
+}
 
 export type RunWorkerEffortView = {
   execution: ExecutionWorkerEffortSetting;
@@ -1240,6 +1248,7 @@ export class Orchestrator {
   private readonly attemptHeartbeatIntervalMs: number;
   private readonly attemptHeartbeatStaleMs: number;
   private readonly maxConcurrentAttempts: number;
+  private readonly executionApprovalMode: "auto" | "manual";
   private readonly runDispatchLeaseStaleMs: number;
   private readonly waitingHumanAutoResumeMs: number;
   private readonly maxAutomaticResumeCycles: number;
@@ -1273,6 +1282,9 @@ export class Orchestrator {
     this.maxConcurrentAttempts =
       options.maxConcurrentAttempts ??
       readPositiveIntegerEnv("AISA_MAX_CONCURRENT_ATTEMPTS", 3);
+    this.executionApprovalMode =
+      options.executionApprovalMode ??
+      readExecutionApprovalModeEnv(process.env.AISA_EXECUTION_APPROVAL_MODE);
     this.runDispatchLeaseStaleMs = readPositiveIntegerEnv(
       "AISA_RUN_DISPATCH_LEASE_STALE_MS",
       60_000
@@ -2061,12 +2073,23 @@ export class Orchestrator {
     return this.buildAttemptResultRef(runId, sourceAttemptId);
   }
 
+  private requiresExecutionApproval(
+    attemptType: Attempt["attempt_type"]
+  ): boolean {
+    return (
+      attemptType === "execution" && this.executionApprovalMode === "manual"
+    );
+  }
+
   private async persistRunPolicyReadyForDispatch(input: {
     runId: string;
     proposal: RunPolicyProposal;
+    approvalRequired?: boolean;
   }): Promise<void> {
     const existingPolicy = await getRunPolicyRuntime(this.workspacePaths, input.runId);
-    const approvalRequired = input.proposal.attemptType === "execution";
+    const approvalRequired =
+      input.approvalRequired ??
+      this.requiresExecutionApproval(input.proposal.attemptType);
     const sourceRef = this.buildRunPolicySourceRef(
       input.runId,
       input.proposal.sourceAttemptId
@@ -2868,7 +2891,16 @@ export class Orchestrator {
         return null;
       }
 
+      const approvalRequired = this.requiresExecutionApproval(attemptType);
+
       if (policyGate.status === "missing") {
+        if (!approvalRequired) {
+          return {
+            attempt,
+            contract,
+            proposal
+          };
+        }
         await this.persistRunPolicyApprovalRequested({
           runId,
           current,
@@ -2890,6 +2922,14 @@ export class Orchestrator {
           reason: "killswitch_active"
         });
         return null;
+      }
+
+      if (!approvalRequired) {
+        return {
+          attempt,
+          contract,
+          proposal
+        };
       }
 
       if (
