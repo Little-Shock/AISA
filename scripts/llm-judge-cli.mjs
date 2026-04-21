@@ -6,6 +6,7 @@ import { join } from "node:path";
 const mode = process.argv[2] ?? "";
 const provider = String(process.env.AISA_LLM_PROVIDER ?? "").trim().toLowerCase();
 const model = readOptionalEnv("AISA_LLM_MODEL");
+const reasoningEffort = readOptionalEnv("AISA_LLM_REASONING_EFFORT");
 let stdinBuffer = "";
 
 const STRUCTURED_JUDGMENT_SCHEMA = {
@@ -62,12 +63,42 @@ const STRUCTURED_JUDGMENT_SCHEMA = {
   additionalProperties: false
 };
 
-const OUTPUT_SCHEMA = {
+const JUDGE_OUTPUT_SCHEMA = {
   type: "object",
   properties: {
     structured_judgment: STRUCTURED_JUDGMENT_SCHEMA
   },
   required: ["structured_judgment"],
+  additionalProperties: false
+};
+
+const STRUCTURED_DECISION_SCHEMA = {
+  type: "object",
+  properties: {
+    decision: {
+      type: "string",
+      enum: ["approve", "reject"]
+    },
+    rationale: {
+      type: "string"
+    },
+    follow_up: {
+      type: "array",
+      items: {
+        type: "string"
+      }
+    }
+  },
+  required: ["decision", "rationale", "follow_up"],
+  additionalProperties: false
+};
+
+const LEADER_OUTPUT_SCHEMA = {
+  type: "object",
+  properties: {
+    structured_decision: STRUCTURED_DECISION_SCHEMA
+  },
+  required: ["structured_decision"],
   additionalProperties: false
 };
 
@@ -84,8 +115,10 @@ process.stdin.on("end", () => {
 });
 
 async function main() {
-  if (!["reviewer", "synthesizer"].includes(mode)) {
-    throw new Error('Usage: node scripts/llm-judge-cli.mjs <reviewer|synthesizer>');
+  if (!["reviewer", "synthesizer", "leader-approver"].includes(mode)) {
+    throw new Error(
+      'Usage: node scripts/llm-judge-cli.mjs <reviewer|synthesizer|leader-approver>'
+    );
   }
 
   if (!provider || !["codex", "gemini"].includes(provider)) {
@@ -94,37 +127,56 @@ async function main() {
 
   const payload = parseJson(stdinBuffer, "stdin payload");
   const prompt =
-    mode === "reviewer" ? buildReviewerPrompt(payload) : buildSynthesizerPrompt(payload);
+    mode === "reviewer"
+      ? buildReviewerPrompt(payload)
+      : mode === "synthesizer"
+        ? buildSynthesizerPrompt(payload)
+        : buildLeaderApproverPrompt(payload);
+  const outputSchema = mode === "leader-approver" ? LEADER_OUTPUT_SCHEMA : JUDGE_OUTPUT_SCHEMA;
   const providerResult =
     provider === "codex"
       ? await runCodexJson({
           prompt,
-          model
+          model,
+          reasoningEffort,
+          outputSchema
         })
       : await runGeminiJson({
           prompt,
           model
         });
-  const normalizedJudgment = normalizeStructuredJudgment(
-    providerResult.parsed?.structured_judgment
-  );
   const response =
-    mode === "reviewer"
+    mode === "leader-approver"
       ? {
           provider,
           model,
+          reasoning_effort: reasoningEffort,
           provider_raw_output: providerResult.raw_output,
           tool_call_count: providerResult.toolCallCount,
-          structured_judgment: normalizedJudgment,
-          proposed_next_contract: payload?.result?.next_attempt_contract ?? null
+          structured_decision: normalizeStructuredDecision(
+            providerResult.parsed?.structured_decision
+          )
         }
-      : {
-          provider,
-          model,
-          provider_raw_output: providerResult.raw_output,
-          tool_call_count: providerResult.toolCallCount,
-          structured_judgment: normalizedJudgment
-        };
+      : mode === "reviewer"
+        ? {
+            provider,
+            model,
+            provider_raw_output: providerResult.raw_output,
+            tool_call_count: providerResult.toolCallCount,
+            structured_judgment: normalizeStructuredJudgment(
+              providerResult.parsed?.structured_judgment
+            ),
+            proposed_next_contract: payload?.result?.next_attempt_contract ?? null
+          }
+        : {
+            provider,
+            model,
+            provider_raw_output: providerResult.raw_output,
+            tool_call_count: providerResult.toolCallCount,
+            structured_judgment: normalizeStructuredJudgment(
+              providerResult.parsed?.structured_judgment
+            )
+          };
 
   process.stdout.write(JSON.stringify(response, null, 2));
 }
@@ -136,7 +188,7 @@ function buildReviewerPrompt(reviewInputPacket) {
     "Do not use tools.",
     "Do not invent evidence outside the packet.",
     "Return exactly one JSON object with this shape:",
-    JSON.stringify(OUTPUT_SCHEMA, null, 2),
+    JSON.stringify(JUDGE_OUTPUT_SCHEMA, null, 2),
     "Guidance:",
     "- goal_progress and evidence_quality must be 0..1 numbers.",
     '- verification_status must be one of "passed", "failed", "not_applicable".',
@@ -158,7 +210,7 @@ function buildSynthesizerPrompt(synthesisPacket) {
     "The deterministic base evaluation is the hard runtime gate. It will be enforced again after your output.",
     "Your job is to reconcile reviewer opinions into one final structured judgment.",
     "Return exactly one JSON object with this shape:",
-    JSON.stringify(OUTPUT_SCHEMA, null, 2),
+    JSON.stringify(JUDGE_OUTPUT_SCHEMA, null, 2),
     "Guidance:",
     "- Keep rationale concise, specific, and tied to the packet and reviewer opinions.",
     "- missing_evidence should merge concrete gaps, not repeat generic filler.",
@@ -168,13 +220,31 @@ function buildSynthesizerPrompt(synthesisPacket) {
   ].join("\n\n");
 }
 
+function buildLeaderApproverPrompt(approvalPacket) {
+  return [
+    "You are a strict AISA leader approval lane.",
+    "Read only the JSON packet from stdin context.",
+    "Do not use tools.",
+    "Do not invent evidence outside the packet.",
+    "Default to reject if the plan is not bounded, replayable, or clearly justified.",
+    "Return exactly one JSON object with this shape:",
+    JSON.stringify(LEADER_OUTPUT_SCHEMA, null, 2),
+    "Guidance:",
+    '- decision must be "approve" or "reject".',
+    "- rationale must be concise and grounded in the packet.",
+    "- follow_up should list concrete next evidence gaps or execution cautions.",
+    "Approval packet JSON:",
+    JSON.stringify(approvalPacket, null, 2)
+  ].join("\n\n");
+}
+
 async function runCodexJson(input) {
   const tempDir = await mkdtemp(join(tmpdir(), "aisa-codex-judge-"));
   const schemaFile = join(tempDir, "schema.json");
   const lastMessageFile = join(tempDir, "last-message.json");
 
   try {
-    await writeFile(schemaFile, JSON.stringify(OUTPUT_SCHEMA), "utf8");
+    await writeFile(schemaFile, JSON.stringify(input.outputSchema), "utf8");
     const args = [
       "exec",
       "--json",
@@ -189,6 +259,9 @@ async function runCodexJson(input) {
       lastMessageFile,
       "-"
     ];
+    if (input.reasoningEffort) {
+      args.splice(8, 0, "-c", `model_reasoning_effort=${JSON.stringify(input.reasoningEffort)}`);
+    }
     if (input.model) {
       args.splice(2, 0, "--model", input.model);
     }
@@ -360,6 +433,18 @@ function normalizeStructuredJudgment(value) {
     suggested_attempt_type: suggestedAttemptType,
     rationale,
     missing_evidence: missingEvidence
+  };
+}
+
+function normalizeStructuredDecision(value) {
+  if (!isRecord(value)) {
+    throw new Error("structured_decision must be a JSON object.");
+  }
+
+  return {
+    decision: readEnum(value.decision, "decision", ["approve", "reject"]),
+    rationale: readString(value.rationale, "rationale"),
+    follow_up: readStringArray(value.follow_up, "follow_up")
   };
 }
 

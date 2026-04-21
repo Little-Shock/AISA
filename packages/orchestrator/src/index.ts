@@ -192,6 +192,11 @@ import {
   getEffectiveRunWorkspaceRoot
 } from "./run-workspace.js";
 import { createRunScopedWorkspacePolicy } from "./run-scope-policy.js";
+import {
+  createCliExecutionPlanLeaderAdapter,
+  type ExecutionPlanLeaderAdapter,
+  type ExecutionPlanLeaderPacket
+} from "./execution-plan-leader.js";
 
 export type RunRecoveryPath =
   | "first_attempt"
@@ -379,7 +384,7 @@ export interface OrchestratorOptions {
   attemptHeartbeatIntervalMs?: number;
   attemptHeartbeatStaleMs?: number;
   maxConcurrentAttempts?: number;
-  executionApprovalMode?: "auto" | "manual";
+  executionApprovalMode?: "auto" | "human" | "leader";
   waitingHumanAutoResumeMs?: number;
   maxAutomaticResumeCycles?: number;
   providerRateLimitAutoResumeMs?: number;
@@ -387,6 +392,7 @@ export interface OrchestratorOptions {
   workerStallAutoResumeMs?: number;
   runtimeSourceDriftAutoResumeMs?: number;
   runWorkspaceScopePolicy?: RunWorkspaceScopePolicy;
+  executionPlanLeader?: ExecutionPlanLeaderAdapter | null;
   reviewers?: AttemptReviewerAdapter[];
   reviewerConfigs?: AttemptReviewerConfig[];
   reviewerConfigEnv?: NodeJS.ProcessEnv;
@@ -422,9 +428,17 @@ export type RunWorkerEffortSlotView = {
 
 function readExecutionApprovalModeEnv(
   value: string | undefined
-): "auto" | "manual" {
+): "auto" | "human" | "leader" {
   const normalized = String(value ?? "").trim().toLowerCase();
-  return normalized === "manual" ? "manual" : "auto";
+  if (normalized === "leader") {
+    return "leader";
+  }
+
+  if (normalized === "manual" || normalized === "human") {
+    return "human";
+  }
+
+  return "auto";
 }
 
 export type RunWorkerEffortView = {
@@ -1248,7 +1262,8 @@ export class Orchestrator {
   private readonly attemptHeartbeatIntervalMs: number;
   private readonly attemptHeartbeatStaleMs: number;
   private readonly maxConcurrentAttempts: number;
-  private readonly executionApprovalMode: "auto" | "manual";
+  private readonly executionApprovalMode: "auto" | "human" | "leader";
+  private readonly executionPlanLeader: ExecutionPlanLeaderAdapter | null;
   private readonly runDispatchLeaseStaleMs: number;
   private readonly waitingHumanAutoResumeMs: number;
   private readonly maxAutomaticResumeCycles: number;
@@ -1285,6 +1300,11 @@ export class Orchestrator {
     this.executionApprovalMode =
       options.executionApprovalMode ??
       readExecutionApprovalModeEnv(process.env.AISA_EXECUTION_APPROVAL_MODE);
+    this.executionPlanLeader =
+      options.executionPlanLeader ??
+      (this.executionApprovalMode === "leader"
+        ? createCliExecutionPlanLeaderAdapter()
+        : null);
     this.runDispatchLeaseStaleMs = readPositiveIntegerEnv(
       "AISA_RUN_DISPATCH_LEASE_STALE_MS",
       60_000
@@ -2076,9 +2096,13 @@ export class Orchestrator {
   private requiresExecutionApproval(
     attemptType: Attempt["attempt_type"]
   ): boolean {
-    return (
-      attemptType === "execution" && this.executionApprovalMode === "manual"
-    );
+    return attemptType === "execution" && this.executionApprovalMode !== "auto";
+  }
+
+  private usesLeaderExecutionApproval(
+    attemptType: Attempt["attempt_type"]
+  ): boolean {
+    return attemptType === "execution" && this.executionApprovalMode === "leader";
   }
 
   private async persistRunPolicyReadyForDispatch(input: {
@@ -2340,6 +2364,255 @@ export class Orchestrator {
     }
 
     await refreshRunOperatorSurface(this.workspacePaths, input.runId);
+  }
+
+  private buildExecutionPlanLeaderPacket(input: {
+    run: Run;
+    current: CurrentDecision;
+    proposal: RunPolicyProposal;
+  }): ExecutionPlanLeaderPacket {
+    return {
+      run_id: input.run.id,
+      run_title: input.run.title,
+      run_description: input.run.description,
+      current_summary: input.current.summary,
+      current_blocking_reason: input.current.blocking_reason,
+      proposed_signature: input.proposal.signature,
+      proposed_attempt_type: "execution",
+      proposed_objective: input.proposal.objective,
+      proposed_success_criteria: input.proposal.successCriteria,
+      permission_profile: "workspace_write",
+      hook_policy: "enforce_runtime_contract",
+      danger_mode: input.proposal.dangerMode,
+      verifier_kit: input.proposal.verifierKit,
+      verification_commands: input.proposal.verificationCommands,
+      source_attempt_id: input.proposal.sourceAttemptId,
+      source_ref: this.buildRunPolicySourceRef(
+        input.run.id,
+        input.proposal.sourceAttemptId
+      )
+    };
+  }
+
+  private async persistRunPolicyLeaderApproved(input: {
+    runId: string;
+    proposal: RunPolicyProposal;
+    actor: string;
+    rationale: string;
+  }): Promise<void> {
+    const existingPolicy = await getRunPolicyRuntime(this.workspacePaths, input.runId);
+    const now = new Date().toISOString();
+    const sourceRef = this.buildRunPolicySourceRef(
+      input.runId,
+      input.proposal.sourceAttemptId
+    );
+    const nextPolicy = existingPolicy
+      ? updateRunPolicyRuntime(existingPolicy, {
+          stage: "execution",
+          approval_status: "approved",
+          approval_required: true,
+          proposed_signature: input.proposal.signature,
+          proposed_attempt_type: input.proposal.attemptType,
+          proposed_objective: input.proposal.objective,
+          proposed_success_criteria: input.proposal.successCriteria,
+          permission_profile: input.proposal.permissionProfile,
+          hook_policy: input.proposal.hookPolicy,
+          danger_mode: input.proposal.dangerMode,
+          blocking_reason: null,
+          last_decision: "approved",
+          approval_requested_at:
+            existingPolicy.proposed_signature === input.proposal.signature
+              ? existingPolicy.approval_requested_at ?? now
+              : now,
+          approval_decided_at: now,
+          approval_actor: input.actor,
+          approval_note: input.rationale,
+          source_attempt_id: input.proposal.sourceAttemptId,
+          source_ref: sourceRef
+        })
+      : createRunPolicyRuntime({
+          run_id: input.runId,
+          stage: "execution",
+          approval_status: "approved",
+          approval_required: true,
+          proposed_signature: input.proposal.signature,
+          proposed_attempt_type: input.proposal.attemptType,
+          proposed_objective: input.proposal.objective,
+          proposed_success_criteria: input.proposal.successCriteria,
+          permission_profile: input.proposal.permissionProfile,
+          hook_policy: input.proposal.hookPolicy,
+          danger_mode: input.proposal.dangerMode,
+          last_decision: "approved",
+          approval_requested_at: now,
+          approval_decided_at: now,
+          approval_actor: input.actor,
+          approval_note: input.rationale,
+          source_attempt_id: input.proposal.sourceAttemptId,
+          source_ref: sourceRef
+        });
+
+    await saveRunPolicyRuntime(this.workspacePaths, nextPolicy);
+    await appendRunJournal(
+      this.workspacePaths,
+      createRunJournalEntry({
+        run_id: input.runId,
+        attempt_id: input.proposal.sourceAttemptId,
+        type: "run.policy.approved",
+        payload: {
+          actor: input.actor,
+          note: input.rationale,
+          proposed_signature: input.proposal.signature,
+          permission_profile: input.proposal.permissionProfile,
+          hook_policy: input.proposal.hookPolicy,
+          danger_mode: input.proposal.dangerMode,
+          source_ref: sourceRef
+        }
+      })
+    );
+  }
+
+  private async persistRunPolicyLeaderRejected(input: {
+    runId: string;
+    current: CurrentDecision;
+    proposal: RunPolicyProposal;
+    actor: string;
+    rationale: string;
+  }): Promise<void> {
+    const existingPolicy = await getRunPolicyRuntime(this.workspacePaths, input.runId);
+    const now = new Date().toISOString();
+    const sourceRef = this.buildRunPolicySourceRef(
+      input.runId,
+      input.proposal.sourceAttemptId
+    );
+    const nextPolicy = existingPolicy
+      ? updateRunPolicyRuntime(existingPolicy, {
+          stage: "planning",
+          approval_status: "not_required",
+          approval_required: false,
+          proposed_signature: null,
+          proposed_attempt_type: null,
+          proposed_objective: null,
+          proposed_success_criteria: [],
+          permission_profile: "read_only",
+          hook_policy: "not_required",
+          danger_mode: "forbid",
+          blocking_reason: input.rationale,
+          last_decision: "leader_rejected_replan",
+          approval_requested_at: now,
+          approval_decided_at: now,
+          approval_actor: input.actor,
+          approval_note: input.rationale,
+          source_attempt_id: input.proposal.sourceAttemptId,
+          source_ref: sourceRef
+        })
+      : createRunPolicyRuntime({
+          run_id: input.runId,
+          stage: "planning",
+          approval_status: "not_required",
+          approval_required: false,
+          blocking_reason: input.rationale,
+          last_decision: "leader_rejected_replan",
+          approval_requested_at: now,
+          approval_decided_at: now,
+          approval_actor: input.actor,
+          approval_note: input.rationale,
+          source_attempt_id: input.proposal.sourceAttemptId,
+          source_ref: sourceRef
+        });
+
+    await saveRunPolicyRuntime(this.workspacePaths, nextPolicy);
+    await saveCurrentDecision(
+      this.workspacePaths,
+      updateCurrentDecision(input.current, {
+        run_status: "running",
+        recommended_next_action: "continue_research",
+        recommended_attempt_type: "research",
+        summary:
+          "Leader lane rejected the execution plan. Loop will gather more evidence before another execution proposal.",
+        blocking_reason: input.rationale,
+        waiting_for_human: false
+      })
+    );
+    await appendRunJournal(
+      this.workspacePaths,
+      createRunJournalEntry({
+        run_id: input.runId,
+        attempt_id: input.proposal.sourceAttemptId,
+        type: "run.policy.rejected",
+        payload: {
+          actor: input.actor,
+          note: input.rationale,
+          proposed_signature: input.proposal.signature,
+          permission_profile: input.proposal.permissionProfile,
+          hook_policy: input.proposal.hookPolicy,
+          danger_mode: input.proposal.dangerMode,
+          source_ref: sourceRef
+        }
+      })
+    );
+    await refreshRunOperatorSurface(this.workspacePaths, input.runId);
+  }
+
+  private async resolveExecutionPlanLeaderDecision(input: {
+    run: Run;
+    runId: string;
+    current: CurrentDecision;
+    proposal: RunPolicyProposal;
+  }): Promise<"approved" | "rejected" | "failed"> {
+    if (!this.executionPlanLeader) {
+      await this.persistRunPolicyDispatchBlocked({
+        runId: input.runId,
+        current: input.current,
+        policy: await getRunPolicyRuntime(this.workspacePaths, input.runId),
+        proposal: input.proposal,
+        message:
+          "Execution plan cannot dispatch because leader approval mode is enabled but no leader lane is configured.",
+        reason: "missing_leader_lane"
+      });
+      return "failed";
+    }
+
+    try {
+      const leaderDecision = await this.executionPlanLeader.reviewExecutionPlan({
+        approvalPacket: this.buildExecutionPlanLeaderPacket({
+          run: input.run,
+          current: input.current,
+          proposal: input.proposal
+        })
+      });
+
+      if (leaderDecision.structured_decision.decision === "approve") {
+        await this.persistRunPolicyLeaderApproved({
+          runId: input.runId,
+          proposal: input.proposal,
+          actor: this.executionPlanLeader.actor,
+          rationale: leaderDecision.structured_decision.rationale
+        });
+        return "approved";
+      }
+
+      await this.persistRunPolicyLeaderRejected({
+        runId: input.runId,
+        current: input.current,
+        proposal: input.proposal,
+        actor: this.executionPlanLeader.actor,
+        rationale:
+          leaderDecision.structured_decision.follow_up[0] ??
+          leaderDecision.structured_decision.rationale
+      });
+      return "rejected";
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      await this.persistRunPolicyDispatchBlocked({
+        runId: input.runId,
+        current: input.current,
+        policy: await getRunPolicyRuntime(this.workspacePaths, input.runId),
+        proposal: input.proposal,
+        message: `Execution plan cannot dispatch because leader review failed: ${reason}`,
+        reason: "leader_review_failed"
+      });
+      return "failed";
+    }
   }
 
   private async persistRunPolicyDangerousRuleBlocked(input: {
@@ -2901,6 +3174,22 @@ export class Orchestrator {
             proposal
           };
         }
+        if (this.usesLeaderExecutionApproval(attemptType)) {
+          const leaderDecision = await this.resolveExecutionPlanLeaderDecision({
+            run,
+            runId,
+            current,
+            proposal
+          });
+          return leaderDecision === "approved"
+            ? {
+                attempt,
+                contract,
+                proposal
+              }
+            : null;
+        }
+
         await this.persistRunPolicyApprovalRequested({
           runId,
           current,
@@ -2930,6 +3219,34 @@ export class Orchestrator {
           contract,
           proposal
         };
+      }
+
+      if (this.usesLeaderExecutionApproval(attemptType)) {
+        if (
+          approvedPolicy.approval_status === "approved" &&
+          approvedPolicy.approval_required === true &&
+          approvedPolicy.proposed_signature === proposal.signature
+        ) {
+          return {
+            attempt,
+            contract,
+            proposal
+          };
+        }
+
+        const leaderDecision = await this.resolveExecutionPlanLeaderDecision({
+          run,
+          runId,
+          current,
+          proposal
+        });
+        return leaderDecision === "approved"
+          ? {
+              attempt,
+              contract,
+              proposal
+            }
+          : null;
       }
 
       if (

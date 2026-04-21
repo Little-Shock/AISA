@@ -19,6 +19,11 @@ import {
   createRunWorkspaceScopePolicy,
   Orchestrator
 } from "../packages/orchestrator/src/index.ts";
+import type {
+  ExecutionPlanLeaderAdapter,
+  ExecutionPlanLeaderDecision,
+  ExecutionPlanLeaderPacket
+} from "../packages/orchestrator/src/execution-plan-leader.ts";
 import {
   appendRunJournal,
   ensureWorkspace,
@@ -341,7 +346,8 @@ async function createScenarioOrchestrator(input: {
   runtimeDataRoot: string;
   workspaceRoot: string;
   workspacePaths: ReturnType<typeof resolveWorkspacePaths>;
-  executionApprovalMode?: "auto" | "manual";
+  executionApprovalMode?: "auto" | "human" | "leader";
+  executionPlanLeader?: ExecutionPlanLeaderAdapter | null;
 }): Promise<Orchestrator> {
   const runWorkspaceScopePolicy = await createRunWorkspaceScopePolicy({
     runtimeRoot: input.runtimeDataRoot,
@@ -356,11 +362,44 @@ async function createScenarioOrchestrator(input: {
     {
       runWorkspaceScopePolicy,
       executionApprovalMode: input.executionApprovalMode,
+      executionPlanLeader: input.executionPlanLeader,
       waitingHumanAutoResumeMs: 60_000,
       attemptHeartbeatIntervalMs: 20,
       attemptHeartbeatStaleMs: 200
     }
   );
+}
+
+function createStaticLeaderAdapter(input: {
+  actor: string;
+  decision: ExecutionPlanLeaderDecision;
+  packets?: ExecutionPlanLeaderPacket[];
+}): ExecutionPlanLeaderAdapter {
+  return {
+    actor: input.actor,
+    async reviewExecutionPlan({ approvalPacket }) {
+      input.packets?.push(approvalPacket);
+      return {
+        raw_output: JSON.stringify(
+          {
+            structured_decision: input.decision
+          },
+          null,
+          2
+        ),
+        structured_decision: input.decision
+      };
+    }
+  };
+}
+
+function createFailingLeaderAdapter(actor = "leader-fixture"): ExecutionPlanLeaderAdapter {
+  return {
+    actor,
+    async reviewExecutionPlan() {
+      throw new Error("leader lane crashed");
+    }
+  };
 }
 
 async function waitForPendingApproval(
@@ -422,6 +461,129 @@ async function verifyExecutionAutoDispatchesByDefault(): Promise<void> {
   );
 }
 
+async function verifyLeaderApprovalDispatchesWithoutHumanStop(): Promise<void> {
+  const packets: ExecutionPlanLeaderPacket[] = [];
+  const { runtimeDataRoot, workspaceRoot, workspacePaths, run } =
+    await bootstrapExecutionApprovalRun("leader-approval-dispatch");
+  const orchestrator = await createScenarioOrchestrator({
+    runtimeDataRoot,
+    workspaceRoot,
+    workspacePaths,
+    executionApprovalMode: "leader",
+    executionPlanLeader: createStaticLeaderAdapter({
+      actor: "leader-fixture",
+      packets,
+      decision: {
+        decision: "approve",
+        rationale: "Replay plan is bounded and execution is ready.",
+        follow_up: ["Keep the replay contract unchanged."]
+      }
+    })
+  });
+
+  await driveOrchestratorUntil({
+    orchestrator,
+    predicate: async () =>
+      (await listAttempts(workspacePaths, run.id)).some(
+        (attempt) => attempt.attempt_type === "execution" && attempt.status === "completed"
+      )
+  });
+
+  const journal = await listRunJournal(workspacePaths, run.id);
+  assert.equal(packets.length > 0, true, "leader lane should receive an approval packet");
+  assert.equal(packets[0]?.proposed_attempt_type, "execution");
+  assert.equal(packets[0]?.permission_profile, "workspace_write");
+  assert.ok(
+    journal.some(
+      (entry) =>
+        entry.type === "run.policy.approved" && entry.payload.actor === "leader-fixture"
+    ),
+    "leader lane approval should be recorded"
+  );
+  assert.ok(
+    !journal.some((entry) => entry.type === "run.policy.approval_requested"),
+    "leader lane should not fall back to human approval"
+  );
+}
+
+async function verifyLeaderRejectionAutoReplansResearch(): Promise<void> {
+  const { runtimeDataRoot, workspaceRoot, workspacePaths, run } =
+    await bootstrapExecutionApprovalRun("leader-rejection-replan");
+  const orchestrator = await createScenarioOrchestrator({
+    runtimeDataRoot,
+    workspaceRoot,
+    workspacePaths,
+    executionApprovalMode: "leader",
+    executionPlanLeader: createStaticLeaderAdapter({
+      actor: "leader-fixture",
+      decision: {
+        decision: "reject",
+        rationale: "Need a smaller execution step.",
+        follow_up: ["Collect more repository evidence before execution."]
+      }
+    })
+  });
+
+  await driveOrchestratorUntil({
+    orchestrator,
+    predicate: async () =>
+      (await listAttempts(workspacePaths, run.id)).filter(
+        (attempt) => attempt.attempt_type === "research" && attempt.status === "completed"
+      ).length >= 2
+  });
+
+  const [attempts, journal] = await Promise.all([
+    listAttempts(workspacePaths, run.id),
+    listRunJournal(workspacePaths, run.id)
+  ]);
+  const followupResearchAttempts = attempts.filter(
+    (attempt) => attempt.attempt_type === "research"
+  );
+  assert.equal(
+    followupResearchAttempts.length >= 2,
+    true,
+    "leader rejection should trigger a new research loop instead of stalling"
+  );
+  assert.ok(
+    journal.some(
+      (entry) =>
+        entry.type === "run.policy.rejected" && entry.payload.actor === "leader-fixture"
+    ),
+    "leader rejection should be recorded"
+  );
+  assert.ok(
+    !journal.some((entry) => entry.type === "run.policy.approval_requested"),
+    "leader rejection should stay off the human approval lane"
+  );
+}
+
+async function verifyLeaderReviewFailureFailsClosed(): Promise<void> {
+  const { runtimeDataRoot, workspaceRoot, workspacePaths, run } =
+    await bootstrapExecutionApprovalRun("leader-review-failure");
+  const orchestrator = await createScenarioOrchestrator({
+    runtimeDataRoot,
+    workspaceRoot,
+    workspacePaths,
+    executionApprovalMode: "leader",
+    executionPlanLeader: createFailingLeaderAdapter()
+  });
+
+  await driveOrchestratorUntil({
+    orchestrator,
+    predicate: async () => {
+      const current = await getCurrentDecision(workspacePaths, run.id);
+      return current?.waiting_for_human === true;
+    }
+  });
+
+  const [attempts, current] = await Promise.all([
+    listAttempts(workspacePaths, run.id),
+    getCurrentDecision(workspacePaths, run.id)
+  ]);
+  assert.equal(attempts.length, 1, "broken leader lane must not auto-dispatch execution");
+  assert.match(current?.blocking_reason ?? "", /leader review failed/i);
+}
+
 async function verifyExecutionPlanRequiresApproval(): Promise<void> {
   const { runtimeDataRoot, workspaceRoot, workspacePaths, run } =
     await bootstrapExecutionApprovalRun("pending-approval");
@@ -429,7 +591,7 @@ async function verifyExecutionPlanRequiresApproval(): Promise<void> {
     runtimeDataRoot,
     workspaceRoot,
     workspacePaths,
-    executionApprovalMode: "manual"
+    executionApprovalMode: "human"
   });
   await waitForPendingApproval(orchestrator, workspacePaths, run.id);
 
@@ -460,7 +622,7 @@ async function verifyLaunchBypassIsBlockedWhileApprovalPending(): Promise<void> 
     runtimeDataRoot,
     workspaceRoot,
     workspacePaths,
-    executionApprovalMode: "manual"
+    executionApprovalMode: "human"
   });
   await waitForPendingApproval(orchestrator, workspacePaths, run.id);
 
@@ -487,7 +649,7 @@ async function verifyApproveRouteUnlocksExecution(): Promise<void> {
     runtimeDataRoot,
     workspaceRoot,
     workspacePaths,
-    executionApprovalMode: "manual"
+    executionApprovalMode: "human"
   });
   await waitForPendingApproval(orchestrator, workspacePaths, run.id);
 
@@ -530,7 +692,7 @@ async function verifyApproveRouteUnlocksExecution(): Promise<void> {
     runtimeDataRoot,
     workspaceRoot,
     workspacePaths,
-    executionApprovalMode: "manual"
+    executionApprovalMode: "human"
   });
   await driveOrchestratorUntil({
     orchestrator: resumedOrchestrator,
@@ -569,7 +731,7 @@ async function verifyRejectRouteForcesResearchReplan(): Promise<void> {
     runtimeDataRoot,
     workspaceRoot,
     workspacePaths,
-    executionApprovalMode: "manual"
+    executionApprovalMode: "human"
   });
   await waitForPendingApproval(orchestrator, workspacePaths, run.id);
 
@@ -628,7 +790,7 @@ async function verifyApproveAndRejectRequirePendingApproval(): Promise<void> {
     runtimeDataRoot,
     workspaceRoot,
     workspacePaths,
-    executionApprovalMode: "manual"
+    executionApprovalMode: "human"
   });
   await waitForPendingApproval(orchestrator, workspacePaths, run.id);
 
@@ -667,7 +829,7 @@ async function verifyApproveAndRejectRequirePendingApproval(): Promise<void> {
     runtimeDataRoot: secondScenario.runtimeDataRoot,
     workspaceRoot: secondScenario.workspaceRoot,
     workspacePaths: secondScenario.workspacePaths,
-    executionApprovalMode: "manual"
+    executionApprovalMode: "human"
   });
   await waitForPendingApproval(
     secondOrchestrator,
@@ -764,7 +926,7 @@ async function verifyReplaySafeTmpCleanupCanEnterApproval(): Promise<void> {
     runtimeDataRoot,
     workspaceRoot,
     workspacePaths,
-    executionApprovalMode: "manual"
+    executionApprovalMode: "human"
   });
   await waitForPendingApproval(orchestrator, workspacePaths, run.id);
 
@@ -841,7 +1003,7 @@ async function verifyKillswitchRoutesGateLaunch(): Promise<void> {
     runtimeDataRoot,
     workspaceRoot,
     workspacePaths,
-    executionApprovalMode: "manual"
+    executionApprovalMode: "human"
   });
   await waitForPendingApproval(orchestrator, workspacePaths, run.id);
 
@@ -1053,7 +1215,7 @@ async function verifyCorruptPolicyFailsClosed(): Promise<void> {
     runtimeDataRoot,
     workspaceRoot,
     workspacePaths,
-    executionApprovalMode: "manual"
+    executionApprovalMode: "human"
   });
   await waitForPendingApproval(orchestrator, workspacePaths, run.id);
 
@@ -1158,6 +1320,12 @@ async function main(): Promise<void> {
   try {
     const cases: Array<[string, () => Promise<void>]> = [
       ["execution_auto_dispatches_by_default", verifyExecutionAutoDispatchesByDefault],
+      [
+        "leader_approval_dispatches_without_human_stop",
+        verifyLeaderApprovalDispatchesWithoutHumanStop
+      ],
+      ["leader_rejection_auto_replans_research", verifyLeaderRejectionAutoReplansResearch],
+      ["leader_review_failure_fails_closed", verifyLeaderReviewFailureFailsClosed],
       ["execution_requires_approval", verifyExecutionPlanRequiresApproval],
       [
         "pending_approval_blocks_launch_bypass",
