@@ -102,14 +102,12 @@ export async function driveRun(input: {
     (await createRunWorkspaceScopePolicy({
       runtimeRoot: runtimeLayout.runtimeRepoRoot,
       allowedRoots: buildRuntimeWorkspaceScopeRoots(runtimeLayout, [
-        ...parseRunWorkspaceScopeRoots(process.env.AISA_ALLOWED_PROJECT_ROOTS),
         ...parseRunWorkspaceScopeRoots(process.env.AISA_ALLOWED_WORKSPACE_ROOTS)
       ]),
       managedWorkspaceRoot: runtimeLayout.managedWorkspaceRoot
     }));
   await assertRuntimeDataRootCompatible({
-    layout: runtimeLayout,
-    runWorkspaceScopePolicy
+    layout: runtimeLayout
   });
   const orchestrator = new Orchestrator(
     workspacePaths,

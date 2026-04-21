@@ -153,7 +153,8 @@ async function runSuite(): Promise<ExternalRepoMatrixReport> {
   const app = await buildServer({
     workspaceRoot: rootDir,
     startOrchestrator: false,
-    allowedRunWorkspaceRoots: [rootDir, projectScopeDir]
+    allowedRunWorkspaceRoots: [rootDir, projectScopeDir],
+    allowedProjectRoots: [projectScopeDir]
   });
 
   const results: ExternalRepoMatrixCaseResult[] = [];

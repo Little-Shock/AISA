@@ -1,4 +1,5 @@
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { realpath } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import cors from "@fastify/cors";
 import { config as loadEnv } from "dotenv";
@@ -30,7 +31,6 @@ import { ContextManager } from "@autoresearch/context-manager";
 import { appendEvent, listEvents } from "@autoresearch/event-log";
 import {
   assessRunHealth,
-  buildRuntimeWorkspaceScopeRoots,
   buildPersistedRunWorkspaceScope,
   createRunScopedWorkspacePolicy,
   captureAttachedProjectCapabilitySnapshot,
@@ -136,14 +136,13 @@ const currentDir = dirname(fileURLToPath(import.meta.url));
 const repositoryRoot = join(currentDir, "..", "..", "..");
 loadEnv({ path: join(repositoryRoot, ".env") });
 
-function resolveAllowedProjectRoots(
+function resolveProjectAttachRoots(
   explicitRoots: string[] | undefined,
   env: NodeJS.ProcessEnv
 ): string[] {
   return [
     ...(explicitRoots ?? []),
-    ...parseRunWorkspaceScopeRoots(env.AISA_ALLOWED_PROJECT_ROOTS),
-    ...parseRunWorkspaceScopeRoots(env.AISA_ALLOWED_WORKSPACE_ROOTS)
+    ...parseRunWorkspaceScopeRoots(env.AISA_ALLOWED_PROJECT_ROOTS)
   ];
 }
 
@@ -1007,21 +1006,18 @@ export async function buildServer(
     logger: true
   });
   const runHealthStaleMs = readPositiveIntegerEnv("AISA_RUN_HEALTH_STALE_MS", 180_000);
-  const allowedProjectRoots = resolveAllowedProjectRoots(
+  const projectAttachRoots = resolveProjectAttachRoots(
     options.allowedProjectRoots,
     process.env
   );
+  const legacyRunWorkspaceRoots = options.allowedRunWorkspaceRoots ?? [];
   const runWorkspaceScopePolicy = await createRunWorkspaceScopePolicy({
     runtimeRoot: runtimeLayout.runtimeRepoRoot,
-    allowedRoots: buildRuntimeWorkspaceScopeRoots(
-      runtimeLayout,
-      [...(options.allowedRunWorkspaceRoots ?? []), ...allowedProjectRoots]
-    ),
+    allowedRoots: [runtimeLayout.runtimeRepoRoot, ...legacyRunWorkspaceRoots],
     managedWorkspaceRoot: runtimeLayout.managedWorkspaceRoot
   });
   await assertRuntimeDataRootCompatible({
-    layout: runtimeLayout,
-    runWorkspaceScopePolicy
+    layout: runtimeLayout
   });
   let orchestratorStarted = false;
   let restartPending = false;
@@ -1098,6 +1094,109 @@ export async function buildServer(
   };
 
   await ensureWorkspace(workspacePaths);
+  const normalizeWorkspaceRoot = async (root: string): Promise<string> => {
+    const resolvedRoot = resolve(root);
+    try {
+      return await realpath(resolvedRoot);
+    } catch {
+      return resolvedRoot;
+    }
+  };
+  const sortWorkspaceRoots = (roots: string[]): string[] =>
+    [...new Set(roots)].sort(
+      (left, right) => right.length - left.length || left.localeCompare(right)
+    );
+  const buildWorkspaceSelectionPolicy = (roots: string[]) => ({
+    allowedRoots: sortWorkspaceRoots(roots),
+    managedWorkspaceRoot: runWorkspaceScopePolicy.managedWorkspaceRoot
+  });
+  const buildAttachedProjectSelectionPolicy = (
+    project: Pick<AttachedProjectProfile, "workspace_root">
+  ) =>
+    buildWorkspaceSelectionPolicy([project.workspace_root]);
+  const tryLockWorkspaceRootWithPolicy = async (
+    workspaceRoot: string,
+    policy: ReturnType<typeof buildWorkspaceSelectionPolicy>
+  ) => {
+    try {
+      return await lockRunWorkspaceRoot(workspaceRoot, policy);
+    } catch (error) {
+      if (
+        error instanceof RunWorkspaceScopeError &&
+        error.code === "workspace_outside_allowed_scope"
+      ) {
+        return null;
+      }
+
+      throw error;
+    }
+  };
+  const devWorkspaceSelectionPolicy = buildWorkspaceSelectionPolicy([
+    runtimeLayout.devRepoRoot
+  ]);
+  const projectAttachSelectionPolicy = buildWorkspaceSelectionPolicy(
+    await Promise.all(projectAttachRoots.map((root) => normalizeWorkspaceRoot(root)))
+  );
+  const legacyRunWorkspaceSelectionPolicy = buildWorkspaceSelectionPolicy(
+    await Promise.all(
+      legacyRunWorkspaceRoots.map((root) => normalizeWorkspaceRoot(root))
+    )
+  );
+  const readAttachedProjectWorkspaceRoots = async (): Promise<string[]> => {
+    const projects = await listAttachedProjectProfiles(workspacePaths);
+    return sortWorkspaceRoots(projects.map((project) => project.workspace_root));
+  };
+  let attachedProjectRoots = await readAttachedProjectWorkspaceRoots();
+  const refreshAttachedProjectWorkspaceRoots = async (): Promise<string[]> => {
+    attachedProjectRoots = await readAttachedProjectWorkspaceRoots();
+    return attachedProjectRoots;
+  };
+  const buildRunCreationSelectionPolicy = () =>
+    buildWorkspaceSelectionPolicy([
+      runtimeLayout.devRepoRoot,
+      ...attachedProjectRoots,
+      ...legacyRunWorkspaceSelectionPolicy.allowedRoots
+    ]);
+  const lockRunCreationWorkspaceRootOrThrowDetailed = async (
+    workspaceRoot: string
+  ) => {
+    const lockedDevWorkspace = await tryLockWorkspaceRootWithPolicy(
+      workspaceRoot,
+      devWorkspaceSelectionPolicy
+    );
+    if (lockedDevWorkspace) {
+      return lockedDevWorkspace;
+    }
+
+    const attachedProjects = (await listAttachedProjectProfiles(workspacePaths)).sort(
+      (left, right) =>
+        right.workspace_root.length - left.workspace_root.length ||
+        left.workspace_root.localeCompare(right.workspace_root)
+    );
+
+    for (const project of attachedProjects) {
+      const lockedProjectWorkspace = await tryLockWorkspaceRootWithPolicy(
+        workspaceRoot,
+        buildAttachedProjectSelectionPolicy(project)
+      );
+      if (lockedProjectWorkspace) {
+        return lockedProjectWorkspace;
+      }
+    }
+
+    const lockedLegacyWorkspace = await tryLockWorkspaceRootWithPolicy(
+      workspaceRoot,
+      legacyRunWorkspaceSelectionPolicy
+    );
+    if (lockedLegacyWorkspace) {
+      return lockedLegacyWorkspace;
+    }
+
+    return await lockRunWorkspaceRoot(
+      workspaceRoot,
+      buildRunCreationSelectionPolicy()
+    );
+  };
   await app.register(cors, {
     origin: true
   });
@@ -1527,7 +1626,7 @@ export async function buildServer(
   ) => {
     const capabilitySnapshot = await captureAttachedProjectCapabilitySnapshot({
       project,
-      policy: runWorkspaceScopePolicy,
+      policy: buildAttachedProjectSelectionPolicy(project),
       executionAdapter: {
         type: adapter.type,
         command: adapterConfig.command,
@@ -1654,7 +1753,7 @@ export async function buildServer(
       const input = AttachProjectInputSchema.parse(request.body);
       const inspection = await inspectAttachedProjectWorkspace({
         workspaceRoot: input.workspace_root,
-        policy: runWorkspaceScopePolicy,
+        policy: projectAttachSelectionPolicy,
         title: input.title ?? null
       });
       const existingProject = await getAttachedProjectProfile(
@@ -1667,6 +1766,7 @@ export async function buildServer(
       }
 
       await saveAttachedProjectProfile(workspacePaths, inspection.project);
+      await refreshAttachedProjectWorkspaceRoots();
       await saveAttachedProjectBaselineSnapshot(
         workspacePaths,
         inspection.baselineSnapshot
@@ -1729,8 +1829,9 @@ export async function buildServer(
         ownerId: input.owner_id ?? null,
         taskPresetTitle: executionDefaults.task_preset.title
       });
-      const lockedWorkspace = await lockWorkspaceRootOrThrowDetailed(
-        template.workspace_root
+      const lockedWorkspace = await lockRunWorkspaceRoot(
+        template.workspace_root,
+        buildAttachedProjectSelectionPolicy(project)
       );
       const run = createRun({
         ...template,
@@ -1851,7 +1952,9 @@ export async function buildServer(
         runtime_data_root: runtimeLayout.runtimeDataRoot,
         managed_workspace_root: runtimeLayout.managedWorkspaceRoot
       },
-      allowed_project_roots: allowedProjectRoots,
+      allowed_project_roots: projectAttachSelectionPolicy.allowedRoots,
+      project_attach_roots: projectAttachSelectionPolicy.allowedRoots,
+      attached_project_roots: attachedProjectRoots,
       allowed_run_workspace_roots: runWorkspaceScopePolicy.allowedRoots,
       run_health_stale_ms: runHealthStaleMs,
       run_count: runSummaries.length,
@@ -1956,7 +2059,7 @@ export async function buildServer(
   app.post("/runs", async (request, reply) => {
     try {
       const input = CreateRunInputSchema.parse(request.body);
-      const lockedWorkspace = await lockWorkspaceRootOrThrowDetailed(
+      const lockedWorkspace = await lockRunCreationWorkspaceRootOrThrowDetailed(
         input.workspace_root ?? defaultRunWorkspaceRoot
       );
       const run = createRun({
@@ -2035,8 +2138,9 @@ export async function buildServer(
     });
     let run;
     try {
-      const lockedWorkspace = await lockWorkspaceRootOrThrowDetailed(
-        template.runInput.workspace_root ?? defaultRunWorkspaceRoot
+      const lockedWorkspace = await lockRunWorkspaceRoot(
+        template.runInput.workspace_root ?? defaultRunWorkspaceRoot,
+        devWorkspaceSelectionPolicy
       );
       run = createRun({
         ...template.runInput,
@@ -2222,7 +2326,17 @@ export async function buildServer(
 
     try {
       const run = await getRun(workspacePaths, runId);
-      await lockWorkspaceRootOrThrow(run.workspace_root);
+      if (run.workspace_scope) {
+        await lockRunWorkspaceRoot(
+          run.workspace_root,
+          createRunScopedWorkspacePolicy({
+            run,
+            managedWorkspaceRoot: runWorkspaceScopePolicy.managedWorkspaceRoot
+          })
+        );
+      } else {
+        await lockRunCreationWorkspaceRootOrThrowDetailed(run.workspace_root);
+      }
       const attempts = await listAttempts(workspacePaths, runId);
       const current =
         (await getCurrentDecision(workspacePaths, runId)) ??
@@ -3478,15 +3592,6 @@ export async function buildServer(
       return reply.code(404).send({ message: `Goal ${goalId} not found` });
     }
   });
-
-  async function lockWorkspaceRootOrThrowDetailed(workspaceRoot: string) {
-    return await lockRunWorkspaceRoot(workspaceRoot, runWorkspaceScopePolicy);
-  }
-
-  async function lockWorkspaceRootOrThrow(workspaceRoot: string): Promise<string> {
-    const lockedWorkspace = await lockWorkspaceRootOrThrowDetailed(workspaceRoot);
-    return lockedWorkspace.resolvedRoot;
-  }
 
   function describeWorkspaceScopeError(error: unknown): string {
     if (error instanceof RunWorkspaceScopeError) {

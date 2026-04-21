@@ -971,7 +971,8 @@ async function main(): Promise<void> {
   const app = await buildServer({
     workspaceRoot: rootDir,
     startOrchestrator: false,
-    allowedRunWorkspaceRoots: [rootDir, projectScopeDir]
+    allowedRunWorkspaceRoots: [rootDir, projectScopeDir],
+    allowedProjectRoots: [projectScopeDir]
   });
 
   try {

@@ -22,7 +22,8 @@ import {
 
 async function main(): Promise<void> {
   try {
-    const dataRootGuard = await verifyRuntimeDataRootGuardRejectsMismatchedProjectRoots();
+    const dataRootGuard = await verifyRuntimeDataRootGuardRejectsMismatchedRuntimeLayout();
+    const registryScope = await verifyAttachedProjectRegistryOwnsExecutionScope();
     const persistedScope = await verifyRepairManagedWorkspaceUsesPersistedRunScope();
 
     console.log(
@@ -30,6 +31,7 @@ async function main(): Promise<void> {
         {
           status: "passed",
           data_root_guard: dataRootGuard,
+          registry_scope: registryScope,
           persisted_scope: persistedScope
         },
         null,
@@ -41,29 +43,28 @@ async function main(): Promise<void> {
   }
 }
 
-async function verifyRuntimeDataRootGuardRejectsMismatchedProjectRoots(): Promise<{
+async function verifyRuntimeDataRootGuardRejectsMismatchedRuntimeLayout(): Promise<{
   failure_observed: true;
 }> {
   const baseDir = await createTrackedVerifyTempDir("aisa-project-isolation-guard-");
   const runtimeRepoRoot = join(baseDir, "runtime-repo");
+  const devRepoRootA = join(baseDir, "dev-repo-a");
+  const devRepoRootB = join(baseDir, "dev-repo-b");
   const runtimeDataRoot = join(baseDir, "runtime-data");
   const managedWorkspaceRoot = join(baseDir, ".aisa-run-worktrees");
-  const projectARoot = join(baseDir, "project-a");
-  const projectBRoot = join(baseDir, "project-b");
 
   await createGitRepo(runtimeRepoRoot, "runtime");
+  await createGitRepo(devRepoRootA, "dev-a");
+  await createGitRepo(devRepoRootB, "dev-b");
   await mkdir(runtimeDataRoot, { recursive: true });
   await mkdir(managedWorkspaceRoot, { recursive: true });
-  await mkdir(projectARoot, { recursive: true });
-  await mkdir(projectBRoot, { recursive: true });
 
   const firstApp = await buildServer({
     startOrchestrator: false,
     runtimeRepoRoot,
-    devRepoRoot: runtimeRepoRoot,
+    devRepoRoot: devRepoRootA,
     runtimeDataRoot,
-    managedWorkspaceRoot,
-    allowedProjectRoots: [projectARoot]
+    managedWorkspaceRoot
   });
   await firstApp.close();
 
@@ -72,10 +73,9 @@ async function verifyRuntimeDataRootGuardRejectsMismatchedProjectRoots(): Promis
       buildServer({
         startOrchestrator: false,
         runtimeRepoRoot,
-        devRepoRoot: runtimeRepoRoot,
+        devRepoRoot: devRepoRootB,
         runtimeDataRoot,
-        managedWorkspaceRoot,
-        allowedProjectRoots: [projectBRoot]
+        managedWorkspaceRoot
       }),
     /already claimed by an incompatible runtime workspace policy/u
   );
@@ -83,6 +83,176 @@ async function verifyRuntimeDataRootGuardRejectsMismatchedProjectRoots(): Promis
   return {
     failure_observed: true
   };
+}
+
+async function verifyAttachedProjectRegistryOwnsExecutionScope(): Promise<{
+  attached_project_run_survived_restart: true;
+  unattached_project_blocked: true;
+  live_runtime_workspace_blocked: true;
+}> {
+  const baseDir = await createTrackedVerifyTempDir("aisa-project-isolation-registry-");
+  const runtimeRepoRoot = join(baseDir, "runtime-repo");
+  const devRepoRoot = join(baseDir, "dev-repo");
+  const runtimeDataRoot = join(baseDir, "runtime-data");
+  const managedWorkspaceRoot = join(baseDir, ".aisa-run-worktrees");
+  const projectScopeA = join(baseDir, "project-scope-a");
+  const projectScopeB = join(baseDir, "project-scope-b");
+  const attachedProjectARoot = join(projectScopeA, "attached-project-a");
+  const attachedProjectBRoot = join(projectScopeB, "attached-project-b");
+  const unattachedProjectRoot = join(projectScopeB, "unattached-project");
+
+  await createGitRepo(runtimeRepoRoot, "runtime");
+  await createGitRepo(devRepoRoot, "dev");
+  await createGitRepo(attachedProjectARoot, "attached-a");
+  await createGitRepo(attachedProjectBRoot, "attached-b");
+  await createGitRepo(unattachedProjectRoot, "unattached");
+  await mkdir(runtimeDataRoot, { recursive: true });
+  await mkdir(managedWorkspaceRoot, { recursive: true });
+
+  const firstApp = await buildServer({
+    startOrchestrator: false,
+    runtimeRepoRoot,
+    devRepoRoot,
+    runtimeDataRoot,
+    managedWorkspaceRoot,
+    allowedProjectRoots: [projectScopeA]
+  });
+
+  let attachedProjectId: string;
+  try {
+    const attachProjectAResponse = await firstApp.inject({
+      method: "POST",
+      url: "/projects/attach",
+      payload: {
+        workspace_root: attachedProjectARoot
+      }
+    });
+    assert.equal(attachProjectAResponse.statusCode, 201, attachProjectAResponse.body);
+    attachedProjectId = (attachProjectAResponse.json() as {
+      project: {
+        id: string;
+      };
+    }).project.id;
+  } finally {
+    await firstApp.close();
+  }
+
+  const secondApp = await buildServer({
+    startOrchestrator: false,
+    runtimeRepoRoot,
+    devRepoRoot,
+    runtimeDataRoot,
+    managedWorkspaceRoot,
+    allowedProjectRoots: [projectScopeB]
+  });
+
+  try {
+    const projectsResponse = await secondApp.inject({
+      method: "GET",
+      url: "/projects"
+    });
+    assert.equal(projectsResponse.statusCode, 200, projectsResponse.body);
+    assert.ok(
+      (projectsResponse.json() as {
+        projects: Array<{
+          project: {
+            id: string;
+          };
+        }>;
+      }).projects.some((entry) => entry.project.id === attachedProjectId),
+      "previously attached project should remain visible after restart"
+    );
+
+    const inheritedRunResponse = await secondApp.inject({
+      method: "POST",
+      url: "/runs",
+      payload: {
+        title: "Use attached project registry scope",
+        description: "Previously attached projects should stay runnable even when the attach allowlist changes.",
+        success_criteria: ["create the run"],
+        constraints: [],
+        owner_id: "test-owner",
+        workspace_root: attachedProjectARoot
+      }
+    });
+    assert.equal(inheritedRunResponse.statusCode, 201, inheritedRunResponse.body);
+    assert.equal(
+      (inheritedRunResponse.json() as {
+        run: {
+          workspace_root: string;
+        };
+      }).run.workspace_root,
+      await realpath(attachedProjectARoot)
+    );
+
+    const blockedUnattachedResponse = await secondApp.inject({
+      method: "POST",
+      url: "/runs",
+      payload: {
+        title: "Reject unattached project root",
+        description: "Project attach admission must not leak into ordinary run scope.",
+        success_criteria: ["reject the run"],
+        constraints: [],
+        owner_id: "test-owner",
+        workspace_root: unattachedProjectRoot
+      }
+    });
+    assert.equal(blockedUnattachedResponse.statusCode, 400);
+    assert.match(blockedUnattachedResponse.body, /允许范围/u);
+
+    const attachProjectBResponse = await secondApp.inject({
+      method: "POST",
+      url: "/projects/attach",
+      payload: {
+        workspace_root: attachedProjectBRoot
+      }
+    });
+    assert.equal(attachProjectBResponse.statusCode, 201, attachProjectBResponse.body);
+
+    const defaultRunResponse = await secondApp.inject({
+      method: "POST",
+      url: "/runs",
+      payload: {
+        title: "Default dev run",
+        description: "Ordinary runs should default to the dev repo, not the live runtime repo.",
+        success_criteria: ["create the run"],
+        constraints: [],
+        owner_id: "test-owner"
+      }
+    });
+    assert.equal(defaultRunResponse.statusCode, 201, defaultRunResponse.body);
+    assert.equal(
+      (defaultRunResponse.json() as {
+        run: {
+          workspace_root: string;
+        };
+      }).run.workspace_root,
+      await realpath(devRepoRoot)
+    );
+
+    const runtimeWorkspaceResponse = await secondApp.inject({
+      method: "POST",
+      url: "/runs",
+      payload: {
+        title: "Reject live runtime workspace",
+        description: "Live runtime repo must stay outside ordinary run creation.",
+        success_criteria: ["reject the run"],
+        constraints: [],
+        owner_id: "test-owner",
+        workspace_root: runtimeRepoRoot
+      }
+    });
+    assert.equal(runtimeWorkspaceResponse.statusCode, 400);
+    assert.match(runtimeWorkspaceResponse.body, /允许范围/u);
+
+    return {
+      attached_project_run_survived_restart: true,
+      unattached_project_blocked: true,
+      live_runtime_workspace_blocked: true
+    };
+  } finally {
+    await secondApp.close();
+  }
 }
 
 async function verifyRepairManagedWorkspaceUsesPersistedRunScope(): Promise<{

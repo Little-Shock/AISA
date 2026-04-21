@@ -42,7 +42,8 @@ async function main(): Promise<void> {
     const app = await buildServer({
       runtimeDataRoot,
       workspaceRoot,
-      startOrchestrator: false
+      startOrchestrator: false,
+      allowedProjectRoots: [workspaceRoot]
     });
 
     try {
