@@ -371,7 +371,7 @@ async function readFirstAvailableCommandVersion(
 }
 
 async function readCommandVersion(command: string): Promise<string | null> {
-  const result = await runCommand(command, ["--version"]).catch(() => null);
+  const result = await runCommand(command, getVersionProbeArgs(command)).catch(() => null);
   if (!result || result.exitCode !== 0) {
     return null;
   }
@@ -383,8 +383,12 @@ async function readCommandVersion(command: string): Promise<string | null> {
 }
 
 async function canRunCommand(command: string): Promise<boolean> {
-  const result = await runCommand(command, ["--version"]).catch(() => null);
+  const result = await runCommand(command, getVersionProbeArgs(command)).catch(() => null);
   return Boolean(result && result.exitCode === 0);
+}
+
+function getVersionProbeArgs(command: string): string[] {
+  return command === "go" ? ["version"] : ["--version"];
 }
 
 function parseCommandEntrypoint(command: string): string | null {

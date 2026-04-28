@@ -480,7 +480,7 @@ async function readToolchainSnapshot(
 }
 
 async function readCommandVersion(command: string): Promise<string | null> {
-  const result = await runCommand(command, ["--version"]).catch(() => null);
+  const result = await runCommand(command, getVersionProbeArgs(command)).catch(() => null);
   if (!result || result.exitCode !== 0) {
     return null;
   }
@@ -502,6 +502,10 @@ async function readFirstCommandVersion(
   }
 
   return null;
+}
+
+function getVersionProbeArgs(command: string): string[] {
+  return command === "go" ? ["version"] : ["--version"];
 }
 
 function normalizePackageManager(value: string | undefined): string | null {

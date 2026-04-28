@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { buildServer } from "../apps/control-api/src/index.ts";
 import {
@@ -44,6 +45,12 @@ type AttachedProjectPayload = {
   };
   capability_snapshot: {
     overall_status: string;
+    toolchain: {
+      go: {
+        available: boolean;
+        version: string | null;
+      };
+    };
     launch_readiness: {
       research: {
         status: string;
@@ -137,6 +144,8 @@ type ExternalRepoCaseDefinition = {
   };
   extraProbe?: (app: Awaited<ReturnType<typeof buildServer>>, projectId: string) => Promise<void>;
 };
+
+const HOST_HAS_GO = commandWorks("go", ["version"]);
 
 async function main(): Promise<void> {
   const report = await runSuite();
@@ -243,6 +252,14 @@ async function runSuite(): Promise<ExternalRepoMatrixReport> {
             payload.capability_snapshot.launch_readiness.research.status,
             "ready"
           );
+          if (HOST_HAS_GO) {
+            assert.equal(payload.capability_snapshot.toolchain.go.available, true);
+            assert.match(payload.capability_snapshot.toolchain.go.version ?? "", /^go version /u);
+            assert.equal(
+              payload.capability_snapshot.launch_readiness.execution.status,
+              "ready"
+            );
+          }
           assert.ok(
             payload.execution_contract_preview.done_rubric.some(
               (item) => item.code === "bugfix_boundary_replayed"
@@ -469,6 +486,13 @@ async function runCase(
     failure_mode: probeOutcome.failureMode,
     notes: probeOutcome.notes
   };
+}
+
+function commandWorks(command: string, args: string[]): boolean {
+  const result = spawnSync(command, args, {
+    stdio: "ignore"
+  });
+  return result.status === 0;
 }
 
 main().catch((error) => {

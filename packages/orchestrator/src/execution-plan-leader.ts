@@ -155,8 +155,12 @@ async function runCommand(input: {
 
 function parseLeaderDecision(stdout: string): ExecutionPlanLeaderDecision {
   const parsed = parseJson(stdout, "leader approval output");
-  const decision = parsed?.structured_decision;
-  if (!decision || typeof decision !== "object") {
+  if (!isRecord(parsed)) {
+    throw new Error("Leader approval output must be an object.");
+  }
+
+  const decision = parsed.structured_decision;
+  if (!isRecord(decision)) {
     throw new Error("Leader approval output must contain structured_decision.");
   }
 
@@ -174,9 +178,10 @@ function parseLeaderDecision(stdout: string): ExecutionPlanLeaderDecision {
     throw new Error("Leader approval rationale must be a non-empty string.");
   }
 
-  const followUp = Array.isArray(decision.follow_up)
-    ? decision.follow_up
-        .filter((item): item is string => typeof item === "string")
+  const rawFollowUp = decision.follow_up;
+  const followUp = Array.isArray(rawFollowUp)
+    ? rawFollowUp
+        .filter((item: unknown): item is string => typeof item === "string")
         .map((item) => item.trim())
         .filter((item) => item.length > 0)
     : [];
@@ -188,13 +193,17 @@ function parseLeaderDecision(stdout: string): ExecutionPlanLeaderDecision {
   };
 }
 
-function parseJson(raw: string, label: string): any {
+function parseJson(raw: string, label: string): unknown {
   try {
     return JSON.parse(raw);
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
     throw new Error(`${label} must be valid JSON: ${reason}`);
   }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
 }
 
 function readOptionalEnv(name: string): string | null {
