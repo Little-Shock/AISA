@@ -2569,7 +2569,10 @@ async function assertApprovalRequestMailboxThreadCreated(): Promise<void> {
     workspacePaths,
     new ScenarioAdapter("happy_path") as never,
     undefined,
-    60_000
+    60_000,
+    {
+      executionApprovalMode: "human"
+    }
   );
 
   await settle({

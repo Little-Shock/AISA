@@ -197,6 +197,11 @@ import {
   type ExecutionPlanLeaderAdapter,
   type ExecutionPlanLeaderPacket
 } from "./execution-plan-leader.js";
+import {
+  canCheckpointMitigateDangerousCommand,
+  findDangerousVerificationCommand,
+  type DangerousVerificationCommandFinding
+} from "./dangerous-verification-commands.js";
 
 export type RunRecoveryPath =
   | "first_attempt"
@@ -1107,142 +1112,6 @@ function buildPendingApprovalSummary(proposal: RunPolicyProposal): string {
     : "Attempt plan is waiting for explicit approval.";
 }
 
-type DangerousVerificationCommandFinding = {
-  command: string;
-  rule: "destructive_git_reset" | "destructive_git_checkout" | "destructive_git_clean" | "destructive_rm";
-};
-
-const DANGEROUS_VERIFICATION_COMMAND_PATTERNS: Array<{
-  rule: Exclude<DangerousVerificationCommandFinding["rule"], "destructive_rm">;
-  pattern: RegExp;
-}> = [
-  {
-    rule: "destructive_git_reset",
-    pattern: /(^|[;&|]\s*)git\s+reset\s+--hard(\s|$)/i
-  },
-  {
-    rule: "destructive_git_checkout",
-    pattern: /(^|[;&|]\s*)git\s+checkout\s+--(\s|$)/i
-  },
-  {
-    rule: "destructive_git_clean",
-    pattern: /(^|[;&|]\s*)git\s+clean\s+-[^\n]*f/i
-  }
-];
-
-function findDangerousVerificationCommand(
-  commands: string[]
-): DangerousVerificationCommandFinding | null {
-  for (const command of commands) {
-    const normalized = command.trim().replace(/\s+/g, " ");
-    for (const candidate of DANGEROUS_VERIFICATION_COMMAND_PATTERNS) {
-      if (candidate.pattern.test(normalized)) {
-        return {
-          command: normalized,
-          rule: candidate.rule
-        };
-      }
-    }
-
-    for (const segment of splitShellSegments(normalized)) {
-      if (!isRecursiveForceRmSegment(segment)) continue;
-      if (isReplaySafeTemporaryRmSegment(segment)) continue;
-      return {
-        command: segment,
-        rule: "destructive_rm"
-      };
-    }
-  }
-
-  return null;
-}
-
-function splitShellSegments(command: string): string[] {
-  return command
-    .split(/&&|\|\||[;&]/)
-    .map((segment) => segment.trim())
-    .filter((segment) => segment !== "");
-}
-
-function parseSimpleShellWords(segment: string): string[] | null {
-  const words: string[] = [];
-  let current = "";
-  let quote: "'" | "\"" | null = null;
-
-  const pushCurrent = () => {
-    if (current !== "") {
-      words.push(current);
-      current = "";
-    }
-  };
-
-  for (let index = 0; index < segment.length; index += 1) {
-    const char = segment[index];
-    if (quote) {
-      if (char === quote) {
-        quote = null;
-      } else if (char === "\\") {
-        return null;
-      } else {
-        current += char;
-      }
-      continue;
-    }
-
-    if (char === "'" || char === "\"") {
-      quote = char;
-      continue;
-    }
-    if (char === "\\") return null;
-    if (/\s/.test(char)) {
-      pushCurrent();
-      continue;
-    }
-    current += char;
-  }
-
-  if (quote) return null;
-  pushCurrent();
-  return words;
-}
-
-function isRecursiveForceRmSegment(segment: string): boolean {
-  const words = parseSimpleShellWords(segment);
-  if (!words) {
-    return /^rm\s+/i.test(segment) && /\s-[^\s]*r/i.test(segment) && /\s-[^\s]*f/i.test(segment);
-  }
-  if (!words || words[0] !== "rm") return false;
-
-  const optionTokens = words.slice(1).filter((word) => word.startsWith("-"));
-  return optionTokens.some((word) => {
-    if (word.startsWith("--")) {
-      return word === "--recursive" || word === "--force";
-    }
-    return word.includes("r") && word.includes("f");
-  }) || (
-    optionTokens.some((word) => word === "-r" || word === "-R" || word === "--recursive") &&
-    optionTokens.some((word) => word === "-f" || word === "--force")
-  );
-}
-
-function isReplaySafeTemporaryRmSegment(segment: string): boolean {
-  const words = parseSimpleShellWords(segment);
-  if (!words || words[0] !== "rm") return false;
-  if (!isRecursiveForceRmSegment(segment)) return false;
-
-  const targets = words.slice(1).filter((word) => !word.startsWith("-"));
-  return targets.length > 0 && targets.every(isReplaySafeTemporaryPath);
-}
-
-function isReplaySafeTemporaryPath(target: string): boolean {
-  if (!target.startsWith("/tmp/")) return false;
-  if (target.length <= "/tmp/".length) return false;
-  if (/[$*?[\]{}~`\\!;|&<>]/.test(target)) return false;
-
-  const segments = target.slice("/tmp/".length).split("/");
-  return segments.every((segment) => segment !== "" && segment !== "." && segment !== "..");
-}
-
 function buildDangerousVerificationCommandMessage(input: {
   proposal: RunPolicyProposal;
   finding: DangerousVerificationCommandFinding;
@@ -1250,6 +1119,15 @@ function buildDangerousVerificationCommandMessage(input: {
   return [
     `Execution plan cannot enter approval because runtime replay includes a destructive command: ${input.finding.command}.`,
     "Rewrite the execution contract with replay-safe verification commands before requesting approval."
+  ].join(" ");
+}
+
+function buildDangerousVerificationCheckpointMessage(input: {
+  finding: DangerousVerificationCommandFinding;
+}): string {
+  return [
+    `Runtime replay includes a destructive-but-checkpoint-mitigable command: ${input.finding.command}.`,
+    "AISA will create a git safety checkpoint after execution writes and before replay, then continue without human approval."
   ].join(" ");
 }
 
@@ -2615,6 +2493,28 @@ export class Orchestrator {
     }
   }
 
+  private async persistRunPolicyDangerousCheckpointPlanned(input: {
+    runId: string;
+    proposal: RunPolicyProposal;
+    finding: DangerousVerificationCommandFinding;
+  }): Promise<void> {
+    const sourceRef = this.buildRunPolicySourceRef(
+      input.runId,
+      input.proposal.sourceAttemptId
+    );
+    await this.appendRunPolicyHookEvaluation({
+      runId: input.runId,
+      proposal: input.proposal,
+      hookKey: "dangerous_verification_commands",
+      hookStatus: "passed",
+      message: buildDangerousVerificationCheckpointMessage({
+        finding: input.finding
+      }),
+      evidenceRef: sourceRef,
+      dangerousCommand: input.finding.command
+    });
+  }
+
   private async persistRunPolicyDangerousRuleBlocked(input: {
     runId: string;
     current: CurrentDecision;
@@ -3139,17 +3039,25 @@ export class Orchestrator {
         proposal.verificationCommands
       );
       if (dangerousCommandFinding) {
-        await this.persistRunPolicyDangerousRuleBlocked({
-          runId,
-          current,
-          proposal,
-          message: buildDangerousVerificationCommandMessage({
+        if (canCheckpointMitigateDangerousCommand(dangerousCommandFinding)) {
+          await this.persistRunPolicyDangerousCheckpointPlanned({
+            runId,
             proposal,
             finding: dangerousCommandFinding
-          }),
-          dangerousCommand: dangerousCommandFinding.command
-        });
-        return null;
+          });
+        } else {
+          await this.persistRunPolicyDangerousRuleBlocked({
+            runId,
+            current,
+            proposal,
+            message: buildDangerousVerificationCommandMessage({
+              proposal,
+              finding: dangerousCommandFinding
+            }),
+            dangerousCommand: dangerousCommandFinding.command
+          });
+          return null;
+        }
       }
       if (policyGate.status === "invalid") {
         await this.persistRunPolicyDispatchBlocked({

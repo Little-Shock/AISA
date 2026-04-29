@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { writeFile } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
   createAttempt,
@@ -28,6 +28,7 @@ import {
   appendRunJournal,
   ensureWorkspace,
   getCurrentDecision,
+  getAttemptRuntimeVerification,
   getRunPolicyRuntime,
   listAttempts,
   listRunJournal,
@@ -68,6 +69,10 @@ class PolicyScenarioAdapter {
         `execution by ${input.attempt.id}\n`,
         "utf8"
       );
+      await writePolicyAdversarialVerificationFixture(
+        input.attempt.workspace_root,
+        input.attempt.id
+      );
 
       return {
         writeback: {
@@ -86,6 +91,10 @@ class PolicyScenarioAdapter {
             {
               type: "patch",
               path: "approved-execution.txt"
+            },
+            {
+              type: "test_result",
+              path: "artifacts/adversarial-verification.json"
             }
           ]
         },
@@ -124,6 +133,44 @@ class PolicyScenarioAdapter {
       exitCode: 0
     };
   }
+}
+
+async function writePolicyAdversarialVerificationFixture(
+  workspaceRoot: string,
+  attemptId: string
+): Promise<void> {
+  const artifactDir = join(workspaceRoot, "artifacts");
+  await mkdir(artifactDir, { recursive: true });
+  await writeFile(
+    join(artifactDir, "adversarial-verification.json"),
+    JSON.stringify(
+      {
+        target_surface: "repo",
+        summary: `Policy verification adversarial fixture passed for ${attemptId}.`,
+        verdict: "pass",
+        checks: [
+          {
+            code: "policy_fixture_postflight",
+            status: "passed",
+            message: "Execution left a replayable artifact and postflight evidence."
+          }
+        ],
+        commands: [
+          {
+            purpose: "confirm approved execution artifact",
+            command: "test -f approved-execution.txt",
+            exit_code: 0,
+            status: "passed",
+            output_ref: "approved-execution.txt"
+          }
+        ],
+        output_refs: ["approved-execution.txt"]
+      },
+      null,
+      2
+    ) + "\n",
+    "utf8"
+  );
 }
 
 async function runCommand(rootDir: string, args: string[]): Promise<string> {
@@ -868,15 +915,15 @@ async function verifyApproveAndRejectRequirePendingApproval(): Promise<void> {
   }
 }
 
-async function verifyDangerousVerificationCommandsFailClosed(): Promise<void> {
+async function verifyDangerousVerificationCommandsCheckpointThenAdvance(): Promise<void> {
   const {
     runtimeDataRoot,
     workspaceRoot,
     workspacePaths,
     run
   } = await bootstrapExecutionApprovalRun("dangerous-verification", {
-    verificationPurpose: "dangerous replay that should be blocked",
-    verificationCommand: "git reset --hard HEAD"
+    verificationPurpose: "dangerous replay should reset only to a safety checkpoint",
+    verificationCommand: "git reset --hard HEAD && test -f approved-execution.txt"
   });
   const orchestrator = await createScenarioOrchestrator({
     runtimeDataRoot,
@@ -886,8 +933,13 @@ async function verifyDangerousVerificationCommandsFailClosed(): Promise<void> {
   await driveOrchestratorUntil({
     orchestrator,
     predicate: async () => {
-      const policy = await getRunPolicyRuntime(workspacePaths, run.id);
-      return policy?.last_decision === "dangerous_rule_blocked";
+      const [attempts, current] = await Promise.all([
+        listAttempts(workspacePaths, run.id),
+        getCurrentDecision(workspacePaths, run.id)
+      ]);
+      return attempts.some(
+        (attempt) => attempt.attempt_type === "execution" && attempt.status === "completed"
+      ) && current?.waiting_for_human === false;
     }
   });
 
@@ -897,21 +949,41 @@ async function verifyDangerousVerificationCommandsFailClosed(): Promise<void> {
     readRunPolicyRuntimeStrict(workspacePaths, run.id),
     listRunJournal(workspacePaths, run.id)
   ]);
-  assert.equal(attempts.length, 1, "dangerous replay commands should stop before a new execution attempt is created");
-  assert.equal(current?.waiting_for_human, true);
-  assert.equal(current?.recommended_attempt_type, "research");
-  assert.equal(policy.stage, "approval");
-  assert.equal(policy.approval_status, "rejected");
-  assert.equal(policy.danger_mode, "manual_only");
-  assert.match(policy.blocking_reason ?? "", /destructive command/i);
+  const executionAttempt = attempts.find((attempt) => attempt.attempt_type === "execution");
+  assert.ok(executionAttempt, "dangerous replay should still dispatch execution");
+  const headSubject = await runCommand(executionAttempt.workspace_root, [
+    "git",
+    "-C",
+    executionAttempt.workspace_root,
+    "log",
+    "-1",
+    "--format=%s"
+  ]);
+  assert.equal(executionAttempt.status, "completed");
+  assert.equal(current?.waiting_for_human, false);
+  assert.notEqual(current?.recommended_next_action, "wait_for_human");
+  assert.equal(policy.approval_status, "not_required");
+  assert.notEqual(policy.danger_mode, "manual_only");
+  assert.match(headSubject, /^AISA safety checkpoint:/);
+  const runtimeVerification = await getAttemptRuntimeVerification(
+    workspacePaths,
+    run.id,
+    executionAttempt.id
+  );
+  assert.equal(runtimeVerification?.status, "passed");
+  assert.ok(
+    runtimeVerification?.changed_files.includes("approved-execution.txt"),
+    "safety checkpoint should preserve the execution artifact through destructive replay"
+  );
   assert.ok(
     journal.some(
       (entry) =>
         entry.type === "run.policy.hook_evaluated" &&
-        entry.payload.hook_status === "failed" &&
-        entry.payload.dangerous_command === "git reset --hard HEAD"
+        entry.payload.hook_status === "passed" &&
+        entry.payload.dangerous_command ===
+          "git reset --hard HEAD && test -f approved-execution.txt"
     ),
-    "dangerous replay guard should leave a structured hook event"
+    "dangerous replay guard should record checkpoint-before-advance handling"
   );
 }
 
@@ -994,6 +1066,45 @@ async function verifyUnsafeRmCleanupStillFailsClosed(): Promise<void> {
     assert.equal(policy.last_decision, "dangerous_rule_blocked");
     assert.match(policy.blocking_reason ?? "", /destructive command/i);
   }
+}
+
+async function verifyUncheckpointableGitResetStillFailsClosed(): Promise<void> {
+  const {
+    runtimeDataRoot,
+    workspaceRoot,
+    workspacePaths,
+    run
+  } = await bootstrapExecutionApprovalRun("uncheckpointable-git-reset", {
+    verificationPurpose: "unsafe git reset target must still be blocked",
+    verificationCommand: "git reset --hard HEAD~1 && test -f approved-execution.txt"
+  });
+  const orchestrator = await createScenarioOrchestrator({
+    runtimeDataRoot,
+    workspaceRoot,
+    workspacePaths
+  });
+  await driveOrchestratorUntil({
+    orchestrator,
+    predicate: async () => {
+      const policy = await getRunPolicyRuntime(workspacePaths, run.id);
+      return policy?.last_decision === "dangerous_rule_blocked";
+    }
+  });
+
+  const [attempts, current, policy] = await Promise.all([
+    listAttempts(workspacePaths, run.id),
+    getCurrentDecision(workspacePaths, run.id),
+    readRunPolicyRuntimeStrict(workspacePaths, run.id)
+  ]);
+  assert.equal(
+    attempts.length,
+    1,
+    "uncheckpointable git reset should stop before execution attempt"
+  );
+  assert.equal(current?.waiting_for_human, true);
+  assert.equal(policy.approval_status, "rejected");
+  assert.equal(policy.last_decision, "dangerous_rule_blocked");
+  assert.match(policy.blocking_reason ?? "", /git reset --hard HEAD~1/i);
 }
 
 async function verifyKillswitchRoutesGateLaunch(): Promise<void> {
@@ -1335,8 +1446,8 @@ async function main(): Promise<void> {
       ["reject_route_forces_research_replan", verifyRejectRouteForcesResearchReplan],
       ["approve_and_reject_require_pending", verifyApproveAndRejectRequirePendingApproval],
       [
-        "dangerous_verification_commands_fail_closed",
-        verifyDangerousVerificationCommandsFailClosed
+        "dangerous_verification_commands_checkpoint_then_advance",
+        verifyDangerousVerificationCommandsCheckpointThenAdvance
       ],
       [
         "replay_safe_tmp_cleanup_can_enter_approval",
@@ -1345,6 +1456,10 @@ async function main(): Promise<void> {
       [
         "unsafe_rm_cleanup_still_fails_closed",
         verifyUnsafeRmCleanupStillFailsClosed
+      ],
+      [
+        "uncheckpointable_git_reset_still_fails_closed",
+        verifyUncheckpointableGitResetStillFailsClosed
       ],
       ["killswitch_routes_gate_launch", verifyKillswitchRoutesGateLaunch],
       [

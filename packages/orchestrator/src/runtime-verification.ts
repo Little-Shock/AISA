@@ -28,6 +28,11 @@ import {
 } from "./self-bootstrap-next-task.js";
 import { annotateRuntimeVerificationFailure } from "./failure-policy.js";
 import { getExecutionVerifierKitRegistryEntry } from "./verifier-kit-registry.js";
+import {
+  canCheckpointMitigateDangerousCommand,
+  findDangerousVerificationCommand,
+  type DangerousVerificationCommandFinding
+} from "./dangerous-verification-commands.js";
 
 export interface AttemptRuntimeVerificationOutcome {
   verification: AttemptRuntimeVerification;
@@ -394,12 +399,61 @@ export async function runAttemptRuntimeVerification(input: {
     });
   }
 
+  const commands: VerificationCommand[] = verificationPlan.commands;
+  const dangerousCommandFinding = findDangerousVerificationCommand(
+    commands.map((command) => command.command)
+  );
+  let safetyCheckpointChecks: AttemptPreflightCheck[] = [];
+  if (
+    dangerousCommandFinding &&
+    canCheckpointMitigateDangerousCommand(dangerousCommandFinding)
+  ) {
+    const safetyCheckpoint = await createDangerousVerificationSafetyCheckpoint({
+      run: input.run,
+      attempt: input.attempt,
+      repoRoot,
+      finding: dangerousCommandFinding,
+      changedFiles: gitStatusDelta.changedFiles,
+      preexistingStatusBefore: checkpointPreflight.status_before
+    });
+    safetyCheckpointChecks = safetyCheckpoint.checks;
+    if (!safetyCheckpoint.ok) {
+      const currentGitStatus = await readGitStatus(repoRoot);
+      const currentGitStatusDelta = await buildGitExecutionDelta({
+        repoRoot,
+        statusBefore: checkpointPreflight.status_before,
+        statusAfter: currentGitStatus,
+        headBefore: checkpointPreflight.head_before,
+        headAfter: await readGitHead(repoRoot)
+      });
+
+      return await writeVerificationArtifact(input.attemptPaths, {
+        attempt_id: input.attempt.id,
+        run_id: input.run.id,
+        attempt_type: input.attempt.attempt_type,
+        status: "failed",
+        verifier_kit: verifierKit,
+        repo_root: repoRoot,
+        git_head: await readGitHead(repoRoot),
+        git_status: currentGitStatus,
+        preexisting_git_status: currentGitStatusDelta.preexistingGitStatus,
+        new_git_status: currentGitStatusDelta.newGitStatus,
+        changed_files: currentGitStatusDelta.changedFiles,
+        failure_code: "verification_command_failed",
+        failure_reason: safetyCheckpoint.failureReason,
+        checks: safetyCheckpointChecks,
+        command_results: [],
+        synced_self_bootstrap_artifacts: null,
+        created_at: new Date().toISOString()
+      });
+    }
+  }
+
   const verificationDir = join(input.attemptPaths.artifactsDir, "runtime-verification");
   await mkdir(verificationDir, { recursive: true });
 
   const commandResults: VerificationCommandResult[] = [];
   let syncedSelfBootstrapArtifacts: SyncedSelfBootstrapArtifacts | null = null;
-  const commands = verificationPlan.commands;
 
   for (let index = 0; index < commands.length; index += 1) {
     const command = commands[index]!;
@@ -549,6 +603,7 @@ export async function runAttemptRuntimeVerification(input: {
     finalGitStatusDelta.changedFiles
   );
   const runtimeChecks = [
+    ...safetyCheckpointChecks,
     ...verificationOnlyRecoveryChecks,
     ...runtimeKitAssessment.checks
   ];
@@ -581,7 +636,7 @@ export async function runAttemptRuntimeVerification(input: {
     status: "passed",
     verifier_kit: verifierKit,
     repo_root: repoRoot,
-    git_head: gitHead,
+    git_head: await readGitHead(repoRoot),
     git_status: finalGitStatus,
     preexisting_git_status: finalGitStatusDelta.preexistingGitStatus,
     new_git_status: finalGitStatusDelta.newGitStatus,
@@ -705,6 +760,128 @@ async function writeVerificationArtifact(
   return {
     verification: parsed,
     artifact_path: artifactPath
+  };
+}
+
+type SafetyCheckpointResult =
+  | {
+      ok: true;
+      checks: AttemptPreflightCheck[];
+    }
+  | {
+      ok: false;
+      checks: AttemptPreflightCheck[];
+      failureReason: string;
+    };
+
+async function createDangerousVerificationSafetyCheckpoint(input: {
+  run: Run;
+  attempt: Attempt;
+  repoRoot: string;
+  finding: DangerousVerificationCommandFinding;
+  changedFiles: string[];
+  preexistingStatusBefore: string[];
+}): Promise<SafetyCheckpointResult> {
+  if (input.preexistingStatusBefore.length > 0) {
+    const failureReason = [
+      "Dangerous runtime replay requires a clean preflight baseline before AISA can checkpoint and continue.",
+      `Preexisting changes: ${input.preexistingStatusBefore.slice(0, 5).join("; ")}`
+    ].join(" ");
+    return {
+      ok: false,
+      failureReason,
+      checks: [
+        {
+          code: "dangerous_verification_safety_checkpoint",
+          status: "failed",
+          message: failureReason
+        }
+      ]
+    };
+  }
+
+  if (input.changedFiles.length === 0) {
+    return {
+      ok: true,
+      checks: [
+        {
+          code: "dangerous_verification_safety_checkpoint",
+          status: "not_applicable",
+          message:
+            "Dangerous runtime replay was detected, but there were no git-visible execution changes to checkpoint."
+        }
+      ]
+    };
+  }
+
+  const addResult = await runGit(input.repoRoot, [
+    "add",
+    "-A",
+    "--",
+    ...input.changedFiles
+  ]);
+  if (addResult.exitCode !== 0) {
+    const failureReason =
+      "AISA could not stage execution changes for the safety checkpoint before dangerous runtime replay.";
+    return {
+      ok: false,
+      failureReason,
+      checks: [
+        {
+          code: "dangerous_verification_safety_checkpoint",
+          status: "failed",
+          message: failureReason
+        }
+      ]
+    };
+  }
+
+  const subject = `AISA safety checkpoint: ${input.run.id} ${input.attempt.id}`;
+  const body = [
+    `Run: ${input.run.title}`,
+    `Run ID: ${input.run.id}`,
+    `Attempt ID: ${input.attempt.id}`,
+    `Dangerous replay command: ${input.finding.command}`,
+    `Dangerous replay rule: ${input.finding.rule}`,
+    `Changed files: ${input.changedFiles.join(", ")}`
+  ].join("\n");
+  const commitResult = await runGit(input.repoRoot, [
+    "-c",
+    "user.name=AISA",
+    "-c",
+    "user.email=aisa@local",
+    "commit",
+    "-m",
+    subject,
+    "-m",
+    body
+  ]);
+  if (commitResult.exitCode !== 0) {
+    const failureReason =
+      "AISA could not create the safety checkpoint before dangerous runtime replay.";
+    return {
+      ok: false,
+      failureReason,
+      checks: [
+        {
+          code: "dangerous_verification_safety_checkpoint",
+          status: "failed",
+          message: failureReason
+        }
+      ]
+    };
+  }
+
+  const headAfter = await readGitHead(input.repoRoot);
+  return {
+    ok: true,
+    checks: [
+      {
+        code: "dangerous_verification_safety_checkpoint",
+        status: "passed",
+        message: `Created safety checkpoint ${headAfter ?? "unknown"} before dangerous runtime replay.`
+      }
+    ]
   };
 }
 
