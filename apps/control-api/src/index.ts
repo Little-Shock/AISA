@@ -56,6 +56,7 @@ import {
   readRunWorkingContextView,
   repairRunManagedWorkspace,
   ensureRunManagedWorkspace,
+  getEffectiveRunWorkspaceRoot,
   inspectAttachedProjectWorkspace,
   refreshRunOperatorSurface,
   resolveRuntimeLayout,
@@ -1431,6 +1432,25 @@ export async function buildServer(
     return {
       run,
       attached_project: attachedProjectPayload,
+      workspace_context: {
+        source_workspace_root: run.workspace_root,
+        run_workspace_scope: run.workspace_scope,
+        effective_workspace_root: getEffectiveRunWorkspaceRoot(run),
+        managed_workspace_root: run.managed_workspace_root,
+        latest_attempt_workspace_root: latestAttempt?.workspace_root ?? null,
+        runtime_repo_root: runtimeLayout.runtimeRepoRoot,
+        dev_repo_root: runtimeLayout.devRepoRoot,
+        runtime_data_root: runtimeLayout.runtimeDataRoot,
+        managed_workspace_base_root: runtimeLayout.managedWorkspaceRoot,
+        service_repository_root: runtimeLayout.repositoryRoot,
+        attached_project: attachedProjectPayload
+          ? {
+              project_id: attachedProjectPayload.project.id,
+              workspace_root: attachedProjectPayload.project.workspace_root,
+              repo_root: attachedProjectPayload.project.repo_root
+            }
+          : null
+      },
       current,
       automation: automationView,
       governance,

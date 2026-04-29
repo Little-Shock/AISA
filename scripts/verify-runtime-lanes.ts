@@ -6,9 +6,10 @@ import {
   mkdir,
   readFile,
   realpath,
+  rm,
   writeFile
 } from "node:fs/promises";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import {
   createAttempt,
   createCurrentDecision,
@@ -176,6 +177,7 @@ async function main(): Promise<void> {
 
   try {
     await verifyPersistedRuntimeLayoutHintRestoresSplitLaneWithoutEnv();
+    await verifyTransientSplitLaneHintDoesNotPollutePersistentRuntimeRoot();
     await verifyCorruptRuntimeLayoutHintFailsClosed();
     await verifyManagedWorkspaceFastForwardsToCurrentDevHead();
     await verifyManagedWorkspaceRejectsDirtyStaleBaseline();
@@ -223,6 +225,80 @@ async function verifyPersistedRuntimeLayoutHintRestoresSplitLaneWithoutEnv(): Pr
   assert.equal(resolved.devRepoRoot, layout.devRepoRoot);
   assert.equal(resolved.runtimeDataRoot, layout.runtimeDataRoot);
   assert.equal(resolved.managedWorkspaceRoot, layout.runtimeLayout.managedWorkspaceRoot);
+}
+
+async function verifyTransientSplitLaneHintDoesNotPollutePersistentRuntimeRoot(): Promise<void> {
+  const persistentRuntimeRootPath = join(
+    process.cwd(),
+    "artifacts",
+    `verify-persistent-runtime-layout-${process.pid}-${Date.now()}`
+  );
+  await mkdir(persistentRuntimeRootPath, { recursive: true });
+  const persistentRuntimeRoot = await realpath(persistentRuntimeRootPath);
+  const transientDevRoot = await createTrackedVerifyTempDir(
+    "aisa-runtime-layout-transient-dev-"
+  );
+  const transientRuntimeDataRoot = await createTrackedVerifyTempDir(
+    "aisa-runtime-layout-transient-data-"
+  );
+  const transientManagedWorkspaceRoot = await createTrackedVerifyTempDir(
+    "aisa-runtime-layout-transient-managed-"
+  );
+  const hintPath = join(persistentRuntimeRoot, "artifacts", "runtime-layout.json");
+
+  try {
+    const transientLayout = resolveRuntimeLayout({
+      repositoryRoot: persistentRuntimeRoot,
+      runtimeRepoRoot: persistentRuntimeRoot,
+      devRepoRoot: transientDevRoot,
+      runtimeDataRoot: transientRuntimeDataRoot,
+      managedWorkspaceRoot: transientManagedWorkspaceRoot
+    });
+
+    syncRuntimeLayoutHint(transientLayout);
+    await assertPathMissing(hintPath);
+
+    await mkdir(join(persistentRuntimeRoot, "artifacts"), { recursive: true });
+    await writeFile(
+      hintPath,
+      `${JSON.stringify(
+        {
+          version: 1,
+          runtime_repo_root: transientLayout.runtimeRepoRoot,
+          dev_repo_root: transientLayout.devRepoRoot,
+          runtime_data_root: transientLayout.runtimeDataRoot,
+          managed_workspace_root: transientLayout.managedWorkspaceRoot,
+          written_at: new Date().toISOString()
+        },
+        null,
+        2
+      )}\n`,
+      "utf8"
+    );
+
+    const resolved = resolveRuntimeLayout({
+      repositoryRoot: persistentRuntimeRoot,
+      env: {}
+    });
+    assert.equal(resolved.runtimeRepoRoot, persistentRuntimeRoot);
+    assert.equal(
+      resolved.devRepoRoot,
+      persistentRuntimeRoot,
+      "stale transient dev roots must not be loaded from a persistent runtime hint"
+    );
+    assert.equal(
+      resolved.runtimeDataRoot,
+      persistentRuntimeRoot,
+      "stale transient data roots must not be loaded from a persistent runtime hint"
+    );
+    assert.equal(
+      resolved.managedWorkspaceRoot,
+      resolve(persistentRuntimeRoot, "..", ".aisa-run-worktrees"),
+      "stale transient managed workspace roots must not be loaded from a persistent runtime hint"
+    );
+  } finally {
+    await rm(persistentRuntimeRoot, { recursive: true, force: true });
+  }
 }
 
 async function verifyCorruptRuntimeLayoutHintFailsClosed(): Promise<void> {
@@ -563,6 +639,7 @@ async function verifyControlApiUsesSeparateRuntimeLayout(): Promise<void> {
         dev_repo_root: string;
         runtime_repo_root: string;
         runtime_data_root: string;
+        managed_workspace_root: string;
       };
     };
     assert.equal(healthPayload.execution_adapter.type, "codex");
@@ -571,6 +648,10 @@ async function verifyControlApiUsesSeparateRuntimeLayout(): Promise<void> {
     assert.equal(healthPayload.runtime_layout.dev_repo_root, layout.devRepoRoot);
     assert.equal(healthPayload.runtime_layout.runtime_repo_root, layout.runtimeRepoRoot);
     assert.equal(healthPayload.runtime_layout.runtime_data_root, layout.runtimeDataRoot);
+    assert.equal(
+      healthPayload.runtime_layout.managed_workspace_root,
+      layout.runtimeLayout.managedWorkspaceRoot
+    );
   } finally {
     await app.close();
   }

@@ -231,6 +231,7 @@ async function main(): Promise<void> {
   await mkdir(projectRoot, { recursive: true });
   await mkdir(join(rootDir, "Codex"), { recursive: true });
   const resolvedRootDir = await realpath(rootDir);
+  const resolvedProjectRoot = await realpath(projectRoot);
   const workspacePaths = resolveWorkspacePaths(rootDir);
   await ensureWorkspace(workspacePaths);
   const selfBootstrapSourceAssetContent = `${JSON.stringify(
@@ -1516,6 +1517,8 @@ async function main(): Promise<void> {
         project: {
           id: string;
           title: string;
+          workspace_root: string;
+          repo_root: string;
         };
         recommended_stack_pack: {
           id: string;
@@ -1533,6 +1536,18 @@ async function main(): Promise<void> {
           };
         } | null;
       } | null;
+      workspace_context: {
+        source_workspace_root: string;
+        effective_workspace_root: string;
+        managed_workspace_root: string | null;
+        latest_attempt_workspace_root: string | null;
+        runtime_data_root: string;
+        attached_project: {
+          project_id: string;
+          workspace_root: string;
+          repo_root: string;
+        } | null;
+      };
       recovery_guidance: {
         path: string;
         project_status: string;
@@ -1554,6 +1569,23 @@ async function main(): Promise<void> {
       attachedResearchRunDetail.attached_project?.project.id,
       attachedNodeProject.project.id
     );
+    assert.equal(
+      attachedResearchRunDetail.workspace_context.source_workspace_root,
+      attachedNodeProject.project.workspace_root
+    );
+    assert.equal(
+      attachedResearchRunDetail.workspace_context.effective_workspace_root,
+      attachedNodeProject.project.workspace_root
+    );
+    assert.equal(
+      attachedResearchRunDetail.workspace_context.latest_attempt_workspace_root,
+      null
+    );
+    assert.deepEqual(attachedResearchRunDetail.workspace_context.attached_project, {
+      project_id: attachedNodeProject.project.id,
+      workspace_root: attachedNodeProject.project.workspace_root,
+      repo_root: attachedNodeProject.project.repo_root
+    });
     assert.equal(
       attachedResearchRunDetail.attached_project?.recommended_stack_pack.id,
       "node_backend"
@@ -2851,6 +2883,27 @@ async function main(): Promise<void> {
           };
         };
       };
+      workspace_context: {
+        source_workspace_root: string;
+        run_workspace_scope: {
+          requested_root: string;
+          resolved_root: string;
+          matched_scope_root: string;
+        } | null;
+        effective_workspace_root: string;
+        managed_workspace_root: string | null;
+        latest_attempt_workspace_root: string | null;
+        runtime_repo_root: string;
+        dev_repo_root: string;
+        runtime_data_root: string;
+        managed_workspace_base_root: string;
+        service_repository_root: string;
+        attached_project: {
+          project_id: string;
+          workspace_root: string;
+          repo_root: string;
+        } | null;
+      };
       harness_gates: HarnessGatesPayload;
       harness_slots: HarnessSlotsPayload;
       default_verifier_kit_profile: VerifierKitProfilePayload;
@@ -3426,6 +3479,14 @@ async function main(): Promise<void> {
         "run.auto_resume.blocked"
       ]
     );
+    assert.equal(payload.workspace_context.source_workspace_root, resolvedProjectRoot);
+    assert.equal(payload.workspace_context.effective_workspace_root, resolvedProjectRoot);
+    assert.equal(payload.workspace_context.managed_workspace_root, null);
+    assert.equal(payload.workspace_context.latest_attempt_workspace_root, projectRoot);
+    assert.equal(payload.workspace_context.runtime_repo_root, resolvedRootDir);
+    assert.equal(payload.workspace_context.dev_repo_root, resolvedRootDir);
+    assert.equal(payload.workspace_context.runtime_data_root, resolvedRootDir);
+    assert.equal(payload.workspace_context.attached_project, null);
     assert.equal(payload.run_health.status, "waiting_steer");
     assert.equal(payload.run.harness_profile.execution.effort, "high");
     assert.equal(payload.run.harness_profile.version, 3);

@@ -1,5 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { tmpdir } from "node:os";
+import { isAbsolute, join, relative, resolve } from "node:path";
 
 export interface RuntimeLayout {
   repositoryRoot: string;
@@ -16,6 +17,7 @@ export interface ResolveRuntimeLayoutOptions {
   devRepoRoot?: string;
   runtimeDataRoot?: string;
   managedWorkspaceRoot?: string;
+  allowTransientRuntimeLayoutHint?: boolean;
   env?: NodeJS.ProcessEnv;
 }
 
@@ -23,6 +25,10 @@ export interface RuntimeControlApiPaths {
   packageRoot: string;
   childEntry: string;
   supervisorEntry: string;
+}
+
+export interface SyncRuntimeLayoutHintOptions {
+  allowTransientRoots?: boolean;
 }
 
 type PersistedRuntimeLayoutHint = {
@@ -36,6 +42,8 @@ type PersistedRuntimeLayoutHint = {
 
 const RUNTIME_LAYOUT_HINT_VERSION = 1;
 const RUNTIME_LAYOUT_HINT_RELATIVE_PATH = join("artifacts", "runtime-layout.json");
+const ALLOW_TRANSIENT_RUNTIME_LAYOUT_HINT_ENV =
+  "AISA_ALLOW_TRANSIENT_RUNTIME_LAYOUT_HINT";
 
 export function resolveRuntimeLayout(
   options: ResolveRuntimeLayoutOptions
@@ -51,7 +59,11 @@ export function resolveRuntimeLayout(
       env.AISA_RUNTIME_REPO_ROOT ??
       repositoryRoot
   );
-  const persistedLayoutHint = readRuntimeLayoutHint(runtimeRepoRootHintCandidate);
+  const persistedLayoutHint = readRuntimeLayoutHint(runtimeRepoRootHintCandidate, {
+    allowTransientRoots:
+      options.allowTransientRuntimeLayoutHint ??
+      isTruthyEnv(env[ALLOW_TRANSIENT_RUNTIME_LAYOUT_HINT_ENV])
+  });
   const runtimeRepoRoot = normalizeRoot(
     options.runtimeRepoRoot ??
       unifiedRoot ??
@@ -109,8 +121,11 @@ export function resolveRuntimeControlApiPaths(
   };
 }
 
-export function syncRuntimeLayoutHint(layout: RuntimeLayout): void {
-  if (!shouldPersistRuntimeLayoutHint(layout)) {
+export function syncRuntimeLayoutHint(
+  layout: RuntimeLayout,
+  options: SyncRuntimeLayoutHintOptions = {}
+): void {
+  if (!shouldPersistRuntimeLayoutHint(layout, options)) {
     return;
   }
 
@@ -135,7 +150,10 @@ export function syncRuntimeLayoutHint(layout: RuntimeLayout): void {
 }
 
 function readRuntimeLayoutHint(
-  runtimeRepoRoot: string
+  runtimeRepoRoot: string,
+  options: {
+    allowTransientRoots: boolean;
+  }
 ): {
   runtimeRepoRoot: string;
   devRepoRoot: string;
@@ -186,12 +204,18 @@ function readRuntimeLayoutHint(
     );
   }
 
-  return {
+  const hint = {
     runtimeRepoRoot: normalizedHintRepoRoot,
     devRepoRoot: normalizeRoot(devRepoRoot),
     runtimeDataRoot: normalizeRoot(runtimeDataRoot),
     managedWorkspaceRoot: normalizeRoot(managedWorkspaceRoot)
   };
+
+  if (!options.allowTransientRoots && runtimeLayoutUsesExternalTransientRoots(hint)) {
+    return null;
+  }
+
+  return hint;
 }
 
 function assertHintField(hintPath: string, field: string, value: unknown): string {
@@ -206,12 +230,25 @@ function resolveRuntimeLayoutHintPath(runtimeRepoRoot: string): string {
   return resolve(runtimeRepoRoot, RUNTIME_LAYOUT_HINT_RELATIVE_PATH);
 }
 
-function shouldPersistRuntimeLayoutHint(layout: RuntimeLayout): boolean {
-  return (
+function shouldPersistRuntimeLayoutHint(
+  layout: RuntimeLayout,
+  options: SyncRuntimeLayoutHintOptions
+): boolean {
+  const usesNonDefaultLayout =
     layout.devRepoRoot !== layout.runtimeRepoRoot ||
     layout.runtimeDataRoot !== layout.runtimeRepoRoot ||
-    layout.managedWorkspaceRoot !== resolve(layout.runtimeDataRoot, "..", ".aisa-run-worktrees")
-  );
+    layout.managedWorkspaceRoot !==
+      resolve(layout.runtimeDataRoot, "..", ".aisa-run-worktrees");
+
+  if (!usesNonDefaultLayout) {
+    return false;
+  }
+
+  const allowTransientRoots =
+    options.allowTransientRoots ??
+    isTruthyEnv(process.env[ALLOW_TRANSIENT_RUNTIME_LAYOUT_HINT_ENV]);
+
+  return allowTransientRoots || !runtimeLayoutUsesExternalTransientRoots(layout);
 }
 
 function normalizeRoot(root: string): string {
@@ -221,4 +258,54 @@ function normalizeRoot(root: string): string {
   } catch {
     return resolvedRoot;
   }
+}
+
+function runtimeLayoutUsesExternalTransientRoots(layout: {
+  runtimeRepoRoot: string;
+  devRepoRoot: string;
+  runtimeDataRoot: string;
+  managedWorkspaceRoot: string;
+}): boolean {
+  if (isTransientRootPath(layout.runtimeRepoRoot)) {
+    return false;
+  }
+
+  return [
+    layout.devRepoRoot,
+    layout.runtimeDataRoot,
+    layout.managedWorkspaceRoot
+  ].some((root) => isTransientRootPath(root));
+}
+
+function isTransientRootPath(pathValue: string): boolean {
+  const normalizedPath = normalizeRoot(pathValue);
+  return getTransientRootPrefixes().some((transientRoot) =>
+    isPathInsideRoot(normalizedPath, transientRoot)
+  );
+}
+
+function getTransientRootPrefixes(): string[] {
+  return [
+    tmpdir(),
+    "/tmp",
+    "/private/tmp",
+    "/var/tmp",
+    "/private/var/tmp",
+    "/var/folders",
+    "/private/var/folders"
+  ]
+    .map((root) => normalizeRoot(root))
+    .filter((root, index, roots) => roots.indexOf(root) === index);
+}
+
+function isPathInsideRoot(pathValue: string, root: string): boolean {
+  const relativePath = relative(root, pathValue);
+  return (
+    relativePath === "" ||
+    (!relativePath.startsWith("..") && !isAbsolute(relativePath))
+  );
+}
+
+function isTruthyEnv(value: string | undefined): boolean {
+  return value === "1" || value === "true" || value === "TRUE" || value === "yes";
 }
